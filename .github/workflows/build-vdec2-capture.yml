@@ -1,15 +1,11 @@
 name: build-vdec2-capture
 
-# Builds vdec2_capture for PS4 using the OpenOrbis toolchain.
-# Trigger: push to any branch that touches the homebrew, or run manually
-# from the Actions tab via "Run workflow".
+# Builds vdec2_capture for PS4 and produces an installable .pkg.
 #
-# Output artifacts (downloadable from the run page):
-#   - vdec2_capture-eboot      : the eboot.bin that needs to be wrapped in a .pkg
-#   - vdec2_capture-elf        : the un-signed ELF for inspection / debugging
+# Output artifact: IV0000-SHAD00001_00-VDEC2CAPTURE0000.pkg
+# Install on a jailbroken PS4 via Remote PKG Installer.
 #
-# After download, wrap eboot.bin into a homebrew .pkg with whatever PKG tool
-# you prefer (PkgTool.Core, FPKG creator, etc.) and install on the PS4.
+# Trigger: push touching the homebrew, or run manually from Actions tab.
 
 on:
   push:
@@ -27,101 +23,55 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    env:
-      # OpenOrbis SDK release tag and matching LLVM-version asset.
-      # ubuntu-24.04 ships clang-18 so we pull the LLVM-18 toolchain build.
-      OO_TAG: v0.5.3
-      OO_ASSET: toolchain-llvm-18.2.zip
-      OO_PS4_TOOLCHAIN: ${{ github.workspace }}/.toolchain
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang lld make curl ca-certificates unzip
-
-      - name: Cache OpenOrbis toolchain
-        id: cache-toolchain
-        uses: actions/cache@v4
+      - name: Build .pkg via OpenOrbis toolchain
+        uses: OpenOrbis/toolchain-action@main
         with:
-          path: ${{ env.OO_PS4_TOOLCHAIN }}
-          key: openorbis-${{ env.OO_TAG }}-${{ env.OO_ASSET }}-v3
+          version: latest
+          # The toolchain-action puts the toolchain at $OO_PS4_TOOLCHAIN and
+          # adds bin/linux/ (which contains PkgTool.Core, create-gp4,
+          # create-fself, clang++, ld.lld) to PATH. The action runs the
+          # command in a Linux container so all paths are resolved correctly.
+          #
+          # We probe for the libSceVideodec2 stub before the build so the
+          # Makefile knows whether to add `-lSceVideodec2` or fall back to
+          # `--unresolved-symbols=ignore-all`.
+          command: |
+            if ls "$OO_PS4_TOOLCHAIN/lib/" | grep -iq videodec2; then
+              VDEC2_STUB=present
+            else
+              VDEC2_STUB=absent
+            fi
+            echo "VDEC2_STUB=$VDEC2_STUB"
+            make VDEC2_STUB=$VDEC2_STUB V=1
 
-      - name: Download OpenOrbis toolchain
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: List build artifacts
         run: |
-          set -e
-          mkdir -p "$OO_PS4_TOOLCHAIN" /tmp/oo-extract
-          URL="https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OO_TAG}/${OO_ASSET}"
-          echo "Downloading $URL"
-          curl -fsSL "$URL" -o /tmp/oo.zip
-          ls -la /tmp/oo.zip
-
-          unzip -q /tmp/oo.zip -d /tmp/oo-extract
-          INNER=$(find /tmp/oo-extract -name "*.tar.gz" | head -1)
-          if [ -z "$INNER" ]; then
-            echo "ERROR: no inner tar.gz inside the release zip"
-            find /tmp/oo-extract -maxdepth 3
-            exit 1
-          fi
-          mkdir -p /tmp/oo-toolchain
-          tar -xzf "$INNER" -C /tmp/oo-toolchain
-          LINK_X=$(find /tmp/oo-toolchain -name link.x | head -1)
-          if [ -z "$LINK_X" ]; then
-            echo "ERROR: cannot locate link.x"
-            find /tmp/oo-toolchain -maxdepth 3 | head -40
-            exit 1
-          fi
-          ROOT=$(dirname "$LINK_X")
-          cp -a "$ROOT"/. "$OO_PS4_TOOLCHAIN"/
-          chmod +x "$OO_PS4_TOOLCHAIN/bin/linux/"* 2>/dev/null || true
-          rm -rf /tmp/oo.zip /tmp/oo-extract /tmp/oo-toolchain
-
-      - name: Verify toolchain layout
-        run: |
-          echo "==== Toolchain root ===="
-          ls "$OO_PS4_TOOLCHAIN"
+          echo "==== Working dir ===="
+          ls -la
           echo
-          echo "==== Linux tools ===="
-          ls "$OO_PS4_TOOLCHAIN/bin/linux"
+          echo "==== sce_sys ===="
+          ls -la sce_sys/ 2>/dev/null || echo "(missing)"
           echo
-          echo "==== link.x ===="
-          test -f "$OO_PS4_TOOLCHAIN/link.x" && echo "  OK" || echo "  MISSING"
-          echo
-          echo "==== Library stubs in lib/ (full list) ===="
-          ls "$OO_PS4_TOOLCHAIN/lib/"
-          echo
-          echo "==== Videodec2 stub presence ===="
-          if ls "$OO_PS4_TOOLCHAIN/lib/" | grep -iq videodec2; then
-            ls "$OO_PS4_TOOLCHAIN/lib/" | grep -i videodec2
-            echo "VDEC2_STUB=present" >> "$GITHUB_ENV"
-          else
-            echo "  not present — will rely on runtime resolve"
-            echo "VDEC2_STUB=absent" >> "$GITHUB_ENV"
-          fi
+          echo "==== build ===="
+          ls -la build/ 2>/dev/null || echo "(missing)"
 
-      - name: Build
-        run: |
-          make clean
-          make V=1 VDEC2_STUB=$VDEC2_STUB
-
-      - name: Show build output
-        run: ls -la build/
-
-      - name: Upload eboot.bin
+      - name: Upload .pkg
         uses: actions/upload-artifact@v4
         with:
-          name: vdec2_capture-eboot
-          path: build/eboot.bin
+          name: vdec2_capture-pkg
+          path: '*.pkg'
           if-no-files-found: error
 
-      - name: Upload ELF (for inspection)
+      - name: Upload .gp4 + sce_sys (for inspection)
         uses: actions/upload-artifact@v4
         with:
-          name: vdec2_capture-elf
-          path: build/vdec2_capture.elf
+          name: vdec2_capture-pkg-sources
+          path: |
+            pkg.gp4
+            sce_sys/
+            eboot.bin
           if-no-files-found: warn
