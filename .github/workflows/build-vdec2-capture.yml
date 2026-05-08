@@ -4,6 +4,12 @@ name: build-vdec2-capture
 #
 # Output artifact: IV0000-SHAD00001_00-VDEC2CAPTURE0000.pkg
 # Install on a jailbroken PS4 via Remote PKG Installer.
+#
+# This workflow does NOT use Al-Azif/toolchain-action because that action's
+# Dockerfile pins apt package versions (ca-certificates=20190110ubuntu1.1,
+# curl=7.68.0-1ubuntu2.2) that have since been superseded in the focal repo,
+# making the docker build fail with E: Version 'X' was not found.
+# We do the toolchain setup inline instead.
 
 on:
   push:
@@ -19,33 +25,97 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # ubuntu-22.04: ubuntu-20.04 was retired April 2025; 22.04 is the oldest
+    # still-supported runner. PkgTool.Core in OpenOrbis v0.5.2 is a
+    # self-contained .NET Core 3.1 build linked against libicu.so.66 — that
+    # symlink isn't on 22.04 by default (it has libicu70). We install the
+    # focal libicu66 .deb to satisfy the dependency without pulling in the
+    # whole focal apt repo.
+    runs-on: ubuntu-22.04
+
+    env:
+      OO_TAG: v0.5.2
+      OO_PS4_TOOLCHAIN: ${{ github.workspace }}/.toolchain
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The toolchain-action runs everything inside its own ubuntu:20.04
-      # docker container with OpenOrbis SDK extracted to /lib/OpenOrbisSDK
-      # and bin/linux/ added to PATH. v0.5.2 is the latest OpenOrbis release
-      # that ships the legacy `${tag}.tar.gz` asset that the action's
-      # entrypoint script expects (v0.5.3 broke this by switching to
-      # toolchain-llvm-*.zip).
-      - name: Build .pkg
-        uses: Al-Azif/toolchain-action@main
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang lld make curl tar python3 ca-certificates
+
+      - name: Install libicu66 (required by PkgTool.Core)
+        run: |
+          # PkgTool.Core in v0.5.2 is a .NET Core 3.1 self-contained binary
+          # linked against libicuuc.so.66 / libicui18n.so.66. ubuntu-22.04
+          # ships libicu70 by default. We grab the focal .deb directly.
+          DEB=libicu66_66.1-2ubuntu2.1_amd64.deb
+          curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/i/icu/$DEB" -o /tmp/$DEB
+          sudo dpkg -i /tmp/$DEB
+          rm /tmp/$DEB
+          # Verify the .so files are now present
+          ldconfig -p | grep -E 'libicu(uc|i18n)\.so\.66' | head -4
+
+      - name: Cache OpenOrbis SDK ${{ env.OO_TAG }}
+        id: cache-toolchain
+        uses: actions/cache@v4
         with:
-          version: v0.5.2
-          command: |
-            set -e
-            # Probe libSceVideodec2 stub presence
-            if ls "$OO_PS4_TOOLCHAIN/lib/" 2>/dev/null | grep -iq videodec2; then
-              VDEC2_STUB=present
-            else
-              VDEC2_STUB=absent
-            fi
-            echo "VDEC2_STUB=$VDEC2_STUB"
-            apt-get update -qq && apt-get install -y -qq python3
-            make VDEC2_STUB=$VDEC2_STUB
+          path: ${{ env.OO_PS4_TOOLCHAIN }}
+          key: openorbis-${{ env.OO_TAG }}-tools
+
+      - name: Download and extract OpenOrbis SDK ${{ env.OO_TAG }}
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p "$OO_PS4_TOOLCHAIN"
+          URL="https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OO_TAG}/${OO_TAG}.tar.gz"
+          echo "Downloading $URL"
+          curl -fsSL "$URL" -o /tmp/oo.tar.gz
+          ls -la /tmp/oo.tar.gz
+          # Extract only the dirs we need (bin/data has param.sfo/icon0.png
+          # defaults; bin/linux has all the tools; lib has crt1.o + libs;
+          # include + scripts + link.x complete the toolchain).
+          tar -xzf /tmp/oo.tar.gz -C "$OO_PS4_TOOLCHAIN" \
+            bin/data bin/linux include lib scripts link.x
+          rm /tmp/oo.tar.gz
+
+      - name: Ensure toolchain binaries are executable
+        # Run regardless of cache hit/miss — actions/cache may not preserve
+        # the executable bit reliably across runs/runners.
+        run: chmod +x "$OO_PS4_TOOLCHAIN/bin/linux/"*
+
+      - name: Verify toolchain
+        run: |
+          echo "==== Toolchain root ===="
+          ls "$OO_PS4_TOOLCHAIN"
+          echo
+          echo "==== bin/linux ===="
+          ls -la "$OO_PS4_TOOLCHAIN/bin/linux"
+          echo
+          echo "==== PkgTool.Core dependencies ===="
+          # `ldd` will show any missing .so so we see the problem clearly
+          # if libicu install didn't take. `|| true` so the step doesn't
+          # fail on missing libs — the build step will fail with a clearer
+          # message in that case.
+          ldd "$OO_PS4_TOOLCHAIN/bin/linux/PkgTool.Core" 2>&1 | head -25 || true
+          echo
+          echo "==== PkgTool.Core smoke test ===="
+          "$OO_PS4_TOOLCHAIN/bin/linux/PkgTool.Core" 2>&1 | head -20 || true
+          echo
+          echo "==== libSceVideodec2 stub presence ===="
+          if ls "$OO_PS4_TOOLCHAIN/lib/" | grep -iq videodec2; then
+            ls "$OO_PS4_TOOLCHAIN/lib/" | grep -i videodec2
+            echo "VDEC2_STUB=present" >> "$GITHUB_ENV"
+          else
+            echo "  not present — link will use --unresolved-symbols=ignore-all"
+            echo "VDEC2_STUB=absent" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build .pkg
+        run: make VDEC2_STUB=$VDEC2_STUB
 
       - name: Show build output
         run: |
