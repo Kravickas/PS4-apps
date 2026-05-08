@@ -1,106 +1,144 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// vdec2_capture: PS4 homebrew that calls sceVideodec2QueryDecoderMemoryInfo across
-// a comprehensive grid of decoder configs and writes results to /data/vdec2_capture.json.
+// vdec2_capture: PS4 homebrew that calls sceVideodec2QueryDecoderMemoryInfo
+// across a comprehensive grid of decoder configs and writes results to
+// /data/vdec2_capture.json.
 //
-// Build with OpenOrbis toolchain. Run on jailbroken PS4 (FW 9.00+ recommended).
-// FTP /data/vdec2_capture.json off the console afterward and feed it back to the
-// shadPS4 RE pipeline to derive (or directly bundle) the size formulas.
+// This source is intentionally self-contained — it does NOT include any
+// <orbis/...> headers. The OpenOrbis SDK's Videodec2.h only ships a stub
+// declaration `void sceVideodec2QueryDecoderMemoryInfo();`, so we declare
+// the struct layouts and function prototype ourselves here. The layouts
+// are RE'd from libSceVideodec2.sprx (FW 9.00) and verified against shadPS4.
 //
-// Why this exists:
-//   sceVideodec2QueryDecoderMemoryInfo internally calls sceVdecCoreQueryInstanceSize
-//   (verified via static RE in libSceVideodec2 0x325a, see RE_progress.md). The
-//   formula sub_3e00 -> sub_19240 -> sub_180c0 chain consumes a per-codec internal
-//   cfg with non-trivial layout transformations through sub_1070, plus a per-frame
-//   computation in sub_18b20 that depends on cfg byte fields [+0x4b..+0x56]. The
-//   user-facing-to-internal cfg mapping has not been fully traced.
-//
-//   Rather than continuing speculative formula derivation, this tool captures the
-//   real PS4 outputs directly. The captured dataset can then either:
-//     (a) be used to derive the formula via larger-scale empirical regression, or
-//     (b) be bundled as a lookup table in shadPS4 for byte-perfect values for
-//         configs games actually use.
-//
-// Usage:
-//   1. Build with `make` in this directory (requires OO_PS4_TOOLCHAIN env var)
-//   2. Send the resulting .pkg to PS4 via Remote PKG installer
-//   3. Run from the homebrew menu — the homebrew prints progress and exits when done
-//   4. FTP /data/vdec2_capture.json off the PS4
+// After building and installing the .pkg on a jailbroken PS4:
+//   1. Run from the homebrew menu — exits when complete (~30-90s)
+//   2. FTP /data/vdec2_capture.json off the console
+//   3. Feed it back to the shadPS4 RE pipeline
 
-#include <orbis/libkernel.h>
-#include <orbis/Videodec2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-// Minimal AVC profile/level enumeration matching the JSON dataset structure.
-// Add HEVC/VP9 grids if those codecs are needed.
+// ---------- PS4 system symbols (link against libkernel + libSceVideodec2) ----------
+
+extern "C" int sceKernelDebugOutText(int channel, const char* text);
+
+// ---------- libSceVideodec2 ABI (RE'd, not in OpenOrbis headers) ----------
+//
+// Both structs are exactly 0x48 bytes. The PS4 firmware validates this
+// strictly at libSceVideodec2 0xba1/0xba6 (`cmp [r12], 0x48; jne err`).
+
+struct OrbisVideodec2DecoderConfigInfo {
+    uint64_t thisSize;                 // 0x00 — must be 0x48
+    uint32_t resourceType;             // 0x08
+    uint32_t codecType;                // 0x0c — 1 = AVC
+    uint32_t profile;                  // 0x10
+    uint32_t maxLevel;                 // 0x14
+    int32_t  maxFrameWidth;            // 0x18 — -1 for auto-dim
+    int32_t  maxFrameHeight;           // 0x1c — -1 for auto-dim
+    int32_t  maxDpbFrameCount;         // 0x20
+    uint32_t decodePipelineDepth;      // 0x24
+    void*    computeQueue;             // 0x28
+    uint64_t cpuAffinityMask;          // 0x30
+    int32_t  cpuThreadPriority;        // 0x38
+    uint8_t  optimizeProgressiveVideo; // 0x3c
+    uint8_t  checkMemoryType;          // 0x3d
+    uint8_t  reserved0;                // 0x3e
+    uint8_t  reserved1;                // 0x3f
+    void*    extraConfigInfo;          // 0x40
+};
+static_assert(sizeof(OrbisVideodec2DecoderConfigInfo) == 0x48,
+              "DecoderConfigInfo must be 0x48 bytes");
+
+struct OrbisVideodec2DecoderMemoryInfo {
+    uint64_t thisSize;             // 0x00 — must be 0x48
+    uint64_t cpuMemorySize;        // 0x08
+    void*    cpuMemory;            // 0x10
+    uint64_t gpuMemorySize;        // 0x18
+    void*    gpuMemory;            // 0x20
+    uint64_t cpuGpuMemorySize;     // 0x28
+    void*    cpuGpuMemory;         // 0x30
+    uint64_t maxFrameBufferSize;   // 0x38
+    uint32_t frameBufferAlignment; // 0x40
+    uint32_t reserved0;            // 0x44
+};
+static_assert(sizeof(OrbisVideodec2DecoderMemoryInfo) == 0x48,
+              "DecoderMemoryInfo must be 0x48 bytes");
+
+extern "C" int32_t sceVideodec2QueryDecoderMemoryInfo(
+    const OrbisVideodec2DecoderConfigInfo* decoderConfigInfo,
+    OrbisVideodec2DecoderMemoryInfo* decoderMemoryInfo);
+
+// ---------- Capture grid ----------
+
 struct ConfigCombo {
-    int32_t resourceType;     // 1 = AVC, 0x12384 = HEVC, 0xb6c8 = VP9
-    int32_t codecType;        // 1 for AVC; specific values per codec
-    int32_t profile;          // 66/77/100 for AVC
-    int32_t maxLevel;         // 10..52
-    int32_t maxFrameWidth;    // -1 for auto
-    int32_t maxFrameHeight;   // -1 for auto
-    int32_t maxDpbFrameCount; // 1..16
-    int32_t decodePipelineDepth; // 1..8
-    int32_t optimizeProgressiveVideo; // 0 or 1
+    int32_t resourceType;
+    int32_t codecType;
+    int32_t profile;
+    int32_t maxLevel;
+    int32_t maxFrameWidth;
+    int32_t maxFrameHeight;
+    int32_t maxDpbFrameCount;
+    int32_t decodePipelineDepth;
+    int32_t optimizeProgressiveVideo;
 };
 
-// AVC profiles in canonical PS4 set
 static const int32_t AVC_PROFILES[] = {66, 77, 100};
-// AVC levels matching JSON
 static const int32_t AVC_LEVELS[] = {10, 11, 12, 13, 20, 21, 22, 30, 31, 32,
                                      40, 41, 42, 50, 51, 52};
-// Common (W, H) pairs games actually use
 static const int32_t COMMON_DIMS[][2] = {
-    {-1, -1},     // auto-dim
-    {160, 128},   // PS4 QA test minimum
-    {176, 144},   // QCIF
-    {352, 288},   // CIF
-    {640, 480},   // VGA
-    {720, 480},   // SD-NTSC
-    {720, 576},   // SD-PAL
-    {1280, 720},  // HD720
-    {1920, 1080}, // HD1080  <-- TLOU likely uses this
-    {2560, 1440}, // QHD
-    {3840, 2160}, // 4K
-    {4096, 2160}, // DCI 4K
-    {4096, 2176}, // PS4 4K cap
+    {-1, -1},     // auto-dim: kernel uses 4096x4096 for L=52 else 4096x2176
+    {160, 128},   {176, 144},   {352, 288},   {640, 480},
+    {720, 480},   {720, 576},   {1280, 720},  {1920, 1080},
+    {2560, 1440}, {3840, 2160}, {4096, 2160}, {4096, 2176},
 };
 
-static FILE* g_out = NULL;
+static FILE* g_out = nullptr;
 static int g_count = 0;
+static int g_ok = 0;
+static int g_err = 0;
+
+static void log_msg(const char* msg) {
+    sceKernelDebugOutText(0, msg);
+}
 
 static void emit_entry(const ConfigCombo& c, const OrbisVideodec2DecoderMemoryInfo& m,
                        int32_t status) {
+    if (g_count > 0) {
+        fputs(",\n", g_out);
+    }
+    fputs("  {", g_out);
     if (status != 0) {
-        fprintf(g_out, "  {\"status\": \"error 0x%08x\", \"config\": {", (unsigned)status);
-    } else {
-        fprintf(g_out, "  {\"decoderConfigInfo\": {");
+        fprintf(g_out, "\"status\":\"error 0x%08x\",", (unsigned)status);
     }
     fprintf(g_out,
-            "\"resourceType\": \"%d\", \"codecType\": \"%d\", \"profile\": \"%d\", "
-            "\"maxLevel\": \"%d\", \"maxFrameWidth\": \"%d\", \"maxFrameHeight\": \"%d\", "
-            "\"maxDpbFrameCount\": \"%d\", \"decodePipelineDepth\": \"%d\", "
-            "\"cpuAffinityMask\": \"63\", \"cpuThreadPriority\": \"700\", "
-            "\"optimizeProgressiveVideo\": \"%d\"}",
-            c.resourceType, c.codecType, c.profile, c.maxLevel, c.maxFrameWidth,
-            c.maxFrameHeight, c.maxDpbFrameCount, c.decodePipelineDepth,
-            c.optimizeProgressiveVideo);
+            "\"decoderConfigInfo\":{"
+            "\"resourceType\":\"%d\",\"codecType\":\"%d\","
+            "\"profile\":\"%d\",\"maxLevel\":\"%d\","
+            "\"maxFrameWidth\":\"%d\",\"maxFrameHeight\":\"%d\","
+            "\"maxDpbFrameCount\":\"%d\",\"decodePipelineDepth\":\"%d\","
+            "\"cpuAffinityMask\":\"63\",\"cpuThreadPriority\":\"700\","
+            "\"optimizeProgressiveVideo\":\"%d\"}",
+            c.resourceType, c.codecType, c.profile, c.maxLevel,
+            c.maxFrameWidth, c.maxFrameHeight, c.maxDpbFrameCount,
+            c.decodePipelineDepth, c.optimizeProgressiveVideo);
     if (status == 0) {
         fprintf(g_out,
-                ", \"decoderMemoryInfo\": {\"cpuMemorySize\": \"%lu\", "
-                "\"gpuMemorySize\": \"%lu\", \"cpuGpuMemorySize\": \"%lu\", "
-                "\"maxFrameBufferSize\": \"%lu\", \"frameBufferAlignment\": \"%lu\"}",
-                (unsigned long)m.cpuMemorySize, (unsigned long)m.gpuMemorySize,
-                (unsigned long)m.cpuGpuMemorySize, (unsigned long)m.maxFrameBufferSize,
-                (unsigned long)m.frameBufferAlignment);
+                ",\"decoderMemoryInfo\":{"
+                "\"cpuMemorySize\":\"%llu\","
+                "\"gpuMemorySize\":\"%llu\","
+                "\"cpuGpuMemorySize\":\"%llu\","
+                "\"maxFrameBufferSize\":\"%llu\","
+                "\"frameBufferAlignment\":\"%u\"}",
+                (unsigned long long)m.cpuMemorySize,
+                (unsigned long long)m.gpuMemorySize,
+                (unsigned long long)m.cpuGpuMemorySize,
+                (unsigned long long)m.maxFrameBufferSize,
+                (unsigned)m.frameBufferAlignment);
     }
-    fprintf(g_out, "}%s\n", "");
-    fflush(g_out);
+    fputs("}", g_out);
 }
 
 static void try_one(const ConfigCombo& c) {
@@ -118,36 +156,38 @@ static void try_one(const ConfigCombo& c) {
     cfg.maxFrameHeight = c.maxFrameHeight;
     cfg.maxDpbFrameCount = c.maxDpbFrameCount;
     cfg.decodePipelineDepth = c.decodePipelineDepth;
-    cfg.computeQueue = 0;
+    cfg.computeQueue = nullptr;
     cfg.cpuAffinityMask = 0x3F;
     cfg.cpuThreadPriority = 700;
     cfg.optimizeProgressiveVideo = (uint8_t)c.optimizeProgressiveVideo;
     cfg.checkMemoryType = 0;
-    cfg.extraConfigInfo = NULL;
+    cfg.extraConfigInfo = nullptr;
 
     memInfo.thisSize = sizeof(memInfo);
 
     int32_t r = sceVideodec2QueryDecoderMemoryInfo(&cfg, &memInfo);
-    if (g_count > 0) {
-        fputs(",", g_out);
-    }
     emit_entry(c, memInfo, r);
     ++g_count;
+    if (r == 0) {
+        ++g_ok;
+    } else {
+        ++g_err;
+    }
 }
 
 extern "C" int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    sceKernelDebugOutText(0, "vdec2_capture starting\n");
+    log_msg("vdec2_capture starting\n");
 
     g_out = fopen("/data/vdec2_capture.json", "w");
     if (!g_out) {
-        sceKernelDebugOutText(0, "Failed to open /data/vdec2_capture.json\n");
+        log_msg("Failed to open /data/vdec2_capture.json\n");
         return 1;
     }
 
-    fprintf(g_out, "[\n");
+    fputs("[\n", g_out);
 
     const size_t n_dims = sizeof(COMMON_DIMS) / sizeof(COMMON_DIMS[0]);
     const size_t n_levels = sizeof(AVC_LEVELS) / sizeof(AVC_LEVELS[0]);
@@ -171,11 +211,12 @@ extern "C" int main(int argc, char* argv[]) {
                             c.decodePipelineDepth = pipe;
                             c.optimizeProgressiveVideo = opt;
                             try_one(c);
-                            if ((g_count % 100) == 0) {
-                                char msg[64];
+                            if ((g_count % 200) == 0) {
+                                char msg[80];
                                 snprintf(msg, sizeof(msg),
-                                         "vdec2_capture: %d entries\n", g_count);
-                                sceKernelDebugOutText(0, msg);
+                                         "vdec2_capture: %d/%d ok\n",
+                                         g_ok, g_count);
+                                log_msg(msg);
                             }
                         }
                     }
@@ -184,11 +225,14 @@ extern "C" int main(int argc, char* argv[]) {
         }
     }
 
-    fprintf(g_out, "\n]\n");
+    fputs("\n]\n", g_out);
+    fflush(g_out);
     fclose(g_out);
 
-    char done[80];
-    snprintf(done, sizeof(done), "vdec2_capture: DONE, %d entries written\n", g_count);
-    sceKernelDebugOutText(0, done);
+    char done[120];
+    snprintf(done, sizeof(done),
+             "vdec2_capture: DONE %d/%d ok (%d errors) -> /data/vdec2_capture.json\n",
+             g_ok, g_count, g_err);
+    log_msg(done);
     return 0;
 }

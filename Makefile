@@ -2,17 +2,15 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Build vdec2_capture for PS4 using the OpenOrbis SDK.
-# Requires: OO_PS4_TOOLCHAIN environment variable pointing to OpenOrbis install
-# (e.g. extracted from https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain
-#  releases). The CI workflow downloads it automatically.
+# Requires: OO_PS4_TOOLCHAIN environment variable. The CI workflow handles this.
 #
 # Local build (Linux/WSL/macOS):
 #   export OO_PS4_TOOLCHAIN=/path/to/openorbis
 #   make
 #
 # Output: build/eboot.bin
-# Wrap that into a .pkg with your PKG tool of choice (PkgTool.Core etc.)
-# and install via Remote PKG Installer on a jailbroken PS4.
+# Wrap that into a .pkg with your PKG tool of choice and install via Remote
+# PKG Installer on a jailbroken PS4.
 
 ifndef OO_PS4_TOOLCHAIN
 $(error OO_PS4_TOOLCHAIN environment variable not set)
@@ -20,20 +18,17 @@ endif
 
 # Project
 TARGET    := vdec2_capture
-PROJDIR   := .
 BUILDDIR  := build
 SRCS      := $(TARGET).cpp
 OBJS      := $(SRCS:%.cpp=$(BUILDDIR)/%.o)
 
-# Tools (clang/clang++/lld must be on PATH; ubuntu-latest has them)
+# Tools
 CXX       := clang++
 LD        := ld.lld
 FSELF     := $(OO_PS4_TOOLCHAIN)/bin/linux/create-fself
 
-# PS4 target triple is FreeBSD 12 ELF
 TARGETFLAGS := --target=x86_64-pc-freebsd12-elf
 
-# Compile flags
 CXXFLAGS  := $(TARGETFLAGS) -fPIC -funwind-tables \
              -O2 -ffunction-sections -fdata-sections \
              -fno-rtti -fno-exceptions -std=c++17 \
@@ -43,18 +38,29 @@ CXXFLAGS  := $(TARGETFLAGS) -fPIC -funwind-tables \
              -isystem $(OO_PS4_TOOLCHAIN)/include/c++/v1 \
              -D__PS4__ -D__ORBIS__
 
-# Link flags
 LDFLAGS   := -m elf_x86_64 -pie --eh-frame-hdr --gc-sections \
              --script $(OO_PS4_TOOLCHAIN)/link.x \
              -L$(OO_PS4_TOOLCHAIN)/lib
 
-# PS4 system libraries we link against
-# NOTE: stubs are auto-generated from ps4libdoc; if libSceVideodec2 isn't
-# present in your toolchain version, drop -lSceVideodec2 and the homebrew
-# will pull the symbol weakly via libkernel's loader.
-LIBS      := -lkernel -lc -lc++ -lSceVideodec2
+# Always-required PS4 system libs that ship in OpenOrbis
+LIBS      := -lkernel -lc -lc++
 
-# Verbose mode: invoke with `make V=1`
+# libSceVideodec2 stub may or may not be in the toolchain depending on
+# version. The workflow detects this and sets VDEC2_STUB accordingly:
+#   - VDEC2_STUB=present  -> link with -lSceVideodec2 normally
+#   - VDEC2_STUB=absent   -> resolve sceVideodec2QueryDecoderMemoryInfo at
+#                            runtime; tell the linker to ignore the
+#                            unresolved symbol (PS4 dynamic linker will
+#                            satisfy it via the actual libSceVideodec2.sprx).
+ifeq ($(VDEC2_STUB),present)
+  LIBS += -lSceVideodec2
+else ifeq ($(VDEC2_STUB),absent)
+  LDFLAGS += --unresolved-symbols=ignore-all
+else
+  # Default for local builds: assume present, fail loudly if not
+  LIBS += -lSceVideodec2
+endif
+
 ifeq ($(V),1)
 Q :=
 else
