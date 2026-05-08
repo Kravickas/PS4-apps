@@ -1,0 +1,62 @@
+name: build-vdec2-capture
+
+# Builds vdec2_capture.pkg in CI using the OpenOrbis SDK Docker image.
+# Trigger manually (workflow_dispatch) or on push to main.
+# Download the resulting .pkg from the run's artifacts.
+
+on:
+  push:
+    paths:
+      - 'vdec2_capture.cpp'
+      - 'Makefile'
+      - 'sce_sys/**'
+      - '.github/workflows/build-vdec2-capture.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/openorbis/openorbis:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify toolchain
+        run: |
+          echo "OO_PS4_TOOLCHAIN=$OO_PS4_TOOLCHAIN"
+          ls "$OO_PS4_TOOLCHAIN/bin/linux"
+          which clang++ ld.lld
+
+      - name: Build
+        env:
+          OO_PS4_TOOLCHAIN: /opt/openorbis
+        run: |
+          mkdir -p sce_sys
+          # Generate a minimal param.sfo if you don't ship one:
+          if [ ! -f sce_sys/param.sfo ]; then
+            "$OO_PS4_TOOLCHAIN/bin/linux/create-param" \
+              --title-id SHAD00001 \
+              --title "vdec2 capture" \
+              --version 01.00 \
+              --output sce_sys/param.sfo || true
+          fi
+          make -j$(nproc)
+
+      - name: Show output
+        run: ls -la build/
+
+      - name: Upload .pkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: vdec2_capture-pkg
+          path: build/vdec2_capture.pkg
+          if-no-files-found: error
+
+      - name: Upload eboot for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: vdec2_capture-eboot
+          path: build/eboot.bin
+          if-no-files-found: warn
