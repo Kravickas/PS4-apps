@@ -32,6 +32,8 @@ jobs:
       # ubuntu-24.04 ships clang-18 so we pull the LLVM-18 toolchain build.
       OO_TAG: v0.5.3
       OO_ASSET: toolchain-llvm-18.2.zip
+      # Asset is a zip wrapping a tarball — name of the inner archive:
+      OO_INNER: toolchain-llvm-18.tar.gz
       OO_PS4_TOOLCHAIN: ${{ github.workspace }}/.toolchain
 
     steps:
@@ -49,7 +51,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.OO_PS4_TOOLCHAIN }}
-          key: openorbis-${{ env.OO_TAG }}-${{ env.OO_ASSET }}
+          key: openorbis-${{ env.OO_TAG }}-${{ env.OO_ASSET }}-v2
 
       - name: Download OpenOrbis toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
@@ -60,24 +62,45 @@ jobs:
           echo "Downloading $URL"
           curl -fsSL "$URL" -o /tmp/oo.zip
           ls -la /tmp/oo.zip
+
+          # The release asset is a zip wrapping a tar.gz. Unwrap both layers.
           unzip -q /tmp/oo.zip -d /tmp/oo-extract
-          echo "Extracted layout:"
+          echo "Outer (zip) layout:"
           ls /tmp/oo-extract
-          # The zip may contain a top-level dir like "OpenOrbis/PS4Toolchain"
-          # or extract directly. Find the directory that contains link.x and
-          # use it as the toolchain root.
-          ROOT=$(dirname "$(find /tmp/oo-extract -name link.x | head -1)")
-          if [ -z "$ROOT" ] || [ "$ROOT" = "." ]; then
-            echo "ERROR: cannot locate link.x in extracted toolchain"
-            find /tmp/oo-extract -maxdepth 4 | head -40
+
+          # Find the inner tarball (name may vary slightly by version)
+          INNER=$(find /tmp/oo-extract -name "*.tar.gz" | head -1)
+          if [ -z "$INNER" ]; then
+            echo "ERROR: no inner tar.gz inside the release zip"
+            find /tmp/oo-extract -maxdepth 3
             exit 1
           fi
+          echo "Inner tarball: $INNER"
+
+          # Extract the tarball into a fresh directory so we can find the
+          # toolchain root regardless of whether the tar has a top-level dir.
+          mkdir -p /tmp/oo-toolchain
+          tar -xzf "$INNER" -C /tmp/oo-toolchain
+          echo "Inner (tar) layout:"
+          ls /tmp/oo-toolchain | head -20
+
+          # Locate link.x to identify the toolchain root.
+          LINK_X=$(find /tmp/oo-toolchain -name link.x | head -1)
+          if [ -z "$LINK_X" ]; then
+            echo "ERROR: cannot locate link.x in extracted toolchain"
+            find /tmp/oo-toolchain -maxdepth 3 | head -40
+            exit 1
+          fi
+          ROOT=$(dirname "$LINK_X")
           echo "Toolchain root: $ROOT"
-          # Move contents into the OO_PS4_TOOLCHAIN directory (note the
-          # trailing /. to copy hidden + named entries)
+
+          # Move contents into OO_PS4_TOOLCHAIN. The /. suffix copies hidden
+          # entries too (e.g. .clang-format if any).
           cp -a "$ROOT"/. "$OO_PS4_TOOLCHAIN"/
           chmod +x "$OO_PS4_TOOLCHAIN/bin/linux/"* 2>/dev/null || true
-          rm -rf /tmp/oo.zip /tmp/oo-extract
+
+          # Clean up
+          rm -rf /tmp/oo.zip /tmp/oo-extract /tmp/oo-toolchain
 
       - name: Verify toolchain layout
         run: |
@@ -89,6 +112,9 @@ jobs:
           echo
           echo "Linker script present:"
           test -f "$OO_PS4_TOOLCHAIN/link.x" && echo "  link.x OK"
+          echo
+          echo "crt1 present:"
+          ls "$OO_PS4_TOOLCHAIN/lib/" | grep -i crt1 || echo "  (not found)"
           echo
           echo "libSceVideodec2 stub:"
           ls "$OO_PS4_TOOLCHAIN/lib/" | grep -i videodec || echo "  (not found, will use runtime resolve)"
