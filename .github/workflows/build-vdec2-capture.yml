@@ -4,8 +4,6 @@ name: build-vdec2-capture
 #
 # Output artifact: IV0000-SHAD00001_00-VDEC2CAPTURE0000.pkg
 # Install on a jailbroken PS4 via Remote PKG Installer.
-#
-# Trigger: push touching the homebrew, or run manually from Actions tab.
 
 on:
   push:
@@ -27,37 +25,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build .pkg via OpenOrbis toolchain
-        uses: OpenOrbis/toolchain-action@main
+      # The toolchain-action runs everything inside its own ubuntu:20.04
+      # docker container with OpenOrbis SDK extracted to /lib/OpenOrbisSDK
+      # and bin/linux/ added to PATH. v0.5.2 is the latest OpenOrbis release
+      # that ships the legacy `${tag}.tar.gz` asset that the action's
+      # entrypoint script expects (v0.5.3 broke this by switching to
+      # toolchain-llvm-*.zip).
+      - name: Build .pkg
+        uses: Al-Azif/toolchain-action@main
         with:
-          version: latest
-          # The toolchain-action puts the toolchain at $OO_PS4_TOOLCHAIN and
-          # adds bin/linux/ (which contains PkgTool.Core, create-gp4,
-          # create-fself, clang++, ld.lld) to PATH. The action runs the
-          # command in a Linux container so all paths are resolved correctly.
-          #
-          # We probe for the libSceVideodec2 stub before the build so the
-          # Makefile knows whether to add `-lSceVideodec2` or fall back to
-          # `--unresolved-symbols=ignore-all`.
+          version: v0.5.2
           command: |
-            if ls "$OO_PS4_TOOLCHAIN/lib/" | grep -iq videodec2; then
+            set -e
+            # Probe libSceVideodec2 stub presence
+            if ls "$OO_PS4_TOOLCHAIN/lib/" 2>/dev/null | grep -iq videodec2; then
               VDEC2_STUB=present
             else
               VDEC2_STUB=absent
             fi
             echo "VDEC2_STUB=$VDEC2_STUB"
-            make VDEC2_STUB=$VDEC2_STUB V=1
+            apt-get update -qq && apt-get install -y -qq python3
+            make VDEC2_STUB=$VDEC2_STUB
 
-      - name: List build artifacts
+      - name: Show build output
         run: |
-          echo "==== Working dir ===="
           ls -la
-          echo
-          echo "==== sce_sys ===="
-          ls -la sce_sys/ 2>/dev/null || echo "(missing)"
-          echo
-          echo "==== build ===="
-          ls -la build/ 2>/dev/null || echo "(missing)"
+          echo "---"
+          ls -la sce_sys/ 2>/dev/null || true
 
       - name: Upload .pkg
         uses: actions/upload-artifact@v4
@@ -65,13 +59,3 @@ jobs:
           name: vdec2_capture-pkg
           path: '*.pkg'
           if-no-files-found: error
-
-      - name: Upload .gp4 + sce_sys (for inspection)
-        uses: actions/upload-artifact@v4
-        with:
-          name: vdec2_capture-pkg-sources
-          path: |
-            pkg.gp4
-            sce_sys/
-            eboot.bin
-          if-no-files-found: warn
