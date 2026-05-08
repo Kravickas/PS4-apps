@@ -64,23 +64,43 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.OO_PS4_TOOLCHAIN }}
-          key: openorbis-${{ env.OO_TAG }}-tools
+          key: openorbis-${{ env.OO_TAG }}-tools-v2
 
       - name: Download and extract OpenOrbis SDK ${{ env.OO_TAG }}
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           set -e
-          mkdir -p "$OO_PS4_TOOLCHAIN"
+          mkdir -p "$OO_PS4_TOOLCHAIN" /tmp/oo-extract
           URL="https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OO_TAG}/${OO_TAG}.tar.gz"
           echo "Downloading $URL"
           curl -fsSL "$URL" -o /tmp/oo.tar.gz
           ls -la /tmp/oo.tar.gz
-          # Extract only the dirs we need (bin/data has param.sfo/icon0.png
-          # defaults; bin/linux has all the tools; lib has crt1.o + libs;
-          # include + scripts + link.x complete the toolchain).
-          tar -xzf /tmp/oo.tar.gz -C "$OO_PS4_TOOLCHAIN" \
-            bin/data bin/linux include lib scripts link.x
-          rm /tmp/oo.tar.gz
+
+          # Older Al-Azif action assumed the tarball had bin/, lib/, etc. at
+          # root. Reality varies by release — sometimes it's wrapped in a
+          # top-level directory. Extract everything and find link.x to
+          # locate the actual toolchain root.
+          tar -xzf /tmp/oo.tar.gz -C /tmp/oo-extract
+
+          echo "==== Top-level extracted layout ===="
+          ls /tmp/oo-extract | head -10
+          echo
+
+          LINK_X=$(find /tmp/oo-extract -name link.x -type f | head -1)
+          if [ -z "$LINK_X" ]; then
+            echo "ERROR: link.x not found in extracted tarball"
+            echo "Full tree (first 60 entries):"
+            find /tmp/oo-extract -maxdepth 4 | head -60
+            exit 1
+          fi
+          ROOT=$(dirname "$LINK_X")
+          echo "Toolchain root: $ROOT"
+
+          # Move contents into OO_PS4_TOOLCHAIN. The /. suffix copies
+          # hidden entries too.
+          cp -a "$ROOT"/. "$OO_PS4_TOOLCHAIN"/
+
+          rm -rf /tmp/oo.tar.gz /tmp/oo-extract
 
       - name: Ensure toolchain binaries are executable
         # Run regardless of cache hit/miss — actions/cache may not preserve
