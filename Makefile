@@ -93,7 +93,10 @@ sce_sys/param.sfo: Makefile
 # sce_sys/icon0.png next to the Makefile.
 define GENICON_PY
 import zlib, struct, sys
-w = h = 256
+# PS4 requires icon0.png to be EXACTLY 512x512, 24-bit RGB, no alpha.
+# Reference: OpenOrbis "Building Homebrew" guide. Wrong size -> CE-42262-6
+# at install time.
+w = h = 512
 raw = b"".join(b"\x00" + b"\x33\x66\x99" * w for _ in range(h))
 def chunk(t, d):
     return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
