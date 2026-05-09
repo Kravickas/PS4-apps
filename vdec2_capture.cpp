@@ -5,23 +5,25 @@
 // across a comprehensive grid of decoder configs and writes results to
 // /data/vdec2_capture.json.
 //
+// User feedback while running:
+//   - PS4 toast notification at start ("Starting capture...")
+//   - PS4 toast notification at end with results ("DONE x/y ok ...")
+//   - Live status file at /data/vdec2_capture.status updated every 200
+//     iterations (FTP-pollable in real time)
+//
 // This source is intentionally self-contained — it does NOT include any
 // <orbis/...> headers. The OpenOrbis SDK's Videodec2.h only ships a stub
-// declaration `void sceVideodec2QueryDecoderMemoryInfo();`, so we declare
-// the struct layouts and function prototype ourselves here. The layouts
-// are RE'd from libSceVideodec2.sprx (FW 9.00) and verified against shadPS4.
-//
-// After building and installing the .pkg on a jailbroken PS4:
-//   1. Run from the homebrew menu — exits when complete (~30-90s)
-//   2. FTP /data/vdec2_capture.json off the console
-//   3. Feed it back to the shadPS4 RE pipeline
+// declaration `void sceVideodec2QueryDecoderMemoryInfo();`, so the struct
+// layouts and function prototype are declared inline. Layouts RE'd from
+// libSceVideodec2.sprx (FW 9.00) and verified against shadPS4.
 
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 
-// ---------- PS4 system symbols (link against libkernel + libSceVideodec2) ----------
+// ---------- PS4 system symbols (link against libkernel + libSceVideodec2) --
 
 extern "C" int sceKernelDebugOutText(int channel, const char* text);
 
@@ -71,7 +73,57 @@ extern "C" int32_t sceVideodec2QueryDecoderMemoryInfo(
     const OrbisVideodec2DecoderConfigInfo* decoderConfigInfo,
     OrbisVideodec2DecoderMemoryInfo* decoderMemoryInfo);
 
-// ---------- Capture grid ----------
+// ---------- PS4 toast notification (libkernel) ----------------------------
+//
+// Layout RE'd by OSM-Made/PS4-Notify. Total size must be exactly 0xC30 bytes
+// (3120) — the kernel rejects anything else. Verified by static_assert.
+// Channel 0 = ToastPopup (banner top-right), channel 1 = NotifyDatabase.
+
+#pragma pack(push, 1)
+struct OrbisNotificationRequest {
+    uint32_t type;             // 0x00 — 0 = Message
+    uint32_t reqId;            // 0x04
+    uint32_t priority;         // 0x08 — 0 = Default
+    uint32_t msgId;            // 0x0c
+    uint32_t targetId;         // 0x10 — -1 = all users
+    uint32_t userId;           // 0x14
+    uint32_t deviceId;         // 0x18
+    uint32_t addressingUserId; // 0x1c
+    uint32_t appId;            // 0x20
+    uint32_t errorNumber;      // 0x24
+    uint32_t attribute;        // 0x28 — 0 = no special attrs
+    uint8_t  hasIcon;          // 0x2c
+    char     message[0x400];   // 0x2d (1024 bytes)
+    char     iconImageUri[0x800]; // 0x42d (2048 bytes)
+    char     padding[3];       // 0xc2d — pad to 0xc30
+};
+#pragma pack(pop)
+static_assert(sizeof(OrbisNotificationRequest) == 0xC30,
+              "OrbisNotificationRequest must be exactly 0xC30 bytes");
+
+extern "C" int32_t sceKernelSendNotificationRequest(int32_t api, void* request,
+                                                    size_t size, int32_t blocking);
+
+static void ps4_notify(const char* fmt, ...) {
+    OrbisNotificationRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = 0;        // Message
+    req.targetId = -1;   // all users
+    req.hasIcon = 1;
+    // tex_default_icon_notification = round 'i' speech bubble
+    strncpy(req.iconImageUri,
+            "cxml://psnotification/tex_default_icon_notification",
+            sizeof(req.iconImageUri) - 1);
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(req.message, sizeof(req.message) - 1, fmt, args);
+    va_end(args);
+
+    sceKernelSendNotificationRequest(0 /* ToastPopup */, &req, sizeof(req), 0);
+}
+
+// ---------- Capture grid --------------------------------------------------
 
 struct ConfigCombo {
     int32_t resourceType;
@@ -100,8 +152,19 @@ static int g_count = 0;
 static int g_ok = 0;
 static int g_err = 0;
 
-static void log_msg(const char* msg) {
-    sceKernelDebugOutText(0, msg);
+static void update_status_file(const char* phase) {
+    FILE* sf = fopen("/data/vdec2_capture.status", "w");
+    if (!sf) {
+        return;
+    }
+    fprintf(sf,
+            "phase: %s\n"
+            "processed: %d\n"
+            "ok: %d\n"
+            "errors: %d\n"
+            "output: /data/vdec2_capture.json\n",
+            phase, g_count, g_ok, g_err);
+    fclose(sf);
 }
 
 static void emit_entry(const ConfigCombo& c, const OrbisVideodec2DecoderMemoryInfo& m,
@@ -179,11 +242,15 @@ extern "C" int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    log_msg("vdec2_capture starting\n");
+    sceKernelDebugOutText(0, "vdec2_capture starting\n");
+    ps4_notify("vdec2 capture: starting\nthis takes ~30 seconds");
+    update_status_file("starting");
 
     g_out = fopen("/data/vdec2_capture.json", "w");
     if (!g_out) {
-        log_msg("Failed to open /data/vdec2_capture.json\n");
+        sceKernelDebugOutText(0, "Failed to open /data/vdec2_capture.json\n");
+        ps4_notify("vdec2 capture FAILED:\ncannot open /data/vdec2_capture.json");
+        update_status_file("error: cannot open output file");
         return 1;
     }
 
@@ -211,12 +278,15 @@ extern "C" int main(int argc, char* argv[]) {
                             c.decodePipelineDepth = pipe;
                             c.optimizeProgressiveVideo = opt;
                             try_one(c);
+                            // Update status file every 200 entries so user
+                            // can monitor real-time progress via FTP poll.
                             if ((g_count % 200) == 0) {
+                                update_status_file("running");
                                 char msg[80];
                                 snprintf(msg, sizeof(msg),
                                          "vdec2_capture: %d/%d ok\n",
                                          g_ok, g_count);
-                                log_msg(msg);
+                                sceKernelDebugOutText(0, msg);
                             }
                         }
                     }
@@ -229,10 +299,16 @@ extern "C" int main(int argc, char* argv[]) {
     fflush(g_out);
     fclose(g_out);
 
-    char done[120];
-    snprintf(done, sizeof(done),
+    update_status_file("done");
+
+    char done_log[160];
+    snprintf(done_log, sizeof(done_log),
              "vdec2_capture: DONE %d/%d ok (%d errors) -> /data/vdec2_capture.json\n",
              g_ok, g_count, g_err);
-    log_msg(done);
+    sceKernelDebugOutText(0, done_log);
+
+    ps4_notify("vdec2 capture DONE\n%d/%d ok (%d errors)\nFTP: /data/vdec2_capture.json",
+               g_ok, g_count, g_err);
+
     return 0;
 }
