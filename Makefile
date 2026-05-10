@@ -36,10 +36,13 @@ ifeq ($(UNAME_S),Darwin)
     CDIR    := macos
 endif
 
-CFILES      := $(wildcard *.c)
-CPPFILES    := $(wildcard *.cpp)
-OBJS        := $(patsubst %.c,$(INTDIR)/%.o,$(CFILES)) \
-               $(patsubst %.cpp,$(INTDIR)/%.o,$(CPPFILES))
+# Source file selection — pass SRC=foo.cpp to override the default.
+# For the hello_world pipeline test, run:
+#   make SRC=hello_world.cpp TITLE='Hello World' TITLE_ID=SHAD00099 \
+#     CONTENT_ID=IV0000-SHAD00099_00-PIPELINETEST0000
+SRC         ?= vdec2_capture.cpp
+SRC_BASE    := $(basename $(SRC))
+OBJS        := $(INTDIR)/$(SRC_BASE).o
 
 # libSceVideodec2 stub may not ship in v0.5.2. CI workflow detects this
 # and sets VDEC2_STUB; default for local builds is "absent" since most
@@ -68,10 +71,25 @@ all: $(CONTENT_ID).pkg
 $(CONTENT_ID).pkg: pkg.gp4
 	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core pkg_build $< .
 
-# pkg project file (XML); create-gp4 builds it from the file list
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png
+# pkg project file (XML); create-gp4 builds it from the file list.
+# sce_module/libc.prx is required for any homebrew that imports libc
+# functions (fopen, memset, strncpy, etc.) — without it the launcher reports
+# "corrupted app" because the dynamic linker can't satisfy NEEDED libc.prx.
+# libSceFios2.prx is the matching default file-IO library and is included
+# by every OpenOrbis sample for the same reason.
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png \
+         sce_module/libc.prx sce_module/libSceFios2.prx
 	$(TOOLCHAIN)/bin/$(CDIR)/create-gp4 -out $@ \
 	    --content-id=$(CONTENT_ID) --files "$^"
+
+# Copy the SDK's prebuilt sce_module assets into our pkg tree.
+sce_module/libc.prx:
+	@mkdir -p sce_module
+	cp $(TOOLCHAIN)/bin/data/modules/libc.prx $@
+
+sce_module/libSceFios2.prx:
+	@mkdir -p sce_module
+	cp $(TOOLCHAIN)/bin/data/modules/libSceFios2.prx $@
 
 # param.sfo — built via PkgTool.Core
 sce_sys/param.sfo: Makefile
@@ -111,12 +129,12 @@ sce_sys/icon0.png:
 	@mkdir -p sce_sys
 	python3 -c "$$GENICON_PY" $@
 
-# eboot.bin — link our objects, then sign with create-fself
+# eboot.bin — link our object, then sign with create-fself
 eboot.bin: $(INTDIR) $(OBJS)
-	$(LD) $(INTDIR)/*.o -o $(INTDIR)/$(PROJDIR).elf $(LDFLAGS)
+	$(LD) $(OBJS) -o $(INTDIR)/$(SRC_BASE).elf $(LDFLAGS)
 	$(TOOLCHAIN)/bin/$(CDIR)/create-fself \
-	    -in=$(INTDIR)/$(PROJDIR).elf \
-	    -out=$(INTDIR)/$(PROJDIR).oelf \
+	    -in=$(INTDIR)/$(SRC_BASE).elf \
+	    -out=$(INTDIR)/$(SRC_BASE).oelf \
 	    --eboot "eboot.bin" --paid 0x3800000000000011
 
 $(INTDIR)/%.o: %.c
@@ -130,4 +148,4 @@ $(INTDIR):
 
 clean:
 	rm -f $(CONTENT_ID).pkg pkg.gp4 eboot.bin
-	rm -rf sce_sys $(PROJDIR)
+	rm -rf sce_sys sce_module $(PROJDIR)
