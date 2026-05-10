@@ -15,13 +15,23 @@ on:
   push:
     paths:
       - 'vdec2_capture.cpp'
+      - 'hello_world.cpp'
       - 'Makefile'
       - '.github/workflows/build-vdec2-capture.yml'
   pull_request:
     paths:
       - 'vdec2_capture.cpp'
+      - 'hello_world.cpp'
       - 'Makefile'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Which source to build'
+        type: choice
+        options:
+          - vdec2_capture
+          - hello_world
+        default: vdec2_capture
 
 jobs:
   build:
@@ -135,7 +145,21 @@ jobs:
           fi
 
       - name: Build .pkg
-        run: make VDEC2_STUB=$VDEC2_STUB
+        env:
+          MODE: ${{ inputs.mode || 'vdec2_capture' }}
+        run: |
+          set -e
+          if [ "$MODE" = "hello_world" ]; then
+            echo "==== Building hello_world (pipeline test) ===="
+            make SRC=hello_world.cpp \
+                 TITLE='Hello World' \
+                 TITLE_ID=SHAD00099 \
+                 CONTENT_ID=IV0000-SHAD00099_00-PIPELINETEST0000 \
+                 VDEC2_STUB=$VDEC2_STUB
+          else
+            echo "==== Building vdec2_capture ===="
+            make VDEC2_STUB=$VDEC2_STUB
+          fi
 
       - name: Show build output
         run: |
