@@ -125,6 +125,19 @@ jobs:
           echo "==== bin/linux ===="
           ls -la "$OO_PS4_TOOLCHAIN/bin/linux"
           echo
+          echo "==== Locating .prx files anywhere in toolchain ===="
+          find "$OO_PS4_TOOLCHAIN" -name "*.prx" 2>/dev/null | sort
+          echo
+          echo "==== Locating .sprx files anywhere in toolchain ===="
+          find "$OO_PS4_TOOLCHAIN" -name "*.sprx" 2>/dev/null | sort
+          echo
+          echo "==== bin/data layout ===="
+          if [ -d "$OO_PS4_TOOLCHAIN/bin/data" ]; then
+            find "$OO_PS4_TOOLCHAIN/bin/data" -maxdepth 3 -type f | sort
+          else
+            echo "(bin/data does not exist)"
+          fi
+          echo
           echo "==== PkgTool.Core dependencies ===="
           # `ldd` will show any missing .so so we see the problem clearly
           # if libicu install didn't take. `|| true` so the step doesn't
