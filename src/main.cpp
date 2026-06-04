@@ -12,17 +12,14 @@ typedef int            int32_t;
 typedef unsigned char  uint8_t;
 typedef unsigned long  size_t;
 
-/* PS4 kernel imports - libkernel exports these with C linkage.
-   Guard so this source links whether compiled as C or C++. */
+/* PS4 kernel imports - C linkage guard for C++ compilation */
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 int sceKernelOpen(const char *path, int flags, int mode);
 int64_t sceKernelWrite(int fd, const void *buf, size_t nbyte);
 int sceKernelClose(int fd);
-void sceKernelExitProcess(int status);
-
+void _exit(int status);
 #ifdef __cplusplus
 }
 #endif
@@ -128,7 +125,7 @@ int main(void) {
         fd = sceKernelOpen("jaguar_fp_tables.h", O_FILE_CREATE, 0644);
     }
     if (fd < 0) {
-        sceKernelExitProcess(1);
+        _exit(1);
     }
 
     my_write_str(fd, "// Auto-generated on PS4 (AMD Jaguar)\n");
@@ -161,6 +158,6 @@ int main(void) {
     my_write_str(fd, "};\n\n} // namespace Core\n");
 
     sceKernelClose(fd);
-    sceKernelExitProcess(0);
+    _exit(0);
     return 0;
 }
