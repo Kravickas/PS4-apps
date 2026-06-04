@@ -27,6 +27,11 @@
 
 extern "C" int sceKernelDebugOutText(int channel, const char* text);
 
+// libSceSysmodule: ORBIS_SYSMODULE_VIDEODEC2 (0xCF) must be loaded at runtime
+// before any sceVideodec2* call. Linking -lSceVideodec2 only satisfies the
+// linker; on hardware the sysmodule is not mapped until this is called.
+extern "C" int32_t sceSysmoduleLoadModule(uint16_t id);
+
 // ---------- libSceVideodec2 ABI (RE'd, not in OpenOrbis headers) ----------
 //
 // Both structs are exactly 0x48 bytes. The PS4 firmware validates this
@@ -245,6 +250,17 @@ extern "C" int main(int argc, char* argv[]) {
     sceKernelDebugOutText(0, "vdec2_capture starting\n");
     ps4_notify("vdec2 capture: starting\nthis takes ~30 seconds");
     update_status_file("starting");
+
+    // Load libSceVideodec2 before any sceVideodec2* call, or the first call faults.
+    int32_t lm = sceSysmoduleLoadModule(0x00CF); // ORBIS_SYSMODULE_VIDEODEC2
+    if (lm != 0) {
+        char lb[96];
+        snprintf(lb, sizeof(lb), "videodec2 sysmodule load failed 0x%08x\n", (unsigned)lm);
+        sceKernelDebugOutText(0, lb);
+        ps4_notify("vdec2 capture FAILED:\nsceSysmoduleLoadModule(VIDEODEC2)=0x%08x", (unsigned)lm);
+        update_status_file("error: videodec2 sysmodule load failed");
+        return 1;
+    }
 
     g_out = fopen("/data/vdec2_capture.json", "w");
     if (!g_out) {
