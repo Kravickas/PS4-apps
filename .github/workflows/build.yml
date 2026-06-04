@@ -15,6 +15,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y make curl libicu-dev clang lld
 
+      - name: Install libssl1.1 (PkgTool.Core is .NET Core 3.1 and needs libssl1.1)
+        run: |
+          base="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/"
+          ver="$(curl -s "$base" \
+            | grep -oE 'libssl1\.1_1\.1\.1f-[0-9a-z.~+]+_amd64\.deb' \
+            | sed -E 's/^libssl1\.1_(.*)_amd64\.deb$/\1/' \
+            | sort -V | tail -1)"
+          echo "libssl1.1 version: $ver"
+          curl -sSL -o libssl1.1.deb "${base}libssl1.1_${ver}_amd64.deb"
+          sudo dpkg -i libssl1.1.deb || sudo apt-get install -f -y
+
       - name: Download OpenOrbis toolchain (v0.5.4, LLVM 18)
         run: |
           curl -sSL \
