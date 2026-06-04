@@ -12,11 +12,20 @@ typedef int            int32_t;
 typedef unsigned char  uint8_t;
 typedef unsigned long  size_t;
 
-/* PS4 kernel imports */
+/* PS4 kernel imports - libkernel exports these with C linkage.
+   Guard so this source links whether compiled as C or C++. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int sceKernelOpen(const char *path, int flags, int mode);
 int64_t sceKernelWrite(int fd, const void *buf, size_t nbyte);
 int sceKernelClose(int fd);
 void sceKernelExit(int status);
+
+#ifdef __cplusplus
+}
+#endif
 
 /* O_WRONLY|O_CREAT|O_TRUNC = 0x601 on FreeBSD */
 #define O_FILE_CREATE 0x601
