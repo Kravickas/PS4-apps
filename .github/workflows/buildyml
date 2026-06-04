@@ -1,0 +1,54 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make curl libicu-dev clang lld
+
+      - name: Download OpenOrbis toolchain (v0.5.4, LLVM 18)
+        run: |
+          curl -sSL \
+            https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz \
+            -o oo.tar.gz
+          mkdir -p "$HOME/oo"
+          tar -xzf oo.tar.gz -C "$HOME/oo"
+          # locate the toolchain root (the dir that contains link.x)
+          OO_ROOT="$(dirname "$(find "$HOME/oo" -name link.x | head -1)")"
+          echo "OO_PS4_TOOLCHAIN=$OO_ROOT" >> "$GITHUB_ENV"
+          echo "toolchain root: $OO_ROOT"
+
+      - name: Stage right.sprx (from toolchain) if present
+        run: |
+          mkdir -p sce_sys/about
+          RS="$(find "$OO_PS4_TOOLCHAIN" -name right.sprx | head -1)"
+          if [ -n "$RS" ]; then cp "$RS" sce_sys/about/right.sprx; echo "copied $RS"; else echo "right.sprx not found in toolchain"; fi
+
+      - name: Build
+        run: |
+          # prefer the toolchain's bundled clang/lld; fall back to system
+          CLANG="$(find "$OO_PS4_TOOLCHAIN" -type f -name clang | head -1)"
+          CLANGXX="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'clang++' | head -1)"
+          LLD="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'ld.lld' | head -1)"
+          make \
+            CC="${CLANG:-clang}" \
+            CXX="${CLANGXX:-clang++}" \
+            LD="${LLD:-ld.lld}"
+
+      - name: Upload package + eboot
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew
+          path: |
+            *.pkg
+            eboot.bin
+          if-no-files-found: warn
