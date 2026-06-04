@@ -9,14 +9,18 @@ VERSION     := 01.00
 TITLE_ID    := BREW00001
 CONTENT_ID  := IV0000-BREW00001_00-HOMEBREW00000000
 
-# ---- Libraries linked into the ELF (libc + fios2 are the baseline) ----
-LIBS        := -lc -lkernel -lc++ -lSceLibcInternal -lSceFios2 \
-               -lSceVideoOut -lSceGnmDriver -lScePad -lSceUserService -lSceSystemService
-
 EXTRAFLAGS  :=
 
 # ---- Toolchain / paths (don't usually need to touch) ----
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
+
+# ---- Libraries: link EVERY stub the SDK ships, so you never edit this per symbol.
+#      Core libs are always linked; everything else is --as-needed, so only libs you
+#      actually call become load-time deps (declaring unused modules can fail load).
+CORE_LIBS   := -lc -lkernel -lc++ -lSceLibcInternal
+ALL_STUBS   := $(sort $(patsubst $(TOOLCHAIN)/lib/lib%.so,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.so)) \
+                      $(patsubst $(TOOLCHAIN)/lib/lib%.a,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.a)))
+EXTRA_LIBS  := $(filter-out $(CORE_LIBS),$(ALL_STUBS))
 SRCDIR      := src
 INTDIR      := build
 PROJ        := homebrew
@@ -43,7 +47,8 @@ CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRA
                -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
-               -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
+               -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
+               $(TOOLCHAIN)/lib/crt1.o
 
 all: $(CONTENT_ID).pkg
 
