@@ -1,0 +1,7 @@
+build/
+eboot.bin
+pkg.gp4
+*.pkg
+sce_sys/param.sfo
+*.oelf
+*.elf
