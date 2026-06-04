@@ -21,7 +21,7 @@ extern "C" {
 int sceKernelOpen(const char *path, int flags, int mode);
 int64_t sceKernelWrite(int fd, const void *buf, size_t nbyte);
 int sceKernelClose(int fd);
-void sceKernelExit(int status);
+void sceKernelExitProcess(int status);
 
 #ifdef __cplusplus
 }
@@ -128,7 +128,7 @@ int main(void) {
         fd = sceKernelOpen("jaguar_fp_tables.h", O_FILE_CREATE, 0644);
     }
     if (fd < 0) {
-        sceKernelExit(1);
+        sceKernelExitProcess(1);
     }
 
     my_write_str(fd, "// Auto-generated on PS4 (AMD Jaguar)\n");
@@ -161,6 +161,6 @@ int main(void) {
     my_write_str(fd, "};\n\n} // namespace Core\n");
 
     sceKernelClose(fd);
-    sceKernelExit(0);
+    sceKernelExitProcess(0);
     return 0;
 }
