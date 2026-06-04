@@ -1,171 +1,88 @@
-# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
-# SPDX-License-Identifier: GPL-2.0-or-later
-#
-# Build vdec2_capture for PS4 and produce an installable .pkg.
-# Modelled on OpenOrbis v0.5.2 samples/hello_world/Makefile (canonical
-# reference): https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/blob/v0.5.2/samples/hello_world/Makefile
-#
-# Required env: OO_PS4_TOOLCHAIN (set by Al-Azif/toolchain-action).
-# Tools used (all in $TOOLCHAIN/bin/linux/): create-fself, create-gp4, PkgTool.Core
+# ============================================================================
+#  PS4 homebrew — reusable build (OpenOrbis). Drop source into src/, push.
+#  Edit identity ONCE below; it stays fixed across builds (name / id / icon).
+# ============================================================================
 
-# ---- Project metadata -----------------------------------------------------
-TITLE       := vdec2 capture
+# ---- Package identity (fixed) ----
+TITLE       := Homebrew Template
 VERSION     := 01.00
-TITLE_ID    := SHAD00001
-CONTENT_ID  := IV0000-$(TITLE_ID)_00-VDEC2CAPTURE0000
+TITLE_ID    := BREW00001
+CONTENT_ID  := IV0000-BREW00001_00-HOMEBREW00000000
 
-# Libraries linked into the ELF
-LIBS        := -lc -lkernel -lc++
+# ---- Libraries linked into the ELF (libc + fios2 are the baseline) ----
+LIBS        := -lc -lkernel -lc++ -lSceLibcInternal -lSceFios2 \
+               -lSceVideoOut -lSceGnmDriver -lScePad -lSceUserService -lSceSystemService
 
-# ---- Toolchain plumbing (from OpenOrbis hello_world) ----------------------
+EXTRAFLAGS  :=
+
+# ---- Toolchain / paths (don't usually need to touch) ----
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
-PROJDIR     := $(shell basename $(CURDIR))
-INTDIR      := $(PROJDIR)/x64/Debug
+SRCDIR      := src
+INTDIR      := build
+PROJ        := homebrew
+OUT_ELF     := $(INTDIR)/$(PROJ).elf
+OUT_OELF    := $(INTDIR)/$(PROJ).oelf
 
-UNAME_S     := $(shell uname -s)
-ifeq ($(UNAME_S),Linux)
-    CC      := clang
-    CCX     := clang++
-    LD      := ld.lld
-    CDIR    := linux
-endif
-ifeq ($(UNAME_S),Darwin)
-    CC      := /usr/local/opt/llvm/bin/clang
-    CCX     := /usr/local/opt/llvm/bin/clang++
-    LD      := /usr/local/opt/llvm/bin/ld.lld
-    CDIR    := macos
-endif
+CC          := clang
+CXX         := clang++
+LD          := ld.lld
+PKG         := $(TOOLCHAIN)/bin/linux
 
-# Source file selection — pass SRC=foo.cpp to override the default.
-# For the hello_world pipeline test, run:
-#   make SRC=hello_world.cpp TITLE='Hello World' TITLE_ID=SHAD00099 \
-#     CONTENT_ID=IV0000-SHAD00099_00-PIPELINETEST0000
-SRC         ?= vdec2_capture.cpp
-SRC_BASE    := $(basename $(SRC))
-OBJS        := $(INTDIR)/$(SRC_BASE).o
+# ---- Sources: any .c / .cpp / .s in src/ ----
+CFILES      := $(wildcard $(SRCDIR)/*.c)
+CPPFILES    := $(wildcard $(SRCDIR)/*.cpp)
+SFILES      := $(wildcard $(SRCDIR)/*.s)
+OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
+               $(patsubst $(SRCDIR)/%.cpp,$(INTDIR)/%.o,$(CPPFILES)) \
+               $(patsubst $(SRCDIR)/%.s,$(INTDIR)/%.o,$(SFILES))
 
-# libSceVideodec2 stub may not ship in v0.5.2. CI workflow detects this
-# and sets VDEC2_STUB; default for local builds is "absent" since most
-# OpenOrbis releases predate Videodec2 stub generation.
-ifeq ($(VDEC2_STUB),present)
-    LIBS    += -lSceVideodec2
-endif
+# ---- Bundled .prx/.sprx modules (drop libc.prx / libSceFios2.prx here to ship them) ----
+LIBMODULES  := $(wildcard sce_module/*)
 
-CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c \
-               $(EXTRAFLAGS) -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
-CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1 -std=c++17
+CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) \
+               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
+CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
-ifeq ($(VDEC2_STUB),absent)
-    LDFLAGS += --unresolved-symbols=ignore-all
-endif
-
-_unused     := $(shell mkdir -p $(INTDIR))
-
-# ---- Build rules ----------------------------------------------------------
-.PHONY: all clean
 
 all: $(CONTENT_ID).pkg
 
-# Final pkg
-$(CONTENT_ID).pkg: pkg.gp4
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core pkg_build $< .
+$(INTDIR):
+	mkdir -p $(INTDIR)
 
-# pkg project file (XML); create-gp4 builds it from the file list.
-# sce_module/libc.prx is required for any homebrew that imports libc
-# functions (fopen, memset, strncpy, etc.) — without it the launcher reports
-# "corrupted app" because the dynamic linker can't satisfy NEEDED libc.prx.
-# libSceFios2.prx is the matching default file-IO library and is included
-# by every OpenOrbis sample for the same reason.
-#
-# Different OpenOrbis releases stash the prebuilt PRX files in different
-# locations (bin/data/modules/, lib/, samples/_common/sce_module/, etc.),
-# so we use `find` to locate them at make time rather than hardcoding.
-LIBC_PRX_SRC := $(shell find $(TOOLCHAIN) -name libc.prx -type f 2>/dev/null | head -1)
-LIBFIOS_PRX_SRC := $(shell find $(TOOLCHAIN) -name libSceFios2.prx -type f 2>/dev/null | head -1)
-
-# Build up gp4 dependencies and prx copy rules conditionally on whether the
-# PRX files were located. If they're missing entirely the build still
-# completes (with a warning) so the hello_world pipeline test isn't blocked.
-GP4_DEPS := eboot.bin sce_sys/param.sfo sce_sys/icon0.png
-
-ifneq ($(LIBC_PRX_SRC),)
-GP4_DEPS += sce_module/libc.prx
-sce_module/libc.prx:
-	@mkdir -p sce_module
-	cp $(LIBC_PRX_SRC) $@
-else
-$(warning libc.prx not found in $(TOOLCHAIN) — eboot importing libc will fail at launch with "corrupted app")
-endif
-
-ifneq ($(LIBFIOS_PRX_SRC),)
-GP4_DEPS += sce_module/libSceFios2.prx
-sce_module/libSceFios2.prx:
-	@mkdir -p sce_module
-	cp $(LIBFIOS_PRX_SRC) $@
-else
-$(warning libSceFios2.prx not found in $(TOOLCHAIN) — eboot importing FIOS2 will fail at launch)
-endif
-
-pkg.gp4: $(GP4_DEPS)
-	$(TOOLCHAIN)/bin/$(CDIR)/create-gp4 -out $@ \
-	    --content-id=$(CONTENT_ID) --files "$^"
-
-# param.sfo — built via PkgTool.Core
-sce_sys/param.sfo: Makefile
-	@mkdir -p sce_sys
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_new $@
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ APP_TYPE   --type Integer --maxsize 4   --value 1
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ APP_VER    --type Utf8    --maxsize 8   --value '$(VERSION)'
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ ATTRIBUTE  --type Integer --maxsize 4   --value 0
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ CATEGORY   --type Utf8    --maxsize 4   --value 'gd'
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8    --maxsize 48  --value '$(CONTENT_ID)'
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4   --value 0
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ TITLE      --type Utf8    --maxsize 128 --value '$(TITLE)'
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ TITLE_ID   --type Utf8    --maxsize 12  --value '$(TITLE_ID)'
-	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ VERSION    --type Utf8    --maxsize 8   --value '$(VERSION)'
-
-# Placeholder icon (256x256 solid colour PNG generated inline so we don't
-# ship a binary asset in the repo). Override by dropping a real
-# sce_sys/icon0.png next to the Makefile.
-define GENICON_PY
-import zlib, struct, sys
-# PS4 requires icon0.png to be EXACTLY 512x512, 24-bit RGB, no alpha.
-# Reference: OpenOrbis "Building Homebrew" guide. Wrong size -> CE-42262-6
-# at install time.
-w = h = 512
-raw = b"".join(b"\x00" + b"\x33\x66\x99" * w for _ in range(h))
-def chunk(t, d):
-    return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
-ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-idat = zlib.compress(raw)
-with open(sys.argv[1], "wb") as f:
-    f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
-endef
-export GENICON_PY
-
-sce_sys/icon0.png:
-	@mkdir -p sce_sys
-	python3 -c "$$GENICON_PY" $@
-
-# eboot.bin — link our object, then sign with create-fself
-eboot.bin: $(INTDIR) $(OBJS)
-	$(LD) $(OBJS) -o $(INTDIR)/$(SRC_BASE).elf $(LDFLAGS)
-	$(TOOLCHAIN)/bin/$(CDIR)/create-fself \
-	    -in=$(INTDIR)/$(SRC_BASE).elf \
-	    -out=$(INTDIR)/$(SRC_BASE).oelf \
-	    --eboot "eboot.bin" --paid 0x3800000000000011
-
-$(INTDIR)/%.o: %.c
+$(INTDIR)/%.o: $(SRCDIR)/%.c | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(INTDIR)/%.o: %.cpp
-	$(CCX) $(CXXFLAGS) -o $@ $<
+$(INTDIR)/%.o: $(SRCDIR)/%.cpp | $(INTDIR)
+	$(CXX) $(CXXFLAGS) -o $@ $<
 
-$(INTDIR):
-	@mkdir -p $@
+$(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
+	$(CC) $(CFLAGS) -o $@ $<
+
+eboot.bin: $(OBJS)
+	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3800000000000011
+
+sce_sys/param.sfo: Makefile
+	$(PKG)/PkgTool.Core sfo_new $@
+	$(PKG)/PkgTool.Core sfo_setentry $@ APP_TYPE --type Integer --maxsize 4 --value 1
+	$(PKG)/PkgTool.Core sfo_setentry $@ APP_VER --type Utf8 --maxsize 8 --value '$(VERSION)'
+	$(PKG)/PkgTool.Core sfo_setentry $@ ATTRIBUTE --type Integer --maxsize 4 --value 0
+	$(PKG)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
+	$(PKG)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
+	$(PKG)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
+	$(PKG)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value 0
+	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
+	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
+	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
+
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
+	$(PKG)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
+
+$(CONTENT_ID).pkg: pkg.gp4
+	$(PKG)/PkgTool.Core pkg_build $< .
 
 clean:
-	rm -f $(CONTENT_ID).pkg pkg.gp4 eboot.bin
-	rm -rf sce_sys sce_module $(PROJDIR)
+	rm -rf $(INTDIR) eboot.bin pkg.gp4 sce_sys/param.sfo *.pkg
+
+.PHONY: all clean
