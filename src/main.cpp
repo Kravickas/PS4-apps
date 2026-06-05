@@ -5,28 +5,37 @@
 // shadPS4 currently mishandles (the operation underneath v_cmp_lg_u64 on the
 // RE3/RE4 mask-vs-VCC idiom, and homebrew V_MOV_B32 vN, sM).
 //
-// What it does, on one wave of 64 active lanes (NumThreadX = 64, v0 = lane id):
-//   1. v_cmp_lt_u32  s[8:9], v0, 32   -> SGPR-pair wave mask, bit n = (lane n < 32)
-//   2. v_cmp_lt_u32  vcc,    v0, 32   -> same mask written to VCC
+// One wave of 64 active lanes (NumThreadX = 64; v0 = lane id, since
+// v_thread_cnt defaults to 1 -> TIDIG_COMP_CNT = 0):
+//   1. v_cmp_lt_u32  s[8:9], v0, 48   -> SGPR-pair wave mask, bit n = (lane n < 48)
+//   2. v_cmp_lt_u32  vcc,    v0, 48   -> same mask written to VCC
 //   3. v_mov_b32 v4, s8 / v5, s9      -> read the SGPR mask back AS A VALUE
 //   4. v_mov_b32 v6, vcc_lo / v7, vcc_hi -> read VCC back AS A VALUE
 //   5. store v4..v7 -> dst[0..3]
 //
-// Expected dst on real PS4 (wave64, lanes 0-31 pass, 32-63 fail):
+// Predicate is (lane < 48), not (lane < 32), on purpose: it makes the high
+// dword reveal the wave width as well as exercising the readback.
+//
+//   real PS4 (wave64, lanes 0-47 pass):   lo = FFFFFFFF, hi = 0000FFFF
+//   a wave32 host (only lanes 0-31 exist): lo = FFFFFFFF, hi = 00000000
+//
+// So expected dst on real PS4:
 //   dst[0] = 0xFFFFFFFF  (sgpr mask lo)
-//   dst[1] = 0x00000000  (sgpr mask hi)
+//   dst[1] = 0x0000FFFF  (sgpr mask hi)  <- nonzero high word == wave64
 //   dst[2] = 0xFFFFFFFF  (vcc lo)
-//   dst[3] = 0x00000000  (vcc hi)
+//   dst[3] = 0x0000FFFF  (vcc hi)
 //
 // shadPS4 today: v_mov_b32 reads the *packed* SSA var (plain s8 / VccLoTag),
 // which the v_cmp never wrote (it wrote ThreadBitScalar{8} / VccFlagTag), so
-// the values come back undefined/garbage rather than the mask.
+// the values come back undefined/garbage rather than the mask. Both the SGPR
+// path (dst[0..1]) and the VCC path (dst[2..3]) are exercised because they
+// resolve through different code (GetScalarRegister vs GetVccLo).
 //
 // On a subgroup-64 host (AMD / Steam Deck) the ballot-materialization fix makes
-// these match the PS4 values exactly. On a subgroup-32 host (NVIDIA) the 64-lane
-// wave is split across two 32-wide subgroups, so this test ALSO surfaces the
-// wave64-vs-wave32 grouping difference (the two subgroups race on dst[0]); that
-// is a separate engine-wide property, not the readback bug.
+// these match the PS4 values exactly. On a subgroup-32 host (NVIDIA) the high
+// word reads back 0x00000000 because the wave is genuinely 32 lanes there
+// (the 64-lane PS4 wave is split across two subgroups) -- which this test now
+// makes visible rather than hiding.
 
 static t_cs_shader_test make_cs_mask_readback_test(t_linear_alloc* linear_dmem,
                                                    CmdBuf* cmd_buf) {
@@ -35,20 +44,13 @@ static t_cs_shader_test make_cs_mask_readback_test(t_linear_alloc* linear_dmem,
     t.cmd_buf = cmd_buf;
 
     auto cb_instruction = [](ShaderBuilder* shader) {
-        // one full wave; v0 = thread id x (lane id)
-        shader->NumThreadX = 64;
-        shader->NumThreadY = 1;
-        shader->NumThreadZ = 1;
-        shader->v_thread_cnt = 1;   // enable TIDIG -> v0 holds the lane id
-        shader->sgpr_count = 10;    // s0-3 src V#, s4-7 dst V#, s8-9 mask pair
-
-        // bit n = (lane n < 32) -> 0x00000000_FFFFFFFF on a 64-lane wave
+        // bit n = (lane n < 48) -> 0x0000FFFF_FFFFFFFF on a 64-lane wave
         shader->VOP3c_OP(VOP3_CMP_LT_U32, MAKE_SGPR(8),
-                         MAKE_VGPR(0), MAKE_IMM_INT(32));     // s[8:9]
+                         MAKE_VGPR(0), MAKE_IMM_INT(48));     // s[8:9]
         shader->VOP3c_OP(VOP3_CMP_LT_U32, MAKE_SGPR(VCC_LO),
-                         MAKE_VGPR(0), MAKE_IMM_INT(32));     // vcc
+                         MAKE_VGPR(0), MAKE_IMM_INT(48));     // vcc
 
-        // read both masks back as plain 32-bit values
+        // read both masks back as plain 32-bit values (the mishandled op)
         shader->V_MOV_B32(MAKE_VGPR(4), MAKE_SGPR(8));        // sgpr mask lo
         shader->V_MOV_B32(MAKE_VGPR(5), MAKE_SGPR(9));        // sgpr mask hi
         shader->V_MOV_B32(MAKE_VGPR(6), MAKE_SGPR(VCC_LO));   // vcc lo
@@ -58,6 +60,12 @@ static t_cs_shader_test make_cs_mask_readback_test(t_linear_alloc* linear_dmem,
     // load_op = 0: skip the prologue load (it would clobber v0 = lane id);
     // keep the store epilogue, which writes v4..v7 to the dst V#.
     auto shader = make_cs_shader(0, MUBUF_BUFFER_STORE_FORMAT_XYZW, cb_instruction);
+
+    // one full wave; v_thread_cnt defaults to 1 so v0 = thread id x (lane id).
+    shader->NumThreadX = 64;
+    shader->NumThreadY = 1;
+    shader->NumThreadZ = 1;
+    shader->sgpr_count = 10;   // s0-3 src V#, s4-7 dst V#, s8-9 mask pair
 
     t.shader_ptr = linear_dmem->alloc(shader->GetByteSize(), 256);
     t.regs = shader->ExportCs(t.shader_ptr);
@@ -96,13 +104,14 @@ static t_cs_shader_test make_cs_mask_readback_test(t_linear_alloc* linear_dmem,
     cmd_buf->DispatchDirect(1, 1, 1);
 
     auto on_after = [](t_cs_shader_test* t) {
-        const uint exp[4] = { 0xFFFFFFFF, 0x00000000, 0xFFFFFFFF, 0x00000000 };
+        const uint exp[4] = { 0xFFFFFFFF, 0x0000FFFF, 0xFFFFFFFF, 0x0000FFFF };
         const char* lbl[4] = { "sgpr_mask_lo", "sgpr_mask_hi", "vcc_lo", "vcc_hi" };
-        printf("[mask_readback] wave=64, predicate (lane < 32)\n");
+        printf("[mask_readback] wave=64, predicate (lane < 48)\n");
         for (int i = 0; i < 4; i++) {
             printf("  %-12s = %08x  expected %08x -> %s\n",
                    lbl[i], t->dst[i], exp[i], PASS[t->dst[i] == exp[i]]);
         }
+        printf("  (hi word 0000ffff = 64-lane wave; 00000000 = 32-lane wave)\n");
     };
 
     test_after_action.push_back({ on_after, t });
