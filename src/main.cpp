@@ -14,9 +14,9 @@
 //              and whether the pitch changes for >8-bit
 //
 // User feedback while running:
-//   - PS4 toast at start, at every 10% milestone (with ETA), and at end
+//   - PS4 toast at start, at every 10% milestone, and at end
 //   - Live status file at /data/vdec2_capture.status updated every 200
-//     iterations with phase / processed / total / percent / eta / rate
+//     iterations with phase / processed / total / percent / ok / errors
 //     (FTP-pollable in real time)
 //
 // This source is intentionally self-contained - it does NOT include any
@@ -36,7 +36,6 @@
 // ---------- PS4 system symbols (link against libkernel + libSceVideodec2) --
 
 extern "C" int sceKernelDebugOutText(int channel, const char* text);
-extern "C" uint64_t sceKernelGetProcessTime(void); // microseconds since start
 
 // ---------- libSceVideodec2 ABI (RE'd, not in OpenOrbis headers) ----------
 //
@@ -116,7 +115,10 @@ extern "C" int32_t sceKernelSendNotificationRequest(int32_t api, void* request, 
                                                     int32_t blocking);
 
 static void ps4_notify(const char* fmt, ...) {
-    OrbisNotificationRequest req;
+    // Static (not on the stack): the request is 0xC30 bytes, and ps4_notify is
+    // also called from deep in the capture loop. Single-threaded, so reuse is
+    // safe; the kernel copies the request synchronously on the non-blocking call.
+    static OrbisNotificationRequest req;
     memset(&req, 0, sizeof(req));
     req.type = 0;      // Message
     req.targetId = -1; // all users
@@ -182,7 +184,6 @@ static int g_ok = 0;
 static int g_err = 0;
 static int g_total = 0;
 static int g_next_milestone = 10; // next percent at which to toast
-static uint64_t g_start_us = 0;
 
 static int compute_total() {
     const int n_dims = (int)(sizeof(COMMON_DIMS) / sizeof(COMMON_DIMS[0]));
@@ -203,13 +204,6 @@ static void update_status_file(const char* phase) {
         return;
     }
     int pct = g_total > 0 ? (int)((int64_t)g_count * 100 / g_total) : 0;
-    uint64_t elapsed_us = sceKernelGetProcessTime() - g_start_us;
-    int rate = elapsed_us > 0 ? (int)((int64_t)g_count * 1000000 / elapsed_us) : 0;
-    int eta_s = 0;
-    if (g_count > 0 && g_count < g_total) {
-        uint64_t eta_us = (uint64_t)(g_total - g_count) * elapsed_us / (uint64_t)g_count;
-        eta_s = (int)(eta_us / 1000000);
-    }
     fprintf(sf,
             "phase: %s\n"
             "processed: %d\n"
@@ -217,10 +211,8 @@ static void update_status_file(const char* phase) {
             "percent: %d\n"
             "ok: %d\n"
             "errors: %d\n"
-            "rate_per_s: %d\n"
-            "eta_s: %d\n"
             "output: /data/vdec2_capture.json\n",
-            phase, g_count, g_total, pct, g_ok, g_err, rate, eta_s);
+            phase, g_count, g_total, pct, g_ok, g_err);
     fclose(sf);
 }
 
@@ -266,13 +258,7 @@ static void maybe_progress(const char* phase) {
     }
     int pct = g_total > 0 ? (int)((int64_t)g_count * 100 / g_total) : 0;
     if (pct >= g_next_milestone && g_count < g_total) {
-        uint64_t elapsed_us = sceKernelGetProcessTime() - g_start_us;
-        int eta_s = 0;
-        if (g_count > 0) {
-            uint64_t eta_us = (uint64_t)(g_total - g_count) * elapsed_us / (uint64_t)g_count;
-            eta_s = (int)(eta_us / 1000000);
-        }
-        ps4_notify("vdec2 capture: %d%%\n%d/%d ok, ~%ds left", pct, g_ok, g_count, eta_s);
+        ps4_notify("vdec2 capture: %d%%\n%d/%d ok", pct, g_ok, g_count);
         while (g_next_milestone <= pct) {
             g_next_milestone += 10;
         }
@@ -399,7 +385,6 @@ extern "C" int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    g_start_us = sceKernelGetProcessTime();
     g_total = compute_total();
 
     sceKernelDebugOutText(0, "vdec2_capture starting\n");
