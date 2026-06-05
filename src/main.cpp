@@ -27,30 +27,24 @@ void _exit(int status);
 /* O_WRONLY|O_CREAT|O_TRUNC = 0x601 on FreeBSD */
 #define O_FILE_CREATE 0x601
 
-/* SSE intrinsics via inline asm (no xmmintrin.h dependency) */
+/* SSE via inline asm. Use "x" constraint (XMM reg) so the compiler
+   allocates XMM registers directly -- avoids the movd GPR<->XMM sizing
+   ambiguity that occurs when "r" picks a 64-bit GPR on x86-64. */
 static uint32_t do_rcpss(uint32_t raw) {
+    float fin, fout;
+    __builtin_memcpy(&fin, &raw, 4);
+    __asm__ volatile("rcpss %1, %0" : "=x"(fout) : "x"(fin));
     uint32_t result;
-    __asm__ volatile(
-        "movd %1, %%xmm0\n\t"
-        "rcpss %%xmm0, %%xmm0\n\t"
-        "movd %%xmm0, %0\n\t"
-        : "=r"(result)
-        : "r"(raw)
-        : "xmm0"
-    );
+    __builtin_memcpy(&result, &fout, 4);
     return result;
 }
 
 static uint32_t do_rsqrtss(uint32_t raw) {
+    float fin, fout;
+    __builtin_memcpy(&fin, &raw, 4);
+    __asm__ volatile("rsqrtss %1, %0" : "=x"(fout) : "x"(fin));
     uint32_t result;
-    __asm__ volatile(
-        "movd %1, %%xmm0\n\t"
-        "rsqrtss %%xmm0, %%xmm0\n\t"
-        "movd %%xmm0, %0\n\t"
-        : "=r"(result)
-        : "r"(raw)
-        : "xmm0"
-    );
+    __builtin_memcpy(&result, &fout, 4);
     return result;
 }
 
