@@ -1,381 +1,265 @@
-// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-// vdec2_capture: PS4 homebrew that calls sceVideodec2QueryDecoderMemoryInfo
-// across a comprehensive grid of decoder configs and writes results to
-// /data/vdec2_capture.json.
-//
-// User feedback while running:
-//   - PS4 toast notification at start ("Starting capture...")
-//   - PS4 toast notification at end with results ("DONE x/y ok ...")
-//   - Live status file at /data/vdec2_capture.status updated every 200
-//     iterations (FTP-pollable in real time)
-//
-// This source is intentionally self-contained — it does NOT include any
-// <orbis/...> headers. The OpenOrbis SDK's Videodec2.h only ships a stub
-// declaration `void sceVideodec2QueryDecoderMemoryInfo();`, so the struct
-// layouts and function prototype are declared inline. Layouts RE'd from
-// libSceVideodec2.sprx (FW 9.00) and verified against shadPS4.
-
-#include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "pm4.h"
 
-// ---------- PS4 system symbols (link against libkernel + libSceVideodec2) --
-
-extern "C" int sceKernelDebugOutText(int channel, const char* text);
-
-// ---------- libSceVideodec2 ABI (RE'd, not in OpenOrbis headers) ----------
-//
-// Both structs are exactly 0x48 bytes. The PS4 firmware validates this
-// strictly at libSceVideodec2 0xba1/0xba6 (`cmp [r12], 0x48; jne err`).
-
-struct OrbisVideodec2DecoderConfigInfo {
-    uint64_t thisSize;                 // 0x00 — must be 0x48
-    uint32_t resourceType;             // 0x08
-    uint32_t codecType;                // 0x0c — 1 = AVC
-    uint32_t profile;                  // 0x10
-    uint32_t maxLevel;                 // 0x14
-    int32_t  maxFrameWidth;            // 0x18 — -1 for auto-dim
-    int32_t  maxFrameHeight;           // 0x1c — -1 for auto-dim
-    int32_t  maxDpbFrameCount;         // 0x20
-    uint32_t decodePipelineDepth;      // 0x24
-    void*    computeQueue;             // 0x28
-    uint64_t cpuAffinityMask;          // 0x30
-    int32_t  cpuThreadPriority;        // 0x38
-    uint8_t  optimizeProgressiveVideo; // 0x3c
-    uint8_t  checkMemoryType;          // 0x3d
-    uint8_t  reserved0;                // 0x3e
-    uint8_t  reserved1;                // 0x3f
-    void*    extraConfigInfo;          // 0x40
-};
-static_assert(sizeof(OrbisVideodec2DecoderConfigInfo) == 0x48,
-              "DecoderConfigInfo must be 0x48 bytes");
-
-struct OrbisVideodec2DecoderMemoryInfo {
-    uint64_t thisSize;             // 0x00 — must be 0x48
-    uint64_t cpuMemorySize;        // 0x08
-    void*    cpuMemory;            // 0x10
-    uint64_t gpuMemorySize;        // 0x18
-    void*    gpuMemory;            // 0x20
-    uint64_t cpuGpuMemorySize;     // 0x28
-    void*    cpuGpuMemory;         // 0x30
-    uint64_t maxFrameBufferSize;   // 0x38
-    uint32_t frameBufferAlignment; // 0x40
-    uint32_t reserved0;            // 0x44
-};
-static_assert(sizeof(OrbisVideodec2DecoderMemoryInfo) == 0x48,
-              "DecoderMemoryInfo must be 0x48 bytes");
-
-extern "C" int32_t sceVideodec2QueryDecoderMemoryInfo(
-    const OrbisVideodec2DecoderConfigInfo* decoderConfigInfo,
-    OrbisVideodec2DecoderMemoryInfo* decoderMemoryInfo);
-
-// ---------- PS4 toast notification (libkernel) ----------------------------
-//
-// Layout RE'd by OSM-Made/PS4-Notify. Total size must be exactly 0xC30 bytes
-// (3120) — the kernel rejects anything else. Verified by static_assert.
-// Channel 0 = ToastPopup (banner top-right), channel 1 = NotifyDatabase.
-
-#pragma pack(push, 1)
-struct OrbisNotificationRequest {
-    uint32_t type;             // 0x00 — 0 = Message
-    uint32_t reqId;            // 0x04
-    uint32_t priority;         // 0x08 — 0 = Default
-    uint32_t msgId;            // 0x0c
-    uint32_t targetId;         // 0x10 — -1 = all users
-    uint32_t userId;           // 0x14
-    uint32_t deviceId;         // 0x18
-    uint32_t addressingUserId; // 0x1c
-    uint32_t appId;            // 0x20
-    uint32_t errorNumber;      // 0x24
-    uint32_t attribute;        // 0x28 — 0 = no special attrs
-    uint8_t  hasIcon;          // 0x2c
-    char     message[0x400];   // 0x2d (1024 bytes)
-    char     iconImageUri[0x800]; // 0x42d (2048 bytes)
-    char     padding[3];       // 0xc2d — pad to 0xc30
-};
-#pragma pack(pop)
-static_assert(sizeof(OrbisNotificationRequest) == 0xC30,
-              "OrbisNotificationRequest must be exactly 0xC30 bytes");
-
-extern "C" int32_t sceKernelSendNotificationRequest(int32_t api, void* request,
-                                                    size_t size, int32_t blocking);
-
-static void ps4_notify(const char* fmt, ...) {
-    OrbisNotificationRequest req;
-    memset(&req, 0, sizeof(req));
-    req.type = 0;        // Message
-    req.targetId = -1;   // all users
-    req.hasIcon = 1;
-    // tex_default_icon_notification = round 'i' speech bubble
-    strncpy(req.iconImageUri,
-            "cxml://psnotification/tex_default_icon_notification",
-            sizeof(req.iconImageUri) - 1);
-
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(req.message, sizeof(req.message) - 1, fmt, args);
-    va_end(args);
-
-    sceKernelSendNotificationRequest(0 /* ToastPopup */, &req, sizeof(req), 0);
+extern "C" {
+    int  sceKernelAllocateDirectMemory(long a, long b, unsigned long c, unsigned long d, int e, long* f);
+    int  sceKernelMapDirectMemory(void** a, unsigned long b, int c, int d, long e, unsigned long f);
+    int  sceKernelUsleep(unsigned int a);
+    int  sceGnmMapComputeQueue(uint32_t a, uint32_t b, uintptr_t c, uint32_t d, uint32_t* e);
+    void sceGnmDingDong(uint32_t a, uint32_t b);
+    int  sceGnmUnmapComputeQueue(uint32_t a);
+    int  sceGnmSubmitDone(void);
+    int  printf(const char* fmt, ...);
 }
 
-// ---------- Capture grid --------------------------------------------------
+static void my_memset(void* d, int v, unsigned long n) {
+    for (unsigned long i = 0; i < n; i++) ((unsigned char*)d)[i] = (unsigned char)v;
+}
 
-struct ConfigCombo {
-    int32_t resourceType;
-    int32_t codecType;
-    int32_t profile;
-    int32_t maxLevel;
-    int32_t maxFrameWidth;
-    int32_t maxFrameHeight;
-    int32_t maxDpbFrameCount;
-    int32_t decodePipelineDepth;
-    int32_t optimizeProgressiveVideo;
+static void* gpu_alloc(unsigned long size, unsigned long align) {
+    long phys = 0; void* addr = nullptr;
+    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, 3, &phys)) return nullptr;
+    if (sceKernelMapDirectMemory(&addr, size, 0x33, 0, phys, align)) return nullptr;
+    my_memset(addr, 0, size);
+    return addr;
+}
+
+struct ComputeQueue {
+    uint32_t* ring; uint32_t* read_ptr; int vqid; uint32_t write_off;
+    bool init() {
+        ring = (uint32_t*)gpu_alloc(0x10000, 0x10000);
+        read_ptr = (uint32_t*)gpu_alloc(0x10000, 0x10000);
+        if (!ring || !read_ptr) return false;
+        *read_ptr = 0; write_off = 0;
+        vqid = sceGnmMapComputeQueue(0, 0, (uintptr_t)ring, 0x4000, read_ptr);
+        return vqid > 0;
+    }
+    void submit(const PM4Builder& pm4) {
+        for (uint32_t i = 0; i < pm4.off; i++) ring[write_off++] = pm4.buf[i];
+        sceGnmDingDong((uint32_t)vqid, write_off);
+    }
+    void destroy() { if (vqid > 0) sceGnmUnmapComputeQueue((uint32_t)vqid); }
 };
 
-static const int32_t AVC_PROFILES[] = {66, 77, 100};
-static const int32_t AVC_LEVELS[] = {10, 11, 12, 13, 20, 21, 22, 30, 31, 32,
-                                     40, 41, 42, 50, 51, 52};
-static const int32_t COMMON_DIMS[][2] = {
-    {-1, -1},     // auto-dim: kernel uses 4096x4096 for L=52 else 4096x2176
-    {160, 128},   {176, 144},   {352, 288},   {640, 480},
-    {720, 480},   {720, 576},   {1280, 720},  {1920, 1080},
-    {2560, 1440}, {3840, 2160}, {4096, 2160}, {4096, 2176},
+// ================================================================
+// Write shader — T# passed directly in s[0:7] via USER_DATA
+// No s_load needed — avoids SRT pass entirely
+// ================================================================
+static const uint32_t shader_write[] = {
+    // s[0:7] = T# from COMPUTE_USER_DATA_0..7
+    0x7E020080,             // v_mov_b32 v0, 0          ; x
+    0x7E020280,             // v_mov_b32 v1, 0          ; y
+    0x7E020480,             // v_mov_b32 v2, 0          ; fragid=0
+    0x7E0208FF, 0xAAAAAAAA, // v_mov_b32 v4, 0xAAAAAAAA
+    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0x7E020481,             // v_mov_b32 v2, 1          ; fragid=1
+    0x7E0208FF, 0xBBBBBBBB, // v_mov_b32 v4, 0xBBBBBBBB
+    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xBF810000,             // s_endpgm
+    // BinaryInfo (7 DW)
+    0x5362724F, 0x00726468, // "OrbShdr" + version=0
+    0x00005814,             // type=5(CS), length=92
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
 };
 
-// Step-function probes, appended after the grid; reuse the proven try_one().
-static const int32_t PROBE_LEVEL = 51;
-static const int32_t WPROBE_MIN = 16;
-static const int32_t WPROBE_MAX = 560;
-static const int32_t WPROBE_HEIGHT = 272;
-static const int32_t HPROBE_MIN = 16;
-static const int32_t HPROBE_MAX = 272;
-static const int32_t HPROBE_WIDTH = 512;
-static const int32_t P10_PROFILES[] = {110, 122, 244};
-static const int32_t P10_DIMS[][2] = {{1920, 1080}, {1280, 720}};
+// ================================================================
+// Read shader — T# in s[0:7], V# in s[8:11] via USER_DATA
+// ================================================================
+static const uint32_t shader_read[] = {
+    // s[0:7]=T#, s[8:11]=V# from COMPUTE_USER_DATA
 
-static FILE* g_out = nullptr;
-static int g_count = 0;
-static int g_ok = 0;
-static int g_err = 0;
+    // Test 0: IMAGE_LOAD fragid=0
+    0x7E020080,             // v_mov_b32 v0, 0
+    0x7E020280,             // v_mov_b32 v1, 0
+    0x7E020480,             // v_mov_b32 v2, 0          ; fragid=0
+    0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE0700000, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:0
 
-static void update_status_file(const char* phase) {
-    FILE* sf = fopen("/data/vdec2_capture.status", "w");
-    if (!sf) {
-        return;
-    }
-    fprintf(sf,
-            "phase: %s\n"
-            "processed: %d\n"
-            "ok: %d\n"
-            "errors: %d\n"
-            "output: /data/vdec2_capture.json\n",
-            phase, g_count, g_ok, g_err);
-    fclose(sf);
+    // Test 1: IMAGE_LOAD fragid=1
+    0x7E020481,             // v_mov_b32 v2, 1
+    0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE0700004, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:4
+
+    // Test 2: IMAGE_LOAD_MIP v2=0, v3=1
+    0x7E020080,             // v_mov_b32 v0, 0
+    0x7E020280,             // v_mov_b32 v1, 0
+    0x7E020480,             // v_mov_b32 v2, 0
+    0x7E020681,             // v_mov_b32 v3, 1
+    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE0700008, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:8
+
+    // Test 3: IMAGE_LOAD_MIP v2=1, v3=0
+    0x7E020481,             // v_mov_b32 v2, 1
+    0x7E020680,             // v_mov_b32 v3, 0
+    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE070000C, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:12
+
+    // Test 4: IMAGE_LOAD_MIP v2=1, v3=1
+    0x7E020481,             // v_mov_b32 v2, 1
+    0x7E020681,             // v_mov_b32 v3, 1
+    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE0700010, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:16
+
+    // Test 5: IMAGE_LOAD_MIP v2=0, v3=0
+    0x7E020480,             // v_mov_b32 v2, 0
+    0x7E020680,             // v_mov_b32 v3, 0
+    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xE0700014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:20
+
+    0xBF8C1F70,             // s_waitcnt vmcnt(0)
+    0xBF810000,             // s_endpgm
+    // BinaryInfo (7 DW)
+    0x5362724F, 0x00726468, // "OrbShdr" + version=0
+    0x0000D414,             // type=5(CS), length=208
+    0x00000000, 0x00000000, 0x00000001, 0x00000000,
+};
+
+// T# for 2D MSAA
+static void build_t_sharp(uint32_t d[8], uint64_t addr) {
+    my_memset(d, 0, 32);
+    uint64_t base = addr >> 8;
+    uint64_t w01 = (base & 0x3FFFFFFFFFull) | (4ull << 52) | (4ull << 58);
+    d[0] = (uint32_t)w01; d[1] = (uint32_t)(w01 >> 32);
+    uint64_t w23 = 7ull | (7ull << 14) | (4ull << 32) | (5ull << 35) |
+        (6ull << 38) | (7ull << 41) | (1ull << 48) | (14ull << 52) | (14ull << 60);
+    d[2] = (uint32_t)w23; d[3] = (uint32_t)(w23 >> 32);
+    d[4] = (uint32_t)(7ull << 13); // pitch=8-1
 }
 
-static void emit_entry(const ConfigCombo& c, const OrbisVideodec2DecoderMemoryInfo& m,
-                       int32_t status) {
-    if (g_count > 0) {
-        fputs(",\n", g_out);
-    }
-    fputs("  {", g_out);
-    if (status != 0) {
-        fprintf(g_out, "\"status\":\"error 0x%08x\",", (unsigned)status);
-    }
-    fprintf(g_out,
-            "\"decoderConfigInfo\":{"
-            "\"resourceType\":\"%d\",\"codecType\":\"%d\","
-            "\"profile\":\"%d\",\"maxLevel\":\"%d\","
-            "\"maxFrameWidth\":\"%d\",\"maxFrameHeight\":\"%d\","
-            "\"maxDpbFrameCount\":\"%d\",\"decodePipelineDepth\":\"%d\","
-            "\"cpuAffinityMask\":\"63\",\"cpuThreadPriority\":\"700\","
-            "\"optimizeProgressiveVideo\":\"%d\"}",
-            c.resourceType, c.codecType, c.profile, c.maxLevel,
-            c.maxFrameWidth, c.maxFrameHeight, c.maxDpbFrameCount,
-            c.decodePipelineDepth, c.optimizeProgressiveVideo);
-    if (status == 0) {
-        fprintf(g_out,
-                ",\"decoderMemoryInfo\":{"
-                "\"cpuMemorySize\":\"%llu\","
-                "\"gpuMemorySize\":\"%llu\","
-                "\"cpuGpuMemorySize\":\"%llu\","
-                "\"maxFrameBufferSize\":\"%llu\","
-                "\"frameBufferAlignment\":\"%u\"}",
-                (unsigned long long)m.cpuMemorySize,
-                (unsigned long long)m.gpuMemorySize,
-                (unsigned long long)m.cpuGpuMemorySize,
-                (unsigned long long)m.maxFrameBufferSize,
-                (unsigned)m.frameBufferAlignment);
-    }
-    fputs("}", g_out);
+// V# for output buffer
+static void build_v_sharp(uint32_t d[4], uint64_t addr, uint32_t sz) {
+    d[0] = (uint32_t)(addr); d[1] = (uint32_t)((addr >> 32) & 0xFFF);
+    d[2] = sz; d[3] = 0;
 }
 
-static void try_one(const ConfigCombo& c) {
-    OrbisVideodec2DecoderConfigInfo cfg;
-    OrbisVideodec2DecoderMemoryInfo memInfo;
-    memset(&cfg, 0, sizeof(cfg));
-    memset(&memInfo, 0, sizeof(memInfo));
+static void dispatch_write(ComputeQueue& cq, uint64_t shader_addr,
+                          uint32_t t_sharp[8], volatile uint32_t* fence) {
+    uint32_t pm4_buf[128];
+    PM4Builder pm4 = { pm4_buf, 0 };
 
-    cfg.thisSize = sizeof(cfg);
-    cfg.resourceType = c.resourceType;
-    cfg.codecType = c.codecType;
-    cfg.profile = c.profile;
-    cfg.maxLevel = c.maxLevel;
-    cfg.maxFrameWidth = c.maxFrameWidth;
-    cfg.maxFrameHeight = c.maxFrameHeight;
-    cfg.maxDpbFrameCount = c.maxDpbFrameCount;
-    cfg.decodePipelineDepth = c.decodePipelineDepth;
-    cfg.computeQueue = nullptr;
-    cfg.cpuAffinityMask = 0x3F;
-    cfg.cpuThreadPriority = 700;
-    cfg.optimizeProgressiveVideo = (uint8_t)c.optimizeProgressiveVideo;
-    cfg.checkMemoryType = 0;
-    cfg.extraConfigInfo = nullptr;
+    // RSRC1: vgprs=1(8), sgprs=0(8), float=0xC0, dx10_clamp
+    uint32_t rsrc1 = 1u | (0u << 6) | (0xC0u << 12) | (1u << 21);
+    // RSRC2: user_sgpr=8 (s[0:7] for T#)
+    uint32_t rsrc2 = (8u << 1);
 
-    memInfo.thisSize = sizeof(memInfo);
+    pm4.set_sh_reg2(mmCOMPUTE_PGM_LO, (uint32_t)(shader_addr >> 8), (uint32_t)(shader_addr >> 40));
+    pm4.set_sh_reg2(mmCOMPUTE_PGM_RSRC1, rsrc1, rsrc2);
+    pm4.set_sh_reg3(mmCOMPUTE_NUM_THREAD_X, 1, 1, 1);
 
-    int32_t r = sceVideodec2QueryDecoderMemoryInfo(&cfg, &memInfo);
-    emit_entry(c, memInfo, r);
-    ++g_count;
-    if (r == 0) {
-        ++g_ok;
-    } else {
-        ++g_err;
-    }
+    // Pass T# directly in USER_DATA_0..7
+    pm4.emit(PM4_HDR(PM4_SET_SH_REG, 9));
+    pm4.emit(SH(mmCOMPUTE_USER_DATA_0));
+    for (int i = 0; i < 8; i++) pm4.emit(t_sharp[i]);
+
+    pm4.dispatch(1, 1, 1);
+    pm4.release_mem((uint64_t)fence, 1);
+
+    *fence = 0;
+    cq.submit(pm4);
+    sceGnmSubmitDone();
+    int t = 0;
+    while (*fence == 0 && t < 50000) { sceKernelUsleep(100); t++; }
 }
 
-static void run_width_probe() {
-    for (int32_t w = WPROBE_MIN; w <= WPROBE_MAX; ++w) {
-        ConfigCombo c{};
-        c.resourceType = 1;
-        c.codecType = 1;
-        c.profile = 66;
-        c.maxLevel = PROBE_LEVEL;
-        c.maxFrameWidth = w;
-        c.maxFrameHeight = WPROBE_HEIGHT;
-        c.maxDpbFrameCount = 1;
-        c.decodePipelineDepth = 1;
-        c.optimizeProgressiveVideo = 0;
-        try_one(c);
-    }
+static void dispatch_read(ComputeQueue& cq, uint64_t shader_addr,
+                         uint32_t t_sharp[8], uint32_t v_sharp[4],
+                         volatile uint32_t* fence) {
+    uint32_t pm4_buf[128];
+    PM4Builder pm4 = { pm4_buf, 0 };
+
+    // RSRC1: vgprs=2(12), sgprs=1(16), float=0xC0, dx10_clamp
+    uint32_t rsrc1 = 2u | (1u << 6) | (0xC0u << 12) | (1u << 21);
+    // RSRC2: user_sgpr=12 (s[0:7]=T#, s[8:11]=V#)
+    uint32_t rsrc2 = (12u << 1);
+
+    pm4.set_sh_reg2(mmCOMPUTE_PGM_LO, (uint32_t)(shader_addr >> 8), (uint32_t)(shader_addr >> 40));
+    pm4.set_sh_reg2(mmCOMPUTE_PGM_RSRC1, rsrc1, rsrc2);
+    pm4.set_sh_reg3(mmCOMPUTE_NUM_THREAD_X, 1, 1, 1);
+
+    // Pass T# in USER_DATA_0..7, V# in USER_DATA_8..11
+    pm4.emit(PM4_HDR(PM4_SET_SH_REG, 13));
+    pm4.emit(SH(mmCOMPUTE_USER_DATA_0));
+    for (int i = 0; i < 8; i++) pm4.emit(t_sharp[i]);
+    for (int i = 0; i < 4; i++) pm4.emit(v_sharp[i]);
+
+    pm4.dispatch(1, 1, 1);
+    pm4.release_mem((uint64_t)fence, 1);
+
+    *fence = 0;
+    cq.submit(pm4);
+    sceGnmSubmitDone();
+    int t = 0;
+    while (*fence == 0 && t < 50000) { sceKernelUsleep(100); t++; }
 }
 
-static void run_height_probe() {
-    for (int32_t h = HPROBE_MIN; h <= HPROBE_MAX; ++h) {
-        ConfigCombo c{};
-        c.resourceType = 1;
-        c.codecType = 1;
-        c.profile = 66;
-        c.maxLevel = PROBE_LEVEL;
-        c.maxFrameWidth = HPROBE_WIDTH;
-        c.maxFrameHeight = h;
-        c.maxDpbFrameCount = 1;
-        c.decodePipelineDepth = 1;
-        c.optimizeProgressiveVideo = 0;
-        try_one(c);
-    }
-}
+int main() {
+    printf("=== IMAGE_LOAD_MIP + MSAA T# HW TEST ===\n\n");
 
-static void run_p10_probe() {
-    const size_t n_prof = sizeof(P10_PROFILES) / sizeof(P10_PROFILES[0]);
-    const size_t n_dims = sizeof(P10_DIMS) / sizeof(P10_DIMS[0]);
-    for (size_t pi = 0; pi < n_prof; ++pi) {
-        for (size_t di = 0; di < n_dims; ++di) {
-            ConfigCombo c{};
-            c.resourceType = 1;
-            c.codecType = 1;
-            c.profile = P10_PROFILES[pi];
-            c.maxLevel = PROBE_LEVEL;
-            c.maxFrameWidth = P10_DIMS[di][0];
-            c.maxFrameHeight = P10_DIMS[di][1];
-            c.maxDpbFrameCount = 1;
-            c.decodePipelineDepth = 1;
-            c.optimizeProgressiveVideo = 0;
-            try_one(c);
-        }
-    }
-}
+    void* img_mem = gpu_alloc(0x10000, 0x10000);
+    volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
+    uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000);
+    volatile uint32_t* fence = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
 
-extern "C" int main(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
-
-    sceKernelDebugOutText(0, "vdec2_capture starting\n");
-    ps4_notify("vdec2 capture: starting\nthis takes ~30 seconds");
-    update_status_file("starting");
-
-    g_out = fopen("/data/vdec2_capture.json", "w");
-    if (!g_out) {
-        sceKernelDebugOutText(0, "Failed to open /data/vdec2_capture.json\n");
-        ps4_notify("vdec2 capture FAILED:\ncannot open /data/vdec2_capture.json");
-        update_status_file("error: cannot open output file");
-        return 1;
+    if (!img_mem || !out_buf || !shd_mem || !fence) {
+        printf("FAIL: alloc\n"); return 1;
     }
 
-    fputs("[\n", g_out);
+    // Copy shaders
+    for (unsigned i = 0; i < sizeof(shader_write)/4; i++)
+        ((uint32_t*)shd_mem)[i] = shader_write[i];
+    for (unsigned i = 0; i < sizeof(shader_read)/4; i++)
+        ((uint32_t*)(shd_mem + 0x200))[i] = shader_read[i];
 
-    const size_t n_dims = sizeof(COMMON_DIMS) / sizeof(COMMON_DIMS[0]);
-    const size_t n_levels = sizeof(AVC_LEVELS) / sizeof(AVC_LEVELS[0]);
-    const size_t n_profiles = sizeof(AVC_PROFILES) / sizeof(AVC_PROFILES[0]);
+    // Build descriptors
+    uint32_t t_sharp[8], v_sharp[4];
+    build_t_sharp(t_sharp, (uint64_t)img_mem);
+    build_v_sharp(v_sharp, (uint64_t)out_buf, 64);
 
-    // AVC grid: profile x level x (W,H) x dpb x pipe x opt
-    for (size_t pi = 0; pi < n_profiles; ++pi) {
-        for (size_t li = 0; li < n_levels; ++li) {
-            for (size_t di = 0; di < n_dims; ++di) {
-                for (int32_t dpb = 1; dpb <= 4; ++dpb) {
-                    for (int32_t pipe = 1; pipe <= 4; ++pipe) {
-                        for (int32_t opt = 0; opt <= 1; ++opt) {
-                            ConfigCombo c{};
-                            c.resourceType = 1;
-                            c.codecType = 1;
-                            c.profile = AVC_PROFILES[pi];
-                            c.maxLevel = AVC_LEVELS[li];
-                            c.maxFrameWidth = COMMON_DIMS[di][0];
-                            c.maxFrameHeight = COMMON_DIMS[di][1];
-                            c.maxDpbFrameCount = dpb;
-                            c.decodePipelineDepth = pipe;
-                            c.optimizeProgressiveVideo = opt;
-                            try_one(c);
-                            // Update status file every 200 entries so user
-                            // can monitor real-time progress via FTP poll.
-                            if ((g_count % 200) == 0) {
-                                update_status_file("running");
-                                char msg[80];
-                                snprintf(msg, sizeof(msg),
-                                         "vdec2_capture: %d/%d ok\n",
-                                         g_ok, g_count);
-                                sceKernelDebugOutText(0, msg);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    printf("img=%p out=%p shd=%p\n", img_mem, (void*)out_buf, shd_mem);
 
-    run_width_probe();
-    run_height_probe();
-    run_p10_probe();
+    ComputeQueue cq;
+    if (!cq.init()) { printf("FAIL: CQ\n"); return 1; }
+    printf("CQ vqid=%d\n\n", cq.vqid);
 
-    fputs("\n]\n", g_out);
-    fflush(g_out);
-    fclose(g_out);
+    printf("Phase 1: Write...\n");
+    dispatch_write(cq, (uint64_t)shd_mem, t_sharp, fence);
+    printf("  done (fence=%u)\n\n", *fence);
 
-    update_status_file("done");
+    printf("Phase 2: Read...\n");
+    for (int i = 0; i < 16; i++) ((volatile uint32_t*)out_buf)[i] = 0xDDDDDDDD;
+    dispatch_read(cq, (uint64_t)shd_mem + 0x200, t_sharp, v_sharp, fence);
+    printf("  done (fence=%u)\n\n", *fence);
 
-    char done_log[160];
-    snprintf(done_log, sizeof(done_log),
-             "vdec2_capture: DONE %d/%d ok (%d errors) -> /data/vdec2_capture.json\n",
-             g_ok, g_count, g_err);
-    sceKernelDebugOutText(0, done_log);
+    printf("=== RESULTS ===\n");
+    printf("[0] LOAD     frag=0 : 0x%08X %s\n", out_buf[0],
+           out_buf[0]==0xAAAAAAAA?"OK":out_buf[0]==0xDDDDDDDD?"NOWRITE":"???");
+    printf("[1] LOAD     frag=1 : 0x%08X %s\n", out_buf[1],
+           out_buf[1]==0xBBBBBBBB?"OK":out_buf[1]==0xDDDDDDDD?"NOWRITE":"???");
+    printf("[2] LOAD_MIP v2=0,v3=1: 0x%08X\n", out_buf[2]);
+    printf("[3] LOAD_MIP v2=1,v3=0: 0x%08X\n", out_buf[3]);
+    printf("[4] LOAD_MIP v2=1,v3=1: 0x%08X\n", out_buf[4]);
+    printf("[5] LOAD_MIP v2=0,v3=0: 0x%08X\n", out_buf[5]);
 
-    ps4_notify("vdec2 capture DONE\n%d/%d ok (%d errors)\nFTP: /data/vdec2_capture.json",
-               g_ok, g_count, g_err);
+    printf("\n");
+    if (out_buf[2]==0xAAAAAAAA && out_buf[3]==0xBBBBBBBB)
+        printf(">> HW IGNORES _MIP: v2=fragid\n");
+    else if (out_buf[2]==0xBBBBBBBB && out_buf[3]==0xAAAAAAAA)
+        printf(">> HW KEEPS _MIP layout: v3=fragid\n");
+    else if (out_buf[0]==0xDDDDDDDD)
+        printf(">> NO DATA - T# or tiling issue\n");
+    else
+        printf(">> UNEXPECTED\n");
 
+    printf("\nDone.\n");
+    cq.destroy();
+    sceKernelUsleep(10000000);
     return 0;
 }
