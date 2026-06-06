@@ -115,10 +115,7 @@ extern "C" int32_t sceKernelSendNotificationRequest(int32_t api, void* request, 
                                                     int32_t blocking);
 
 static void ps4_notify(const char* fmt, ...) {
-    // Static (not on the stack): the request is 0xC30 bytes, and ps4_notify is
-    // also called from deep in the capture loop. Single-threaded, so reuse is
-    // safe; the kernel copies the request synchronously on the non-blocking call.
-    static OrbisNotificationRequest req;
+    OrbisNotificationRequest req;
     memset(&req, 0, sizeof(req));
     req.type = 0;      // Message
     req.targetId = -1; // all users
@@ -183,7 +180,6 @@ static int g_count = 0;
 static int g_ok = 0;
 static int g_err = 0;
 static int g_total = 0;
-static int g_next_milestone = 10; // next percent at which to toast
 
 static int compute_total() {
     const int n_dims = (int)(sizeof(COMMON_DIMS) / sizeof(COMMON_DIMS[0]));
@@ -253,15 +249,10 @@ static void emit_entry(const ConfigCombo& c, const OrbisVideodec2DecoderMemoryIn
 }
 
 static void maybe_progress(const char* phase) {
+    // Progress is reported only via the status file (FTP-pollable). No mid-run
+    // toasts: those would take varargs and run from deep in the loop.
     if ((g_count % 200) == 0) {
         update_status_file(phase);
-    }
-    int pct = g_total > 0 ? (int)((int64_t)g_count * 100 / g_total) : 0;
-    if (pct >= g_next_milestone && g_count < g_total) {
-        ps4_notify("vdec2 capture: %d%%\n%d/%d ok", pct, g_ok, g_count);
-        while (g_next_milestone <= pct) {
-            g_next_milestone += 10;
-        }
     }
 }
 
@@ -385,10 +376,8 @@ extern "C" int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    g_total = compute_total();
-
     sceKernelDebugOutText(0, "vdec2_capture starting\n");
-    ps4_notify("vdec2 capture: starting\n%d configs, ~30 seconds", g_total);
+    ps4_notify("vdec2 capture: starting\nthis takes ~30 seconds");
     update_status_file("starting");
 
     g_out = fopen("/data/vdec2_capture.json", "w");
@@ -400,6 +389,8 @@ extern "C" int main(int argc, char* argv[]) {
     }
 
     fputs("[\n", g_out);
+
+    g_total = compute_total();
 
     run_grid();
     run_width_probe();
