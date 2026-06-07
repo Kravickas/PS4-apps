@@ -9,77 +9,22 @@ extern "C" {
     void sceGnmDingDong(uint32_t a, uint32_t b);
     int  sceGnmUnmapComputeQueue(uint32_t a);
     int  sceGnmSubmitDone(void);
-    int  printf(const char* fmt, ...);
-    int  sceKernelSendNotificationRequest(int device, void* req, unsigned long size, int blocking);
     int  sceKernelOpen(const char* path, int flags, int mode);
-    long sceKernelWrite(int fd, const void* buf, unsigned long nbytes);
+    long sceKernelWrite(int fd, const void* buf, unsigned long n);
     int  sceKernelClose(int fd);
+    int  printf(const char* fmt, ...);
 }
 
 static void my_memset(void* d, int v, unsigned long n) {
     for (unsigned long i = 0; i < n; i++) ((unsigned char*)d)[i] = (unsigned char)v;
 }
 
-struct NotifyRequest {
-    char header[45];
-    char message[3075];
-};
-
-static void notify(const char* msg) {
-    NotifyRequest req;
-    my_memset(&req, 0, sizeof(req));
-    int i = 0;
-    while (msg[i] && i < 3074) {
-        req.message[i] = msg[i];
-        i++;
-    }
-    req.message[i] = 0;
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-}
-
-static int s_len(const char* s) {
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-static void s_cat(char* dst, int* p, const char* s) {
-    while (*s) dst[(*p)++] = *s++;
-    dst[*p] = 0;
-}
-
-static void s_hex(char* dst, int* p, uint32_t v) {
-    const char* H = "0123456789ABCDEF";
-    dst[(*p)++] = '0';
-    dst[(*p)++] = 'x';
-    for (int i = 28; i >= 0; i -= 4) dst[(*p)++] = H[(v >> i) & 0xF];
-    dst[*p] = 0;
-}
-
-static void s_hex64(char* dst, int* p, uint64_t v) {
-    s_hex(dst, p, (uint32_t)(v >> 32));
-    dst[(*p)++] = '_';
-    s_hex(dst, p, (uint32_t)v);
-    dst[*p] = 0;
-}
-
-// O_WRONLY|O_CREAT|O_TRUNC = 0x601, mode 0777
-static const char* write_result_file(const char* text) {
-    static const char* paths[2] = { "/data/img_mip_result.txt", "/mnt/usb0/img_mip_result.txt" };
-    for (int i = 0; i < 2; i++) {
-        int fd = sceKernelOpen(paths[i], 0x601, 0777);
-        if (fd >= 0) {
-            sceKernelWrite(fd, text, s_len(text));
-            sceKernelClose(fd);
-            return paths[i];
-        }
-    }
-    return nullptr;
-}
-
-static void* gpu_alloc(unsigned long size, unsigned long align, int mem_type = 3) {
+// WB_ONION (type 0): CPU-coherent, so shader code and results are visible across CPU/GPU
+// without manual cache management. The image uses the same pool; tiling comes from the T#,
+// not the memory type, so store and read stay consistent as long as they share the T#.
+static void* gpu_alloc(unsigned long size, unsigned long align) {
     long phys = 0; void* addr = nullptr;
-    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, mem_type, &phys)) return nullptr;
+    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, 0, &phys)) return nullptr;
     if (sceKernelMapDirectMemory(&addr, size, 0x33, 0, phys, align)) return nullptr;
     my_memset(addr, 0, size);
     return addr;
@@ -103,94 +48,91 @@ struct ComputeQueue {
 };
 
 // ================================================================
-// Write shader — T# passed directly in s[0:7] via USER_DATA
-// No s_load needed — avoids SRT pass entirely
+// Write shader — T# in s[0:7]. Stores 0xAAAAAAAA to sample 0 and
+// 0xBBBBBBBB to sample 1 of the MSAA image via IMAGE_STORE (fragid in v2).
 // ================================================================
 static const uint32_t shader_write[] = {
-    // s[0:7] = T# from COMPUTE_USER_DATA_0..7
     0x7E020080,             // v_mov_b32 v0, 0          ; x
     0x7E020280,             // v_mov_b32 v1, 0          ; y
     0x7E020480,             // v_mov_b32 v2, 0          ; fragid=0
     0x7E0208FF, 0xAAAAAAAA, // v_mov_b32 v4, 0xAAAAAAAA
-    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1 unorm
+    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
     0x7E020481,             // v_mov_b32 v2, 1          ; fragid=1
     0x7E0208FF, 0xBBBBBBBB, // v_mov_b32 v4, 0xBBBBBBBB
-    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1 unorm
+    0xF0201100, 0x00000400, // image_store v4, v[0:2], s[0:7] dmask:1
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
     0xBF810000,             // s_endpgm
-    // BinaryInfo (7 DW)
     0x5362724F, 0x00726468, // "OrbShdr" + version=0
     0x00005814,             // type=5(CS), length=92
     0x00000000, 0x00000000, 0x00000000, 0x00000000,
 };
 
 // ================================================================
-// Read shader — T# in s[0:7], V# in s[8:11] via USER_DATA
+// Read shader — T# in s[0:7], V# in s[8:11].
+// Smoke store first (no image) proves the wave launches and the store
+// path works. Then baseline IMAGE_LOAD (fragid in v2) and the CTR case
+// IMAGE_LOAD_MIP (op=1, 0xf0040100) varying v2/v3 to discriminate
+// Outcome A (v2 is the sample) from Outcome B (v3 is the sample).
 // ================================================================
 static const uint32_t shader_read[] = {
-    // s[0:7]=T#, s[8:11]=V# from COMPUTE_USER_DATA
-
-    // SMOKE: store a constant to out[6] BEFORE any image op, isolating the store/V#/cache
-    // path from the image path. out[6]==0xC0DE0001 => store works (image is the problem);
-    // out[6]==0xDDDDDDDD => the store itself never reaches memory (V# or GPU cache).
-    0x7E0214FF, 0xC0DE0001, // v_mov_b32 v10, 0xC0DE0001
-    0xE0704018, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:24
+    // Smoke: store a constant, no image touched -> out[6]
+    0x7E1402FF, 0xC0DE0001, // v_mov_b32 v10, 0xC0DE0001
+    0xE0700018, 0x80020A00, // buffer_store_dword v10, off, s[8:11], offset:24
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
 
     // Test 0: IMAGE_LOAD fragid=0
     0x7E020080,             // v_mov_b32 v0, 0
     0x7E020280,             // v_mov_b32 v1, 0
-    0x7E020480,             // v_mov_b32 v2, 0          ; fragid=0
-    0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0704000, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:0
+    0x7E020480,             // v_mov_b32 v2, 0
+    0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1
+    0xBF8C1F70,
+    0xE0700000, 0x80020A00, // offset:0
 
     // Test 1: IMAGE_LOAD fragid=1
     0x7E020481,             // v_mov_b32 v2, 1
-    0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0704004, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:4
+    0xF0001100, 0x00000A00,
+    0xBF8C1F70,
+    0xE0700004, 0x80020A00, // offset:4
 
-    // Test 2: IMAGE_LOAD_MIP v2=0, v3=1
+    // Test 2: IMAGE_LOAD_MIP v2=0, v3=1   (CTR opcode 0xf0040100)
     0x7E020080,             // v_mov_b32 v0, 0
     0x7E020280,             // v_mov_b32 v1, 0
     0x7E020480,             // v_mov_b32 v2, 0
     0x7E020681,             // v_mov_b32 v3, 1
-    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0704008, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:8
+    0xF0040100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1
+    0xBF8C1F70,
+    0xE0700008, 0x80020A00, // offset:8
 
     // Test 3: IMAGE_LOAD_MIP v2=1, v3=0
     0x7E020481,             // v_mov_b32 v2, 1
     0x7E020680,             // v_mov_b32 v3, 0
-    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE070400C, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:12
+    0xF0040100, 0x00000A00,
+    0xBF8C1F70,
+    0xE070000C, 0x80020A00, // offset:12
 
     // Test 4: IMAGE_LOAD_MIP v2=1, v3=1
     0x7E020481,             // v_mov_b32 v2, 1
     0x7E020681,             // v_mov_b32 v3, 1
-    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0704010, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:16
+    0xF0040100, 0x00000A00,
+    0xBF8C1F70,
+    0xE0700010, 0x80020A00, // offset:16
 
-    // Test 5: IMAGE_LOAD_MIP v2=0, v3=0
+    // Test 5: IMAGE_LOAD_MIP v2=0, v3=0  (CTR's exact case: mipid 0)
     0x7E020480,             // v_mov_b32 v2, 0
     0x7E020680,             // v_mov_b32 v3, 0
-    0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
-    0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0704014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:20
+    0xF0040100, 0x00000A00,
+    0xBF8C1F70,
+    0xE0700014, 0x80020A00, // offset:20
 
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
     0xBF810000,             // s_endpgm
-    // BinaryInfo (7 DW)
     0x5362724F, 0x00726468, // "OrbShdr" + version=0
-    0x0000D414,             // type=5(CS), length=208
+    0x0000F014,             // type=5(CS)
     0x00000000, 0x00000000, 0x00000001, 0x00000000,
 };
 
-// T# for 2D MSAA
+// T# for 2D MSAA (type=14, last_level=1 -> 2 samples, R32_UINT, 8x8)
 static void build_t_sharp(uint32_t d[8], uint64_t addr) {
     my_memset(d, 0, 32);
     uint64_t base = addr >> 8;
@@ -213,16 +155,15 @@ static void dispatch_write(ComputeQueue& cq, uint64_t shader_addr,
     uint32_t pm4_buf[128];
     PM4Builder pm4 = { pm4_buf, 0 };
 
-    // RSRC1: vgprs=1(8), sgprs=0(8), float=0xC0, dx10_clamp
     uint32_t rsrc1 = 1u | (0u << 6) | (0xC0u << 12) | (1u << 21);
-    // RSRC2: user_sgpr=8 (s[0:7] for T#)
     uint32_t rsrc2 = (8u << 1);
 
     pm4.set_sh_reg2(mmCOMPUTE_PGM_LO, (uint32_t)(shader_addr >> 8), (uint32_t)(shader_addr >> 40));
     pm4.set_sh_reg2(mmCOMPUTE_PGM_RSRC1, rsrc1, rsrc2);
     pm4.set_sh_reg3(mmCOMPUTE_NUM_THREAD_X, 1, 1, 1);
+    pm4.set_sh_reg(mmCOMPUTE_RESOURCE_LIMITS, 0);
+    pm4.set_sh_reg2(mmCOMPUTE_STATIC_THREAD_MGMT_SE0, 0xFFFFFFFF, 0xFFFFFFFF);
 
-    // Pass T# directly in USER_DATA_0..7
     pm4.emit(PM4_HDR(PM4_SET_SH_REG, 9));
     pm4.emit(SH(mmCOMPUTE_USER_DATA_0));
     for (int i = 0; i < 8; i++) pm4.emit(t_sharp[i]);
@@ -243,16 +184,15 @@ static void dispatch_read(ComputeQueue& cq, uint64_t shader_addr,
     uint32_t pm4_buf[128];
     PM4Builder pm4 = { pm4_buf, 0 };
 
-    // RSRC1: vgprs=2(12), sgprs=1(16), float=0xC0, dx10_clamp
     uint32_t rsrc1 = 2u | (1u << 6) | (0xC0u << 12) | (1u << 21);
-    // RSRC2: user_sgpr=12 (s[0:7]=T#, s[8:11]=V#)
     uint32_t rsrc2 = (12u << 1);
 
     pm4.set_sh_reg2(mmCOMPUTE_PGM_LO, (uint32_t)(shader_addr >> 8), (uint32_t)(shader_addr >> 40));
     pm4.set_sh_reg2(mmCOMPUTE_PGM_RSRC1, rsrc1, rsrc2);
     pm4.set_sh_reg3(mmCOMPUTE_NUM_THREAD_X, 1, 1, 1);
+    pm4.set_sh_reg(mmCOMPUTE_RESOURCE_LIMITS, 0);
+    pm4.set_sh_reg2(mmCOMPUTE_STATIC_THREAD_MGMT_SE0, 0xFFFFFFFF, 0xFFFFFFFF);
 
-    // Pass T# in USER_DATA_0..7, V# in USER_DATA_8..11
     pm4.emit(PM4_HDR(PM4_SET_SH_REG, 13));
     pm4.emit(SH(mmCOMPUTE_USER_DATA_0));
     for (int i = 0; i < 8; i++) pm4.emit(t_sharp[i]);
@@ -268,118 +208,78 @@ static void dispatch_read(ComputeQueue& cq, uint64_t shader_addr,
     while (*fence == 0 && t < 50000) { sceKernelUsleep(100); t++; }
 }
 
+static void s_cat(char* d, int* p, const char* s) { int i = 0; while (s[i]) d[(*p)++] = s[i++]; }
+static void s_hex(char* d, int* p, uint32_t v) {
+    const char* h = "0123456789ABCDEF";
+    s_cat(d, p, "0x");
+    for (int i = 7; i >= 0; i--) d[(*p)++] = h[(v >> (i * 4)) & 0xF];
+}
+static void s_hex64(char* d, int* p, uint64_t v) {
+    s_hex(d, p, (uint32_t)(v >> 32)); d[(*p)++] = '_'; s_hex(d, p, (uint32_t)v);
+}
+
+static void write_result(volatile uint32_t* out, uint32_t wf, uint32_t rf,
+                         uint64_t img, uint64_t outa, uint64_t shd) {
+    char b[4096]; int p = 0;
+    s_cat(b, &p, "IMAGE_LOAD_MIP + MSAA T# HW TEST\n");
+    s_cat(b, &p, "[0] LOAD     frag0     = "); s_hex(b, &p, out[0]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "[1] LOAD     frag1     = "); s_hex(b, &p, out[1]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "[2] LOAD_MIP v2=0,v3=1 = "); s_hex(b, &p, out[2]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "[3] LOAD_MIP v2=1,v3=0 = "); s_hex(b, &p, out[3]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "[4] LOAD_MIP v2=1,v3=1 = "); s_hex(b, &p, out[4]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "[5] LOAD_MIP v2=0,v3=0 = "); s_hex(b, &p, out[5]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "write_fence = "); s_hex(b, &p, wf); s_cat(b, &p, "\n");
+    s_cat(b, &p, "read_fence  = "); s_hex(b, &p, rf); s_cat(b, &p, "\n");
+    s_cat(b, &p, "smoke out[6] = "); s_hex(b, &p, out[6]); s_cat(b, &p, "\n");
+    s_cat(b, &p, "verdict: ");
+    if (out[6] != 0xC0DE0001)
+        s_cat(b, &p, "WAVE DID NOT RUN (smoke store failed)\n");
+    else if (out[0] == 0xDDDDDDDD || out[1] == 0xDDDDDDDD)
+        s_cat(b, &p, "WAVE RAN, image read failed (T#/tiling)\n");
+    else if (out[2] == 0xAAAAAAAA && out[3] == 0xBBBBBBBB)
+        s_cat(b, &p, "OUTCOME A - v2 (mip slot) is the sample; v3 ignored\n");
+    else if (out[2] == 0xBBBBBBBB && out[3] == 0xAAAAAAAA)
+        s_cat(b, &p, "OUTCOME B - v3 is the sample\n");
+    else
+        s_cat(b, &p, "UNEXPECTED\n");
+    s_cat(b, &p, "img="); s_hex64(b, &p, img);
+    s_cat(b, &p, " out="); s_hex64(b, &p, outa);
+    s_cat(b, &p, " shd="); s_hex64(b, &p, shd); s_cat(b, &p, "\n");
+
+    int fd = sceKernelOpen("/data/img_mip_result.txt", 0x601, 0x1B6);
+    if (fd < 0) fd = sceKernelOpen("/mnt/usb0/img_mip_result.txt", 0x601, 0x1B6);
+    if (fd >= 0) { sceKernelWrite(fd, b, (unsigned long)p); sceKernelClose(fd); }
+    printf("%s", b);
+}
+
 int main() {
-    printf("=== IMAGE_LOAD_MIP + MSAA T# HW TEST ===\n\n");
-
     void* img_mem = gpu_alloc(0x10000, 0x10000);
-    volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000, 0); // WB_ONION (CPU-coherent)
-    uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000, 0);                      // WB_ONION (CPU->GPU coherent code)
+    volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
+    uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000);
     volatile uint32_t* fence = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
+    if (!img_mem || !out_buf || !shd_mem || !fence) { printf("FAIL: alloc\n"); return 1; }
 
-    if (!img_mem || !out_buf || !shd_mem || !fence) {
-        printf("FAIL: alloc\n");
-        notify("IMG_MIP: FAIL alloc");
-        return 1;
-    }
-
-    // Copy shaders
-    for (unsigned i = 0; i < sizeof(shader_write)/4; i++)
+    for (unsigned i = 0; i < sizeof(shader_write) / 4; i++)
         ((uint32_t*)shd_mem)[i] = shader_write[i];
-    for (unsigned i = 0; i < sizeof(shader_read)/4; i++)
+    for (unsigned i = 0; i < sizeof(shader_read) / 4; i++)
         ((uint32_t*)(shd_mem + 0x200))[i] = shader_read[i];
 
-    // Build descriptors
     uint32_t t_sharp[8], v_sharp[4];
     build_t_sharp(t_sharp, (uint64_t)img_mem);
     build_v_sharp(v_sharp, (uint64_t)out_buf, 64);
 
-    printf("img=%p out=%p shd=%p\n", img_mem, (void*)out_buf, shd_mem);
-
     ComputeQueue cq;
-    if (!cq.init()) {
-        printf("FAIL: CQ\n");
-        notify("IMG_MIP: FAIL compute queue");
-        return 1;
-    }
-    printf("CQ vqid=%d\n\n", cq.vqid);
-    notify("IMG_MIP: test running");
+    if (!cq.init()) { printf("FAIL: CQ\n"); return 1; }
 
-    printf("Phase 1: Write...\n");
     dispatch_write(cq, (uint64_t)shd_mem, t_sharp, fence);
-    uint32_t wfence = *fence;
-    printf("  done (fence=%u)\n\n", wfence);
+    uint32_t wf = *fence;
 
-    printf("Phase 2: Read...\n");
     for (int i = 0; i < 16; i++) ((volatile uint32_t*)out_buf)[i] = 0xDDDDDDDD;
     dispatch_read(cq, (uint64_t)shd_mem + 0x200, t_sharp, v_sharp, fence);
-    uint32_t rfence = *fence;
-    printf("  done (fence=%u)\n\n", rfence);
+    uint32_t rf = *fence;
 
-    printf("=== RESULTS ===\n");
-    printf("[0] LOAD     frag=0 : 0x%08X\n", out_buf[0]);
-    printf("[1] LOAD     frag=1 : 0x%08X\n", out_buf[1]);
-    printf("[2] LOAD_MIP v2=0,v3=1: 0x%08X\n", out_buf[2]);
-    printf("[3] LOAD_MIP v2=1,v3=0: 0x%08X\n", out_buf[3]);
-    printf("[4] LOAD_MIP v2=1,v3=1: 0x%08X\n", out_buf[4]);
-    printf("[5] LOAD_MIP v2=0,v3=0: 0x%08X\n", out_buf[5]);
+    write_result(out_buf, wf, rf, (uint64_t)img_mem, (uint64_t)out_buf, (uint64_t)shd_mem);
 
-    // Build the result text (sent back for analysis)
-    char ft[1024];
-    int fp = 0;
-    s_cat(ft, &fp, "IMAGE_LOAD_MIP + MSAA T# HW TEST\n");
-    s_cat(ft, &fp, "verdict: ");
-    if (out_buf[2]==0xAAAAAAAA && out_buf[3]==0xBBBBBBBB)
-        s_cat(ft, &fp, "IGNORES _MIP (v2=fragid)\n");
-    else if (out_buf[2]==0xBBBBBBBB && out_buf[3]==0xAAAAAAAA)
-        s_cat(ft, &fp, "KEEPS _MIP (v3=fragid)\n");
-    else if (out_buf[0]==0xDDDDDDDD)
-        s_cat(ft, &fp, "NO DATA - T#/tiling\n");
-    else
-        s_cat(ft, &fp, "UNEXPECTED\n");
-    s_cat(ft, &fp, "[0] LOAD     frag0     = "); s_hex(ft, &fp, out_buf[0]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "[1] LOAD     frag1     = "); s_hex(ft, &fp, out_buf[1]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "[2] LOAD_MIP v2=0,v3=1 = "); s_hex(ft, &fp, out_buf[2]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "[3] LOAD_MIP v2=1,v3=0 = "); s_hex(ft, &fp, out_buf[3]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "[4] LOAD_MIP v2=1,v3=1 = "); s_hex(ft, &fp, out_buf[4]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "[5] LOAD_MIP v2=0,v3=0 = "); s_hex(ft, &fp, out_buf[5]); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "write_fence = "); s_hex(ft, &fp, wfence); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "read_fence  = "); s_hex(ft, &fp, rfence); s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "smoke out[6] (const store, no image) = "); s_hex(ft, &fp, out_buf[6]);
-    s_cat(ft, &fp, "  (C0DE0001=store OK; DDDDDDDD=store/cache broken)\n");
-    s_cat(ft, &fp, "raw out[0..15]:");
-    for (int i = 0; i < 16; i++) { s_cat(ft, &fp, " "); s_hex(ft, &fp, out_buf[i]); }
-    s_cat(ft, &fp, "\n");
-    s_cat(ft, &fp, "img="); s_hex64(ft, &fp, (uint64_t)img_mem);
-    s_cat(ft, &fp, " out="); s_hex64(ft, &fp, (uint64_t)out_buf);
-    s_cat(ft, &fp, " shd="); s_hex64(ft, &fp, (uint64_t)shd_mem);
-    s_cat(ft, &fp, "\n");
-
-    const char* wrote = write_result_file(ft);
-
-    // On-screen notification: verdict + where the file landed
-    char msg[256];
-    int mp = 0;
-    if (out_buf[2]==0xAAAAAAAA && out_buf[3]==0xBBBBBBBB)
-        s_cat(msg, &mp, "IGNORES _MIP (v2=fragid)\n");
-    else if (out_buf[2]==0xBBBBBBBB && out_buf[3]==0xAAAAAAAA)
-        s_cat(msg, &mp, "KEEPS _MIP (v3=fragid)\n");
-    else if (out_buf[0]==0xDDDDDDDD)
-        s_cat(msg, &mp, "NO DATA - T#/tiling\n");
-    else
-        s_cat(msg, &mp, "UNEXPECTED\n");
-    s_cat(msg, &mp, "M2="); s_hex(msg, &mp, out_buf[2]);
-    s_cat(msg, &mp, " M3="); s_hex(msg, &mp, out_buf[3]);
-    s_cat(msg, &mp, "\nsmoke S6="); s_hex(msg, &mp, out_buf[6]);
-    s_cat(msg, &mp, "\n");
-    if (wrote) {
-        s_cat(msg, &mp, "saved: ");
-        s_cat(msg, &mp, wrote);
-    } else {
-        s_cat(msg, &mp, "FILE WRITE FAILED");
-    }
-    notify(msg);
-
-    printf("\nDone.\n");
     cq.destroy();
     sceKernelUsleep(10000000);
     return 0;
