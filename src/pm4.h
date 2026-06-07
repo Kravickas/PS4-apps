@@ -66,6 +66,7 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define PM4_EVENT_WRITE_EOP     0x47
 #define PM4_NOP                 0x10
 #define PM4_ACQUIRE_MEM         0x58
+#define PM4_WRITE_DATA          0x37
 
 // Register bases
 #define CTX_REG_BASE    0xA000u
@@ -228,6 +229,33 @@ static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
     pm4_emit(b, pm4_type3(PM4_NOP, count));
     for (uint32_t i = 0; i < count; i++) pm4_emit(b, 0);
 }
+
+/* PM4 DMA_DATA (opcode 0x50): fill GPU memory with a constant value.
+   Unlike CPU memset, this goes through the rasterizer's FillBuffer path which
+   invalidates any cached Vulkan image view for the target memory range. Required
+   when the target is also sampled as a texture elsewhere in the frame (e.g.,
+   shadow_depth: written by shadow CB, sampled by main floor PS). CPU memset
+   would leave stale cached pixels in shadPS4's texture cache, producing ghost
+   silhouettes from previous frames.
+   Layout per PS4 PM4 DMA_DATA packet:
+     header = type3(0x50, 6)
+     dw1    = control: src_sel=2(Data) at [30:29], dst_sel=0(Memory) at [21:20]
+     dw2    = src data (value to fill)
+     dw3    = src_addr_hi (unused for Data source)
+     dw4    = dst_addr_lo
+     dw5    = dst_addr_hi
+     dw6    = command: num_bytes at [20:0] */
+static inline void pm4_dma_fill(struct PM4Builder* b, void* dst,
+                                uint32_t num_bytes, uint32_t fill_value) {
+    uint64_t daddr = (uint64_t)(uintptr_t)dst;
+    pm4_emit(b, pm4_type3(0x50, 6));
+    pm4_emit(b, (2u << 29) | (0u << 20));               /* src_sel=Data, dst_sel=Memory */
+    pm4_emit(b, fill_value);                            /* fill data */
+    pm4_emit(b, 0);                                     /* src_addr_hi (unused) */
+    pm4_emit(b, (uint32_t)(daddr & 0xFFFFFFFFu));       /* dst_addr_lo */
+    pm4_emit(b, (uint32_t)(daddr >> 32));               /* dst_addr_hi */
+    pm4_emit(b, num_bytes & 0x1FFFFFu);                 /* command.num_bytes */
+}
 #define CTX_POLYGON_CONTROL         0x205  // PA_SU_SC_MODE_CNTL
 
 /* IT_INDEX_TYPE (opcode 0x2A): set index buffer format */
@@ -238,6 +266,17 @@ static inline void pm4_index_type(struct PM4Builder* b, uint32_t type) {
 }
 
 /* IT_DRAW_INDEX_2 (opcode 0x27): indexed draw */
+static inline void pm4_acquire_mem(struct PM4Builder* b, uint32_t coher_cntl) {
+    /* Flush CB + invalidate TC between render-to-texture phases.
+       GCN Sea Islands PM4 spec: ACQUIRE_MEM(0x58), 6 body dwords */
+    pm4_emit(b, pm4_type3(PM4_ACQUIRE_MEM, 6));
+    pm4_emit(b, coher_cntl);    /* CP_COHER_CNTL */
+    pm4_emit(b, 0xFFFFFFFF);    /* CP_COHER_SIZE = full range */
+    pm4_emit(b, 0);             /* CP_COHER_SIZE_HI */
+    pm4_emit(b, 0);             /* CP_COHER_BASE_LO */
+    pm4_emit(b, 0);             /* CP_COHER_BASE_HI */
+    pm4_emit(b, 10);            /* POLL_INTERVAL */
+}
 static inline void pm4_draw_index_2(struct PM4Builder* b, uint32_t max_size,
                                      uint64_t index_base, uint32_t index_count) {
     pm4_emit(b, 0xC0042700);
