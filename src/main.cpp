@@ -96,22 +96,14 @@ static const uint32_t read_ps_binary[] = {
     0xF0042100, 0x00000A00,
     0xBF8C1F70,
     0xE0704008, 0x80020A00,
-    0x7E020481, 0x7E020680,                // [3] mip v2=1,v3=0
+    0x7E020480, 0x7E020680,                // [3] mip v2=0,v3=0 (control -> sample 0)
     0xF0042100, 0x00000A00,
     0xBF8C1F70,
     0xE070400C, 0x80020A00,
-    0x7E020481, 0x7E020681,                // [4] mip v2=1,v3=1
-    0xF0042100, 0x00000A00,
-    0xBF8C1F70,
-    0xE0704010, 0x80020A00,
-    0x7E020480, 0x7E020680,                // [5] mip v2=0,v3=0
-    0xF0042100, 0x00000A00,
-    0xBF8C1F70,
-    0xE0704014, 0x80020A00,
     0xBF8C1F70,
     0xF800180F, 0x0A0A0A0A,                // exp mrt0 (v10 x4) done vm
     0xBF810000, 0xBF800000,
-    0x5362724F, 0x00726468, 0x0000E000, 0x00000000, 0x00000002, 0x00005245, 0x00000000,
+    0x5362724F, 0x00726468, 0x0000A800, 0x00000000, 0x00000002, 0x00005245, 0x00000000,
 };
 
 static void my_memset(void* d, int v, unsigned long n) {
@@ -328,18 +320,18 @@ int main(void) {
     s_cat(s, &p, "[0] LOAD     frag0     = "); s_hex(s, &p, out[0]); s_cat(s, &p, "\n");
     s_cat(s, &p, "[1] LOAD     frag1     = "); s_hex(s, &p, out[1]); s_cat(s, &p, "\n");
     s_cat(s, &p, "[2] LOAD_MIP v2=0,v3=1 = "); s_hex(s, &p, out[2]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[3] LOAD_MIP v2=1,v3=0 = "); s_hex(s, &p, out[3]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[4] LOAD_MIP v2=1,v3=1 = "); s_hex(s, &p, out[4]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[5] LOAD_MIP v2=0,v3=0 = "); s_hex(s, &p, out[5]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[3] LOAD_MIP v2=0,v3=0 = "); s_hex(s, &p, out[3]); s_cat(s, &p, "\n");
     s_cat(s, &p, "smoke out[6]           = "); s_hex(s, &p, out[6]); s_cat(s, &p, "\n");
     s_cat(s, &p, "verdict: ");
     if (out[6] != 0xC0DE0002)
         s_cat(s, &p, "READ PS DID NOT RUN (smoke failed)\n");
     else if (!(out[0] == 0xAAAAAAAA && out[1] == 0xBBBBBBBB))
         s_cat(s, &p, "store/load broken (check T# tiling)\n");
-    else if (out[2] == 0xAAAAAAAA && out[3] == 0xBBBBBBBB)
-        s_cat(s, &p, "OUTCOME A - sample = v2 (mip slot); #4207 should use Arg(2)\n");
-    else if (out[2] == 0xBBBBBBBB && out[3] == 0xAAAAAAAA)
+    else if (out[3] != 0xAAAAAAAA)
+        s_cat(s, &p, "control v2=0,v3=0 not sample0 - UNEXPECTED\n");
+    else if (out[2] == 0xAAAAAAAA)
+        s_cat(s, &p, "OUTCOME A - sample = v2 (mip slot=0); #4207 should use Arg(2)\n");
+    else if (out[2] == 0xBBBBBBBB)
         s_cat(s, &p, "OUTCOME B - sample = v3; #4207 was correct\n");
     else
         s_cat(s, &p, "UNEXPECTED\n");
