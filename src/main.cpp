@@ -1,6 +1,8 @@
 // ============================================================================
-// PS4 GPU Compute Dispatch Debug — minimal shader writes a constant
-// Tests: does the compute shader run at all? (no buffer_load, no src buffer)
+// PS4 GPU Compute Dispatch Debug — minimal shader writes its lane id to dst[lane]
+// Tests: does every lane run + store? Post-marker is OUTSIDE the output range so
+// it cannot mask a missing lane. Distinguishes a real lane drop from a marker
+// collision at dst[63].
 // Results written to /temp0/results.txt (fallback /data/results.txt).
 // ============================================================================
 
@@ -105,19 +107,21 @@ static void zero(void* s, unsigned long n) {
 
 #define NUM_ELEMENTS 64
 
-// Shader: writes 0xCAFEBABE to dst[thread_id]. No buffer_load, no src buffer.
-//   v_mov_b32 v1, 0xCAFEBABE
-//   buffer_store_dword v1, v0, s[0:3], 0 idxen
+// Shader: writes its own lane id (v0) to dst[lane]. No buffer_load, no src buffer.
+// Lane id (not a constant) so each dst[i] should equal i -- lets us see exactly
+// which lanes wrote, instead of a constant that hides per-lane coverage.
+//   v_mov_b32 v1, v0                            ; v1 = lane id (thread_id_x, TIDIG_COMP_CNT=0)
+//   buffer_store_dword v1, v0, s[0:3], 0 idxen  ; dst[v0] = v1
 //   s_waitcnt vmcnt(0)
 //   s_endpgm
-//   [OrbShdr BinaryInfo: type=5(CS), length=24 bytes]
+//   [OrbShdr BinaryInfo: type=5(CS), length=20 bytes]
 static const uint32_t g_shader[] = {
-    0x7E0202FF, 0xCAFEBABE,            // v_mov_b32 v1, 0xCAFEBABE
+    0x7E020300,                        // v_mov_b32 v1, v0   (v1 = lane id)
     0xE0702000, 0x80000100,            // buffer_store_dword v1, v0, s[0:3], 0 idxen
     0xBF8C0F70,                        // s_waitcnt vmcnt(0)
     0xBF810000,                        // s_endpgm
     0x5362724F, 0x00726468,            // "OrbShdr\0"
-    0x00001814,                        // type=5(CS), length=24 bytes
+    0x00001414,                        // type=5(CS), length=20 bytes
     0x00000000, 0x00000000, 0x00000000, 0x00000000,
 };
 
@@ -174,8 +178,9 @@ int main(void) {
     // Dispatch 1 group
     EMIT(PM4_HDR(IT_DISPATCH_DIRECT, 4)); EMIT(1); EMIT(1); EMIT(1); EMIT(1);
 
-    // Post-dispatch marker: dst[63] = 0x22222222
-    uint64_t m1 = (uint64_t)(uintptr_t)&dst[63];
+    // Post-dispatch marker: dst[64] = 0x22222222  (OUTSIDE the 0..63 shader range,
+    // so it cannot collide with the shader's own write to dst[63])
+    uint64_t m1 = (uint64_t)(uintptr_t)&dst[64];
     EMIT(PM4_HDR(IT_WRITE_DATA, 4)); EMIT((5<<8)|(1<<20));
     EMIT(m1 & 0xFFFFFFFF); EMIT(m1 >> 32); EMIT(0x22222222);
 
@@ -191,28 +196,38 @@ int main(void) {
     sceKernelUsleep(2000000);
 
     logf("dst[0]  = %x", dst[0]);
-    if      (dst[0] == 0x11111111) logf(" (pre-dispatch marker ONLY)\n");
-    else if (dst[0] == 0xCAFEBABE) logf(" (SHADER WROTE! dispatch works!)\n");
+    if      (dst[0] == 0x11111111) logf(" (pre-marker survived: lane 0 did NOT write)\n");
+    else if (dst[0] == 0x00000000) logf(" (lane 0 wrote its id 0)\n");
     else                           logf(" (unexpected)\n");
 
     logf("dst[63] = %x", dst[63]);
-    if      (dst[63] == 0x22222222) logf(" (post-dispatch marker - PM4 continued)\n");
-    else if (dst[63] == 0xCAFEBABE) logf(" (shader overwrote marker)\n");
-    else                            logf(" (unexpected)\n");
+    if      (dst[63] == 63) logf(" (lane 63 wrote its id)\n");
+    else if (dst[63] == 0)  logf(" (lane 63 did NOT write: still zero)\n");
+    else                    logf(" (unexpected)\n");
 
+    logf("dst[64] = %x", dst[64]);
+    if      (dst[64] == 0x22222222) logf(" (post-marker: PM4 continued past dispatch)\n");
+    else                            logf(" (post-marker missing!)\n");
+
+    // dst[i] should equal i. For i>0 a non-written slot stays 0 (zeroed);
+    // for i==0 a non-written slot stays the pre-marker 0x11111111.
     int hits = 0;
-    for (int i = 0; i < NUM_ELEMENTS; i++)
-        if (dst[i] == 0xCAFEBABE) hits++;
-    logf("\nShader wrote %d/%d elements\n", hits, NUM_ELEMENTS);
+    int wrong = 0;
+    for (int i = 0; i < NUM_ELEMENTS; i++) {
+        uint32_t unwritten = (i == 0) ? 0x11111111u : 0u;
+        if (dst[i] == (uint32_t)i)        hits++;
+        else if (dst[i] != unwritten)     wrong++;
+    }
+    logf("\nLanes that wrote their id: %d/%d", hits, NUM_ELEMENTS);
+    if (wrong) logf("  (%d slots hold a wrong value)", wrong);
+    logf("\n");
 
     if (hits == NUM_ELEMENTS)
-        logf("=== COMPUTE DISPATCH WORKS ===\n");
-    else if (hits == 0 && dst[0] == 0x11111111 && dst[63] == 0x22222222)
-        logf("=== SHADER COMPILED BUT DIDN'T EXECUTE (V#/userdata issue) ===\n");
-    else if (hits == 0 && dst[0] == 0x11111111)
-        logf("=== DISPATCH CRASHED (post-marker missing) ===\n");
-    else if (hits == 0)
-        logf("=== NO PM4 PROCESSING AT ALL ===\n");
+        logf("=== ALL 64 LANES WROTE - dispatch fully correct ===\n");
+    else if (hits == NUM_ELEMENTS - 1 && dst[63] == 0)
+        logf("=== 63/64: lane 63 genuinely did NOT write (real lane drop) ===\n");
+    else
+        logf("=== %d/64 lanes wrote - investigate the gap ===\n", hits);
 
     log_close();
     sceKernelUsleep(3000000);
