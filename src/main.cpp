@@ -4,6 +4,8 @@
 #include <vector>
 
 #include <stdint.h>
+#include <cstdio>
+#include <cstdarg>
 #include <sys/types.h>
 #include <orbis/_types/kernel.h>
 #include <orbis/_types/pthread.h>
@@ -449,7 +451,31 @@ struct t_after_action {
 
 std::vector<t_after_action> test_after_action{};
 
+#define RESULT_PATH "/data/cmp_test_results.txt"
+
+// Mirror a result line to klog and append it to an FTP-able file on disk.
+static void result_emit(const char* fmt, ...) {
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    printf("%s", line);
+    FILE* f = fopen(RESULT_PATH, "a");
+    if (f) {
+        fputs(line, f);
+        fclose(f);
+    }
+}
+
 static void do_test_after_action() {
+
+    FILE* rf = fopen(RESULT_PATH, "w");
+    if (rf) {
+        fclose(rf);
+    } else {
+        printf("[result] cannot open %s for writing\n", RESULT_PATH);
+    }
 
     for (auto& element : test_after_action) {
 
@@ -625,12 +651,12 @@ static t_cs_shader_test make_cs_mask_readback_test(t_linear_alloc* linear_dmem,
     auto on_after = [](t_cs_shader_test* t) {
         const uint exp[4] = { 0xFFFFFFFF, 0x0000FFFF, 0xFFFFFFFF, 0x0000FFFF };
         const char* lbl[4] = { "sgpr_mask_lo", "sgpr_mask_hi", "vcc_lo", "vcc_hi" };
-        printf("[mask_readback] wave=64, predicate (lane < 48)\n");
+        result_emit("[mask_readback] wave=64, predicate (lane < 48)\n");
         for (int i = 0; i < 4; i++) {
-            printf("  %-12s = %08x  expected %08x -> %s\n",
+            result_emit("  %-12s = %08x  expected %08x -> %s\n",
                    lbl[i], t->dst[i], exp[i], PASS[t->dst[i] == exp[i]]);
         }
-        printf("  (hi word 0000ffff = 64-lane wave; 00000000 = 32-lane wave)\n");
+        result_emit("  (hi word 0000ffff = 64-lane wave; 00000000 = 32-lane wave)\n");
     };
 
     test_after_action.push_back({ on_after, t });
@@ -946,9 +972,9 @@ static t_cs_shader_test make_cs_lg_u64_test(t_linear_alloc* linear_dmem,
     auto on_after = [](t_cs_shader_test* t) {
         const uint exp[4] = { 0x00000001, 0x0000FFFF, 0x000000FF, 0x00000000 };
         const char* lbl[4] = { "cmp(A!=B)", "maskA_hi", "maskB_hi", "unused" };
-        printf("[v_cmp_lg_u64] A=(lane<48) B=(lane<40), wave=64\n");
+        result_emit("[v_cmp_lg_u64] A=(lane<48) B=(lane<40), wave=64\n");
         for (int i = 0; i < 4; i++) {
-            printf("  %-10s = %08x  expected %08x -> %s\n",
+            result_emit("  %-10s = %08x  expected %08x -> %s\n",
                    lbl[i], t->dst[i], exp[i], PASS[t->dst[i] == exp[i]]);
         }
     };
