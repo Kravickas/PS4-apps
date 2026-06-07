@@ -23,6 +23,10 @@
 #define mmCOMPUTE_PGM_RSRC2     0x2E13
 #define mmCOMPUTE_USER_DATA_0   0x2E40
 
+/* RELEASE_MEM event-word cache actions (CIK/Liverpool) */
+#define RM_TC_WB_ACTION_ENA   (1u << 15) /* write L2 (TCC) back to memory */
+#define RM_TC_ACTION_ENA      (1u << 17) /* invalidate L2 (TCC) */
+
 struct PM4Builder {
     uint32_t* buf;
     uint32_t  off;
@@ -60,7 +64,9 @@ struct PM4Builder {
 
     void release_mem(uint64_t addr, uint32_t value) {
         emit(PM4_HDR(PM4_RELEASE_MEM, 6));
-        emit(0x528);                             /* event_type=0x28(BOP_TS), event_index=5(EOP) */
+        /* event_type=0x28(BOP_TS), event_index=5(EOP), + write back & invalidate L2 so
+           shader stores reach GARLIC memory before the fence is written */
+        emit(0x528 | RM_TC_WB_ACTION_ENA | RM_TC_ACTION_ENA);
         emit((1u << 29));                        /* data_sel=1(Data32Low), int_sel=0(None) */
         emit((uint32_t)(addr & 0xFFFFFFFF));
         emit((uint32_t)(addr >> 32));
