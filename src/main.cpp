@@ -1,16 +1,21 @@
-// PS4 IMAGE_LOAD_MIP + 2x MSAA T# hardware test (graphics pipeline)
-// Built on the CUBETST00 GFX-ring launch path (sceGnmSubmitCommandBuffers),
-// which is proven to rasterize. The compute-queue path never launched a wave,
-// so the probe runs as a single pixel shader instead.
+// PS4 IMAGE_LOAD_MIP + 2x MSAA T# hardware test (graphics pipeline, two-pass)
 //
-// The PS, in one wave:
-//   image_store 0xAAAAAAAA -> sample 0, 0xBBBBBBBB -> sample 1 of a 2x MSAA image
-//   image_load  fragid 0 / 1                          -> baseline [0],[1]
-//   image_load_mip (CTR opcode 0xf0040100) v2/v3      -> tests   [2]..[5]
-// All ops use GLC + s_waitcnt so the read-after-write is coherent in the wave.
+// Built on the CUBETST00 GFX-ring launch (sceGnmSubmitCommandBuffers).
+// The earlier single-shader version wrote and read the same MSAA UAV in one
+// wave; that intra-wave read-after-write wedged the real GPU. This version
+// separates them into two submits with a fence between, so the write fully
+// retires before the read issues (GLC keeps the data coherent through L2):
 //
-// Verdict: if [2]==AAAA and [3]==BBBB the sample tracks v2 (Outcome A, the mip
-// slot is the fragid); if [2]==BBBB and [3]==AAAA it tracks v3 (Outcome B).
+//   PASS 1 (write_ps): image_store 0xAAAAAAAA -> sample 0, 0xBBBBBBBB -> sample 1
+//   --- fence wait (write draw fully retired) ---
+//   PASS 2 (read_ps):  image_load fragid 0/1            -> baseline [0],[1]
+//                      image_load_mip (0xf0042100) v2/v3 -> tests   [2]..[5]
+//
+// On-disk stage markers are flushed before each submit, so if the GPU hangs
+// the result file still shows which pass it died in.
+//
+// Verdict: [2]==AAAA && [3]==BBBB -> sample tracks v2 (Outcome A, mip slot is
+// the fragid). [2]==BBBB && [3]==AAAA -> tracks v3 (Outcome B, what #4207 does).
 
 #include <stdint.h>
 #include "pm4.h"
@@ -42,78 +47,71 @@ extern int  printf(const char*, ...);
 #define NUM_FRAMES  2
 #define DCB_SIZE    0x10000
 #define MEM_TYPE_FLEX 0x03
-
 #define SCE_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB 0x80000000
 
 // --- Vertex shader: fullscreen triangle from a 3-vertex buffer (pos + color) ---
 static const uint32_t vs_shader_binary[] = {
-    0xBEEB03FF, 0x00000006,     // s_mov_b32 vcc_hi, 6 (OrbShdr marker)
-    0x28100085,                 // v_lshlrev_b32 v8, 5, v0   ; v8 = vertex_id * 32
-    0xE0381000, 0x80000008,     // buffer_load_dwordx4 v[0:3], v8, s[0:3], offen      ; pos
-    0xE0381010, 0x80000408,     // buffer_load_dwordx4 v[4:7], v8, s[0:3], offen off:16; color
-    0xBF8C1F70,                 // s_waitcnt vmcnt(0)
-    0xF80000CF, 0x03020100,     // exp pos0,   v0, v1, v2, v3
-    0xF8000A0F, 0x07060504,     // exp param0, v4, v5, v6, v7 done
-    0xBF810000,                 // s_endpgm
-    0xBF800000,                 // s_nop
+    0xBEEB03FF, 0x00000006,
+    0x28100085,
+    0xE0381000, 0x80000008,
+    0xE0381010, 0x80000408,
+    0xBF8C1F70,
+    0xF80000CF, 0x03020100,
+    0xF8000A0F, 0x07060504,
+    0xBF810000,
+    0xBF800000,
     0x5362724F, 0x00726468, 0x00003804, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
 };
 
-// --- Pixel shader: the probe. s[0:7]=MSAA T#, s[8:11]=result V# ---
-static const uint32_t probe_ps_binary[] = {
-    0xBEEB03FF, 0x00000006,     // s_mov_b32 vcc_hi, 6
-
-    // smoke: prove the PS ran, no image touched -> out[6]
-    0x7E1402FF, 0xC0DE0002,     // v_mov_b32 v10, 0xC0DE0002
-    0xE0704018, 0x80020A00,     // buffer_store_dword v10, s[8:11], offset:24 glc
-    0xBF8C1F70,
-
-    // write sample 0 = 0xAAAAAAAA
-    0x7E020080, 0x7E020280, 0x7E020480,   // v0=0, v1=0, v2=0 (fragid 0)
+// --- PASS 1: write-only PS. s[0:7] = MSAA T#. No reads -> no intra-wave hazard. ---
+static const uint32_t write_ps_binary[] = {
+    0xBEEB03FF, 0x00000006,
+    0x7E020080, 0x7E020280, 0x7E020480,   // v0=0, v1=0, v2=0
     0x7E0208FF, 0xAAAAAAAA,                // v4 = 0xAAAAAAAA
-    0xF0203100, 0x00000400,                // image_store v4, v[0:2], s[0:7] glc
+    0xF0203100, 0x00000400,                // image_store v4, v[0:2], s[0:7] glc -> sample 0
     0xBF8C1F70,
-    // write sample 1 = 0xBBBBBBBB
     0x7E020481, 0x7E0208FF, 0xBBBBBBBB,    // v2=1, v4=0xBBBBBBBB
-    0xF0203100, 0x00000400,                // image_store v4, v[0:2], s[0:7] glc
+    0xF0203100, 0x00000400,                // image_store -> sample 1
     0xBF8C1F70,
+    0xF800180F, 0x00000000,                // exp mrt0 (dummy, v0 x4) done vm
+    0xBF810000, 0xBF800000,
+    0x5362724F, 0x00726468, 0x00005800, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
+};
 
-    // [0] image_load fragid 0
-    0x7E020080, 0x7E020280, 0x7E020480,
-    0xF0003100, 0x00000A00,                // image_load v10, v[0:2], s[0:7] glc
+// --- PASS 2: read-only PS. s[0:7] = MSAA T#, s[8:11] = result V#. ---
+static const uint32_t read_ps_binary[] = {
+    0xBEEB03FF, 0x00000006,
+    0x7E1402FF, 0xC0DE0002,                // smoke: v10 = marker
+    0xE0704018, 0x80020A00,                // buffer_store -> out[6]
     0xBF8C1F70,
-    0xE0704000, 0x80020A00,                // -> offset 0
-    // [1] image_load fragid 1
-    0x7E020481,
+    0x7E020080, 0x7E020280, 0x7E020480,    // [0] image_load fragid 0
     0xF0003100, 0x00000A00,
     0xBF8C1F70,
-    0xE0704004, 0x80020A00,                // -> offset 4
-    // [2] image_load_mip v2=0, v3=1
-    0x7E020080, 0x7E020280, 0x7E020480, 0x7E020681,
-    0xF0042100, 0x00000A00,                // image_load_mip v10, v[0:3], s[0:7] glc
+    0xE0704000, 0x80020A00,
+    0x7E020481,                            // [1] image_load fragid 1
+    0xF0003100, 0x00000A00,
     0xBF8C1F70,
-    0xE0704008, 0x80020A00,                // -> offset 8
-    // [3] image_load_mip v2=1, v3=0
-    0x7E020481, 0x7E020680,
+    0xE0704004, 0x80020A00,
+    0x7E020080, 0x7E020280, 0x7E020480, 0x7E020681,  // [2] mip v2=0,v3=1
     0xF0042100, 0x00000A00,
     0xBF8C1F70,
-    0xE070400C, 0x80020A00,                // -> offset 12
-    // [4] image_load_mip v2=1, v3=1
-    0x7E020481, 0x7E020681,
+    0xE0704008, 0x80020A00,
+    0x7E020481, 0x7E020680,                // [3] mip v2=1,v3=0
     0xF0042100, 0x00000A00,
     0xBF8C1F70,
-    0xE0704010, 0x80020A00,                // -> offset 16
-    // [5] image_load_mip v2=0, v3=0   (CTR's exact case: mipid 0)
-    0x7E020480, 0x7E020680,
+    0xE070400C, 0x80020A00,
+    0x7E020481, 0x7E020681,                // [4] mip v2=1,v3=1
     0xF0042100, 0x00000A00,
     0xBF8C1F70,
-    0xE0704014, 0x80020A00,                // -> offset 20
-
+    0xE0704010, 0x80020A00,
+    0x7E020480, 0x7E020680,                // [5] mip v2=0,v3=0
+    0xF0042100, 0x00000A00,
     0xBF8C1F70,
-    0xF800180F, 0x0A0A0A0A,                // exp mrt0, v10 x4 done vm (show last result)
-    0xBF810000,                            // s_endpgm
-    0xBF800000,
-    0x5362724F, 0x00726468, 0x00012C00, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
+    0xE0704014, 0x80020A00,
+    0xBF8C1F70,
+    0xF800180F, 0x0A0A0A0A,                // exp mrt0 (v10 x4) done vm
+    0xBF810000, 0xBF800000,
+    0x5362724F, 0x00726468, 0x0000E000, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
 };
 
 static void my_memset(void* d, int v, unsigned long n) {
@@ -125,8 +123,8 @@ static void my_memcpy(void* d, const void* s, unsigned long n) {
     for (unsigned long i = 0; i < n; i++) dp[i] = sp[i];
 }
 static void* gpu_alloc(unsigned long size, unsigned long align) {
-    if (align < 0x4000) align = 0x4000;                 // PS4 direct-memory granularity
-    size = (size + (align - 1)) & ~(align - 1);          // length must be a multiple of alignment
+    if (align < 0x4000) align = 0x4000;
+    size = (size + (align - 1)) & ~(align - 1);
     long phys = 0; void* addr = 0;
     if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, MEM_TYPE_FLEX, &phys)) return 0;
     if (sceKernelMapDirectMemory(&addr, size, 0x33, 0, phys, align)) return 0;
@@ -134,7 +132,6 @@ static void* gpu_alloc(unsigned long size, unsigned long align) {
     return addr;
 }
 
-// Raw buffer V# (stride 0): used for the vertex buffer and the result buffer.
 static void build_buffer_vsharp(uint32_t* v, void* base, uint32_t size_bytes) {
     uint64_t addr = (uint64_t)(uintptr_t)base;
     v[0] = (uint32_t)(addr & 0xFFFFFFFFu);
@@ -142,8 +139,6 @@ static void build_buffer_vsharp(uint32_t* v, void* base, uint32_t size_bytes) {
     v[2] = size_bytes;
     v[3] = (0u) | (1u << 3) | (2u << 6) | (3u << 9) | (4u << 12) | (4u << 15) | (0u << 27);
 }
-
-// 2x MSAA, R32_UINT, 8x8, type=14 (2D MSAA), last_level=1 (2 samples).
 static void build_msaa_tsharp(uint32_t d[8], void* base) {
     my_memset(d, 0, 32);
     uint64_t addr = (uint64_t)(uintptr_t)base;
@@ -162,39 +157,37 @@ static void s_hex(char* dst, int* p, uint32_t v) {
     s_cat(dst, p, "0x");
     for (int i = 7; i >= 0; i--) dst[(*p)++] = h[(v >> (i * 4)) & 0xF];
 }
+static void write_file(const char* body, int n) {
+    int fd = sceKernelOpen("/data/image_msaa_result.txt", 0x601, 0x1B6);
+    if (fd < 0) fd = sceKernelOpen("/mnt/usb0/image_msaa_result.txt", 0x601, 0x1B6);
+    if (fd >= 0) { sceKernelWrite(fd, body, (unsigned long)n); sceKernelClose(fd); }
+    printf("%s", body);
+}
+static void write_stage(const char* msg) {
+    char s[256]; int p = 0; s_cat(s, &p, "STAGE: "); s_cat(s, &p, msg); s_cat(s, &p, "\n");
+    write_file(s, p);
+}
 
-static uint32_t build_probe_dcb(struct PM4Builder* b,
-                                const uint32_t* vs_addr, const uint32_t* ps_addr,
-                                const uint32_t* vb_vsharp, const uint32_t* img_tsharp,
-                                const uint32_t* res_vsharp, void* color_base,
-                                volatile uint32_t* fence_addr, uint32_t fence_value) {
+// One DCB: bind a PS (+rsrc, +user data) and draw the fullscreen triangle.
+static uint32_t build_dcb(struct PM4Builder* b, const uint32_t* vs_addr, const uint32_t* ps_addr,
+                          uint32_t ps_rsrc1, uint32_t ps_rsrc2, const uint32_t* ud, uint32_t ud_n,
+                          const uint32_t* vb_vsharp, void* color_base,
+                          volatile uint32_t* fence_addr, uint32_t fence_value) {
     pm4_context_control(b);
-
-    // VS: program + V# (vertex buffer) in s[0:3]
     {
         uint64_t g = (uint64_t)(uintptr_t)vs_addr;
         uint32_t regs[4] = { (uint32_t)(g >> 8), (uint32_t)(g >> 40), 3u, (4u << 1) };
         pm4_set_sh_regs(b, SH_VS_PGM_LO, regs, 4);
         pm4_set_sh_regs(b, SH_VS_USER_DATA_0, vb_vsharp, 4);
     }
-    // PS: program + T#(s[0:7]) + result V#(s[8:11]) in user data
     {
         uint64_t g = (uint64_t)(uintptr_t)ps_addr;
-        // RSRC1: num_vgprs field=2 (12 VGPRs), num_sgprs field=1 (16 SGPRs)
-        // RSRC2: user_sgpr=12 (s[0:7]=T#, s[8:11]=V#)
-        uint32_t regs[4] = { (uint32_t)(g >> 8), (uint32_t)(g >> 40), 0x42u, (12u << 1) };
+        uint32_t regs[4] = { (uint32_t)(g >> 8), (uint32_t)(g >> 40), ps_rsrc1, ps_rsrc2 };
         pm4_set_sh_regs(b, SH_PS_PGM_LO, regs, 4);
-        uint32_t ud[12];
-        for (int i = 0; i < 8; i++) ud[i] = img_tsharp[i];
-        for (int i = 0; i < 4; i++) ud[8 + i] = res_vsharp[i];
-        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 12);
+        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, ud_n);
     }
-
-    // Small scissor (16x16): a handful of fragments, deterministic, fast.
-    {
-        uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
-        pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, sc, 2);
-    }
+    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
+      pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, sc, 2); }
     { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
       pm4_set_context_regs(b, CTX_GENERIC_SCISSOR, sc, 2); }
     { uint32_t sc[2] = { (1u << 30), (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
@@ -209,14 +202,10 @@ static uint32_t build_probe_dcb(struct PM4Builder* b,
         pm4_emit_f(b, 0.5f); pm4_emit_f(b, 0.5f);
     }
     pm4_set_context_reg(b, CTX_INDEX_OFFSET, 0);
-
-    // Depth disabled (probe needs no depth interaction)
     pm4_set_context_reg(b, CTX_DEPTH_CONTROL, 0);
     pm4_set_context_reg(b, CTX_DB_Z_INFO, 0);
     pm4_set_context_reg(b, CTX_DB_STENCIL_INFO, 0);
-    pm4_set_context_reg(b, 0x203, 0);   // DB_SHADER_CONTROL
-
-    // Color buffer = the framebuffer (so the PS export has a target)
+    pm4_set_context_reg(b, 0x203, 0);
     pm4_set_context_reg(b, CTX_CB_COLOR0_BASE, (uint32_t)((uint64_t)(uintptr_t)color_base >> 8));
     pm4_set_context_reg(b, CTX_CB_COLOR0_PITCH, (DISPLAY_W / 8) - 1);
     pm4_set_context_reg(b, CTX_CB_COLOR0_SLICE, (DISPLAY_W * DISPLAY_H / 64) - 1);
@@ -225,8 +214,6 @@ static uint32_t build_probe_dcb(struct PM4Builder* b,
     pm4_set_context_reg(b, CTX_CB_COLOR0_ATTRIB, 8u);
     pm4_set_context_reg(b, CTX_COLOR_TARGET_MASK, 0x0000000Fu);
     pm4_set_context_reg(b, CTX_COLOR_SHADER_MASK, 0x0000000Fu);
-
-    // Pipeline
     pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0, 0);
     pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 0);
     pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x00000002u);
@@ -239,48 +226,17 @@ static uint32_t build_probe_dcb(struct PM4Builder* b,
     pm4_set_context_reg(b, CTX_CLIPPER_CONTROL, 0);
     pm4_set_context_reg(b, CTX_VIEWPORT_CONTROL, 0x0000043Fu);
     pm4_set_context_reg(b, CTX_VS_OUTPUT_CONTROL, 0);
-    pm4_set_context_reg(b, 0x205, 0x00000006u);   // PA_SU_SC_MODE_CNTL: cull back, CCW
+    pm4_set_context_reg(b, 0x205, 0x00000006u);
     pm4_set_context_reg(b, CTX_MODE_CONTROL, 0);
     pm4_set_context_reg(b, CTX_STAGE_ENABLE, 0);
-    pm4_set_context_reg(b, CTX_AA_CONFIG, 0);       // render target not MSAA
+    pm4_set_context_reg(b, CTX_AA_CONFIG, 0);
     pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
     pm4_set_context_reg(b, CTX_INDEX_SIZE, 0);
-
-    pm4_set_uconfig_reg(b, UCFG_PRIMITIVE_TYPE, 4); // triangle list
+    pm4_set_uconfig_reg(b, UCFG_PRIMITIVE_TYPE, 4);
     pm4_set_uconfig_reg(b, UCFG_NUM_INSTANCES, 1);
-
-    pm4_draw_index_auto(b, 3);                      // fullscreen triangle
+    pm4_draw_index_auto(b, 3);
     pm4_event_write_eop(b, fence_addr, fence_value);
     return b->off * 4;
-}
-
-static void write_result(volatile uint32_t* out) {
-    char s[2048]; int p = 0;
-    s_cat(s, &p, "IMAGE_LOAD_MIP + 2x MSAA T# HW TEST (gfx)\n");
-    s_cat(s, &p, "[0] LOAD     frag0     = "); s_hex(s, &p, out[0]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[1] LOAD     frag1     = "); s_hex(s, &p, out[1]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[2] LOAD_MIP v2=0,v3=1 = "); s_hex(s, &p, out[2]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[3] LOAD_MIP v2=1,v3=0 = "); s_hex(s, &p, out[3]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[4] LOAD_MIP v2=1,v3=1 = "); s_hex(s, &p, out[4]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "[5] LOAD_MIP v2=0,v3=0 = "); s_hex(s, &p, out[5]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "smoke out[6]           = "); s_hex(s, &p, out[6]); s_cat(s, &p, "\n");
-    s_cat(s, &p, "verdict: ");
-    if (out[6] != 0xC0DE0002)
-        s_cat(s, &p, "PS DID NOT RUN (smoke failed)\n");
-    else if (out[0] == 0xDDDDDDDD || out[1] == 0xDDDDDDDD ||
-             !((out[0] == 0xAAAAAAAA && out[1] == 0xBBBBBBBB)))
-        s_cat(s, &p, "PS ran, store/load broken (check T# tiling)\n");
-    else if (out[2] == 0xAAAAAAAA && out[3] == 0xBBBBBBBB)
-        s_cat(s, &p, "OUTCOME A - sample = v2 (mip slot); fix #4207 (use Arg(2))\n");
-    else if (out[2] == 0xBBBBBBBB && out[3] == 0xAAAAAAAA)
-        s_cat(s, &p, "OUTCOME B - sample = v3; #4207 was correct\n");
-    else
-        s_cat(s, &p, "UNEXPECTED\n");
-
-    int fd = sceKernelOpen("/data/image_msaa_result.txt", 0x601, 0x1B6);
-    if (fd < 0) fd = sceKernelOpen("/mnt/usb0/image_msaa_result.txt", 0x601, 0x1B6);
-    if (fd >= 0) { sceKernelWrite(fd, s, (unsigned long)p); sceKernelClose(fd); }
-    printf("%s", s);
 }
 
 int main(void) {
@@ -300,19 +256,20 @@ int main(void) {
     sceVideoOutRegisterBuffers(video, 0, fb, NUM_FRAMES, attr);
 
     void* vert_buf = gpu_alloc(4096, 0x1000);
-    void* img_mem  = gpu_alloc(0x10000, 0x10000);   // 2x MSAA image backing
-    void* res_buf  = gpu_alloc(0x1000, 0x1000);     // result buffer
+    void* img_mem  = gpu_alloc(0x10000, 0x10000);
+    void* res_buf  = gpu_alloc(0x1000, 0x1000);
     void* vs_mem   = gpu_alloc(sizeof(vs_shader_binary) + 256, 0x1000);
-    void* ps_mem   = gpu_alloc(sizeof(probe_ps_binary) + 256, 0x1000);
+    void* wps_mem  = gpu_alloc(sizeof(write_ps_binary) + 256, 0x1000);
+    void* rps_mem  = gpu_alloc(sizeof(read_ps_binary) + 256, 0x1000);
     uint32_t* dcb  = (uint32_t*)gpu_alloc(DCB_SIZE, 0x10000);
     volatile uint32_t* fence = (volatile uint32_t*)gpu_alloc(0x1000, 0x1000);
-    if (!vert_buf || !img_mem || !res_buf || !vs_mem || !ps_mem || !dcb || !fence) {
+    if (!vert_buf || !img_mem || !res_buf || !vs_mem || !wps_mem || !rps_mem || !dcb || !fence) {
         printf("alloc fail\n"); return 1;
     }
     my_memcpy(vs_mem, vs_shader_binary, sizeof(vs_shader_binary));
-    my_memcpy(ps_mem, probe_ps_binary, sizeof(probe_ps_binary));
+    my_memcpy(wps_mem, write_ps_binary, sizeof(write_ps_binary));
+    my_memcpy(rps_mem, read_ps_binary, sizeof(read_ps_binary));
 
-    // Fullscreen triangle: pos(vec4) + color(vec4), stride 32
     {
         float* v = (float*)vert_buf;
         float tri[3][8] = {
@@ -327,26 +284,68 @@ int main(void) {
     build_buffer_vsharp(vb_vsharp, vert_buf, 96);
     build_buffer_vsharp(res_vsharp, res_buf, 256);
     build_msaa_tsharp(img_tsharp, img_mem);
-
-    *fence = 0;
     for (int i = 0; i < 16; i++) ((volatile uint32_t*)res_buf)[i] = 0xDDDDDDDD;
     for (unsigned long i = 0; i < fb_size / 4; i++) ((uint32_t*)fb[0])[i] = 0xFF101010;
 
-    struct PM4Builder pm4;
-    pm4_init(&pm4, dcb, DCB_SIZE / 4);
-    uint32_t bytes = build_probe_dcb(&pm4, (const uint32_t*)vs_mem, (const uint32_t*)ps_mem,
-                                     vb_vsharp, img_tsharp, res_vsharp, fb[0], fence, 1);
+    uint32_t ud_write[8];
+    for (int i = 0; i < 8; i++) ud_write[i] = img_tsharp[i];
+    uint32_t ud_read[12];
+    for (int i = 0; i < 8; i++) ud_read[i] = img_tsharp[i];
+    for (int i = 0; i < 4; i++) ud_read[8 + i] = res_vsharp[i];
 
-    const uint32_t* addrs[1] = { dcb };
-    uint32_t sizes[1] = { bytes };
-    sceGnmSubmitCommandBuffers(1, addrs, sizes, 0, 0);
-    sceGnmSubmitDone();
+    const uint32_t* addrs[1]; uint32_t sizes[1];
 
-    for (int w = 0; w < 1000000; w++) { if (*fence >= 1) break; sceKernelUsleep(10); }
+    // PASS 1: write the MSAA samples
+    write_stage("1 write submitted (if this is the last line, the WRITE pass hung)");
+    *fence = 0;
+    {
+        struct PM4Builder pm4; pm4_init(&pm4, dcb, DCB_SIZE / 4);
+        uint32_t n = build_dcb(&pm4, (const uint32_t*)vs_mem, (const uint32_t*)wps_mem,
+                               0x2u, (8u << 1), ud_write, 8, vb_vsharp, fb[0], fence, 1);
+        addrs[0] = dcb; sizes[0] = n;
+        sceGnmSubmitCommandBuffers(1, addrs, sizes, 0, 0);
+        sceGnmSubmitDone();
+    }
+    for (int w = 0; w < 2000000; w++) { if (*fence >= 1) break; sceKernelUsleep(10); }
 
-    write_result((volatile uint32_t*)res_buf);
+    // PASS 2: read them back
+    write_stage("2 write ok, read submitted (if last line, the READ pass hung)");
+    *fence = 0;
+    {
+        struct PM4Builder pm4; pm4_init(&pm4, dcb, DCB_SIZE / 4);
+        uint32_t n = build_dcb(&pm4, (const uint32_t*)vs_mem, (const uint32_t*)rps_mem,
+                               0x42u, (12u << 1), ud_read, 12, vb_vsharp, fb[0], fence, 1);
+        addrs[0] = dcb; sizes[0] = n;
+        sceGnmSubmitCommandBuffers(1, addrs, sizes, 0, 0);
+        sceGnmSubmitDone();
+    }
+    for (int w = 0; w < 2000000; w++) { if (*fence >= 1) break; sceKernelUsleep(10); }
+
+    // Results
+    volatile uint32_t* out = (volatile uint32_t*)res_buf;
+    char s[2048]; int p = 0;
+    s_cat(s, &p, "IMAGE_LOAD_MIP + 2x MSAA T# HW TEST (two-pass)\n");
+    s_cat(s, &p, "[0] LOAD     frag0     = "); s_hex(s, &p, out[0]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[1] LOAD     frag1     = "); s_hex(s, &p, out[1]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[2] LOAD_MIP v2=0,v3=1 = "); s_hex(s, &p, out[2]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[3] LOAD_MIP v2=1,v3=0 = "); s_hex(s, &p, out[3]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[4] LOAD_MIP v2=1,v3=1 = "); s_hex(s, &p, out[4]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "[5] LOAD_MIP v2=0,v3=0 = "); s_hex(s, &p, out[5]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "smoke out[6]           = "); s_hex(s, &p, out[6]); s_cat(s, &p, "\n");
+    s_cat(s, &p, "verdict: ");
+    if (out[6] != 0xC0DE0002)
+        s_cat(s, &p, "READ PS DID NOT RUN (smoke failed)\n");
+    else if (!(out[0] == 0xAAAAAAAA && out[1] == 0xBBBBBBBB))
+        s_cat(s, &p, "store/load broken (check T# tiling)\n");
+    else if (out[2] == 0xAAAAAAAA && out[3] == 0xBBBBBBBB)
+        s_cat(s, &p, "OUTCOME A - sample = v2 (mip slot); #4207 should use Arg(2)\n");
+    else if (out[2] == 0xBBBBBBBB && out[3] == 0xAAAAAAAA)
+        s_cat(s, &p, "OUTCOME B - sample = v3; #4207 was correct\n");
+    else
+        s_cat(s, &p, "UNEXPECTED\n");
+    write_file(s, p);
+
     sceVideoOutSubmitFlip(video, 0, 1, 0);
-
     for (;;) sceKernelUsleep(1000000);
     return 0;
 }
