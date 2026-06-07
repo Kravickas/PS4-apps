@@ -125,6 +125,8 @@ static void my_memcpy(void* d, const void* s, unsigned long n) {
     for (unsigned long i = 0; i < n; i++) dp[i] = sp[i];
 }
 static void* gpu_alloc(unsigned long size, unsigned long align) {
+    if (align < 0x4000) align = 0x4000;                 // PS4 direct-memory granularity
+    size = (size + (align - 1)) & ~(align - 1);          // length must be a multiple of alignment
     long phys = 0; void* addr = 0;
     if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, MEM_TYPE_FLEX, &phys)) return 0;
     if (sceKernelMapDirectMemory(&addr, size, 0x33, 0, phys, align)) return 0;
