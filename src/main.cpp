@@ -75,7 +75,7 @@ static const uint32_t write_ps_binary[] = {
     0xBF8C1F70,
     0xF800180F, 0x00000000,                // exp mrt0 (dummy, v0 x4) done vm
     0xBF810000, 0xBF800000,
-    0x5362724F, 0x00726468, 0x00005800, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
+    0x5362724F, 0x00726468, 0x00005800, 0x00000000, 0x00000001, 0x00005752, 0x00000000,
 };
 
 // --- PASS 2: read-only PS. s[0:7] = MSAA T#, s[8:11] = result V#. ---
@@ -111,7 +111,7 @@ static const uint32_t read_ps_binary[] = {
     0xBF8C1F70,
     0xF800180F, 0x0A0A0A0A,                // exp mrt0 (v10 x4) done vm
     0xBF810000, 0xBF800000,
-    0x5362724F, 0x00726468, 0x0000E000, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
+    0x5362724F, 0x00726468, 0x0000E000, 0x00000000, 0x00000002, 0x00005245, 0x00000000,
 };
 
 static void my_memset(void* d, int v, unsigned long n) {
