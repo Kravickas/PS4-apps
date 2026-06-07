@@ -77,9 +77,9 @@ static const char* write_result_file(const char* text) {
     return nullptr;
 }
 
-static void* gpu_alloc(unsigned long size, unsigned long align) {
+static void* gpu_alloc(unsigned long size, unsigned long align, int mem_type = 3) {
     long phys = 0; void* addr = nullptr;
-    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, 3, &phys)) return nullptr;
+    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, mem_type, &phys)) return nullptr;
     if (sceKernelMapDirectMemory(&addr, size, 0x33, 0, phys, align)) return nullptr;
     my_memset(addr, 0, size);
     return addr;
@@ -135,7 +135,7 @@ static const uint32_t shader_read[] = {
     // path from the image path. out[6]==0xC0DE0001 => store works (image is the problem);
     // out[6]==0xDDDDDDDD => the store itself never reaches memory (V# or GPU cache).
     0x7E0214FF, 0xC0DE0001, // v_mov_b32 v10, 0xC0DE0001
-    0xE0700018, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:24
+    0xE0704018, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:24
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
 
     // Test 0: IMAGE_LOAD fragid=0
@@ -144,13 +144,13 @@ static const uint32_t shader_read[] = {
     0x7E020480,             // v_mov_b32 v2, 0          ; fragid=0
     0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0700000, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:0
+    0xE0704000, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:0
 
     // Test 1: IMAGE_LOAD fragid=1
     0x7E020481,             // v_mov_b32 v2, 1
     0xF0001100, 0x00000A00, // image_load v10, v[0:2], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0700004, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:4
+    0xE0704004, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:4
 
     // Test 2: IMAGE_LOAD_MIP v2=0, v3=1
     0x7E020080,             // v_mov_b32 v0, 0
@@ -159,28 +159,28 @@ static const uint32_t shader_read[] = {
     0x7E020681,             // v_mov_b32 v3, 1
     0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0700008, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:8
+    0xE0704008, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:8
 
     // Test 3: IMAGE_LOAD_MIP v2=1, v3=0
     0x7E020481,             // v_mov_b32 v2, 1
     0x7E020680,             // v_mov_b32 v3, 0
     0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE070000C, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:12
+    0xE070400C, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:12
 
     // Test 4: IMAGE_LOAD_MIP v2=1, v3=1
     0x7E020481,             // v_mov_b32 v2, 1
     0x7E020681,             // v_mov_b32 v3, 1
     0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0700010, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:16
+    0xE0704010, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:16
 
     // Test 5: IMAGE_LOAD_MIP v2=0, v3=0
     0x7E020480,             // v_mov_b32 v2, 0
     0x7E020680,             // v_mov_b32 v3, 0
     0xF0041100, 0x00000A00, // image_load_mip v10, v[0:3], s[0:7] dmask:1 unorm
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
-    0xE0700014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:20
+    0xE0704014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0x80 offset:20
 
     0xBF8C1F70,             // s_waitcnt vmcnt(0)
     0xBF810000,             // s_endpgm
@@ -272,7 +272,7 @@ int main() {
     printf("=== IMAGE_LOAD_MIP + MSAA T# HW TEST ===\n\n");
 
     void* img_mem = gpu_alloc(0x10000, 0x10000);
-    volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
+    volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000, 0); // WB_ONION (CPU-coherent)
     uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000);
     volatile uint32_t* fence = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
 
