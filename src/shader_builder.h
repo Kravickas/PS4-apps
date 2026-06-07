@@ -29,6 +29,7 @@ struct ShaderBinaryInfo {
 };
 static_assert(sizeof(ShaderBinaryInfo) == 28);
 
+__attribute__((target("sse4.2")))
 uint32_t calc_crc32(void* data, ulong len) {
     uint32_t crc = 0xFFFFFFFF;
 
@@ -753,4 +754,3 @@ public:
 
 
 };
-
