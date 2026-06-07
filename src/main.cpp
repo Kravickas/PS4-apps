@@ -273,7 +273,7 @@ int main() {
 
     void* img_mem = gpu_alloc(0x10000, 0x10000);
     volatile uint32_t* out_buf = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000, 0); // WB_ONION (CPU-coherent)
-    uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000);
+    uint8_t* shd_mem = (uint8_t*)gpu_alloc(0x10000, 0x10000, 0);                      // WB_ONION (CPU->GPU coherent code)
     volatile uint32_t* fence = (volatile uint32_t*)gpu_alloc(0x10000, 0x10000);
 
     if (!img_mem || !out_buf || !shd_mem || !fence) {
