@@ -101,9 +101,10 @@ static const uint32_t read_ps_binary[] = {
     0xBF8C1F70,
     0xE070400C, 0x80020A00,
     0xBF8C1F70,
+    0x7E1402FF, 0x3F800000,                // v10 = 1.0f (white) — coverage probe via color export
     0xF800180F, 0x0A0A0A0A,                // exp mrt0 (v10 x4) done vm
     0xBF810000, 0xBF800000,
-    0x5362724F, 0x00726468, 0x0000A800, 0x00000000, 0x00000002, 0x00005245, 0x00000000,
+    0x5362724F, 0x00726468, 0x0000B000, 0x00000000, 0x00000002, 0x00005245, 0x00000000,
 };
 
 static void my_memset(void* d, int v, unsigned long n) {
@@ -178,13 +179,13 @@ static uint32_t build_dcb(struct PM4Builder* b, const uint32_t* vs_addr, const u
         pm4_set_sh_regs(b, SH_PS_PGM_LO, regs, 4);
         pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, ud_n);
     }
-    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
+    { uint32_t sc[2] = { 0, (256u & 0x7FFF) | ((256u & 0x7FFF) << 16) };
       pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { 0, (256u & 0x7FFF) | ((256u & 0x7FFF) << 15) };
       pm4_set_context_regs(b, CTX_GENERIC_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { (1u << 30), (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { (1u << 30), (256u & 0x7FFF) | ((256u & 0x7FFF) << 15) };
       pm4_set_context_regs(b, CTX_WINDOW_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { 0, (256u & 0x7FFF) | ((256u & 0x7FFF) << 15) };
       pm4_set_context_regs(b, CTX_VIEWPORT_SCISSOR0, sc, 2); }
     {
         pm4_emit(b, pm4_type3(PM4_SET_CONTEXT_REG, 7));
