@@ -210,7 +210,7 @@ static uint32_t build_dcb(struct PM4Builder* b, const uint32_t* vs_addr, const u
     pm4_set_context_reg(b, CTX_CB_COLOR0_PITCH, (DISPLAY_W / 8) - 1);
     pm4_set_context_reg(b, CTX_CB_COLOR0_SLICE, (DISPLAY_W * DISPLAY_H / 64) - 1);
     pm4_set_context_reg(b, CTX_CB_COLOR0_VIEW, 0);
-    pm4_set_context_reg(b, CTX_CB_COLOR0_INFO, (10u << 2) | (7u << 8));
+    pm4_set_context_reg(b, CTX_CB_COLOR0_INFO, (10u << 2) | (0u << 8)); // 8_8_8_8 UNORM
     pm4_set_context_reg(b, CTX_CB_COLOR0_ATTRIB, 8u);
     pm4_set_context_reg(b, CTX_COLOR_TARGET_MASK, 0x0000000Fu);
     pm4_set_context_reg(b, CTX_COLOR_SHADER_MASK, 0x0000000Fu);
