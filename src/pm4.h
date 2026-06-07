@@ -14,18 +14,17 @@
 #define SH_BASE               0x2C00
 #define SH(r)                 ((r) - SH_BASE)
 
-#define mmCOMPUTE_NUM_THREAD_X  0x2E07
-#define mmCOMPUTE_NUM_THREAD_Y  0x2E08
-#define mmCOMPUTE_NUM_THREAD_Z  0x2E09
-#define mmCOMPUTE_PGM_LO        0x2E0C
-#define mmCOMPUTE_PGM_HI        0x2E0D
-#define mmCOMPUTE_PGM_RSRC1     0x2E12
-#define mmCOMPUTE_PGM_RSRC2     0x2E13
-#define mmCOMPUTE_USER_DATA_0   0x2E40
-
-/* RELEASE_MEM event-word cache actions (CIK/Liverpool) */
-#define RM_TC_WB_ACTION_ENA   (1u << 15) /* write L2 (TCC) back to memory */
-#define RM_TC_ACTION_ENA      (1u << 17) /* invalidate L2 (TCC) */
+#define mmCOMPUTE_NUM_THREAD_X            0x2E07
+#define mmCOMPUTE_NUM_THREAD_Y            0x2E08
+#define mmCOMPUTE_NUM_THREAD_Z            0x2E09
+#define mmCOMPUTE_PGM_LO                  0x2E0C
+#define mmCOMPUTE_PGM_HI                  0x2E0D
+#define mmCOMPUTE_PGM_RSRC1               0x2E12
+#define mmCOMPUTE_PGM_RSRC2               0x2E13
+#define mmCOMPUTE_RESOURCE_LIMITS         0x2E15
+#define mmCOMPUTE_STATIC_THREAD_MGMT_SE0  0x2E16
+#define mmCOMPUTE_STATIC_THREAD_MGMT_SE1  0x2E17
+#define mmCOMPUTE_USER_DATA_0             0x2E40
 
 struct PM4Builder {
     uint32_t* buf;
@@ -59,14 +58,12 @@ struct PM4Builder {
         emit(x);
         emit(y);
         emit(z);
-        emit(1); /* initiator */
+        emit(1); /* initiator: COMPUTE_SHADER_EN */
     }
 
     void release_mem(uint64_t addr, uint32_t value) {
         emit(PM4_HDR(PM4_RELEASE_MEM, 6));
-        /* event_type=0x28(BOP_TS), event_index=5(EOP), + write back & invalidate L2 so
-           shader stores reach GARLIC memory before the fence is written */
-        emit(0x528 | RM_TC_WB_ACTION_ENA | RM_TC_ACTION_ENA);
+        emit(0x528);                             /* event_type=0x28(BOP_TS), event_index=5(EOP) */
         emit((1u << 29));                        /* data_sel=1(Data32Low), int_sel=0(None) */
         emit((uint32_t)(addr & 0xFFFFFFFF));
         emit((uint32_t)(addr >> 32));
