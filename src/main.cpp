@@ -66,11 +66,11 @@ static const uint32_t vs_shader_binary[] = {
 // --- PASS 1: write-only PS. s[0:7] = MSAA T#. No reads -> no intra-wave hazard. ---
 static const uint32_t write_ps_binary[] = {
     0xBEEB03FF, 0x00000006,
-    0x7E020080, 0x7E020280, 0x7E020480,   // v0=0, v1=0, v2=0
-    0x7E0208FF, 0xAAAAAAAA,                // v4 = 0xAAAAAAAA
+    0x7E000280, 0x7E020280, 0x7E040280,   // v0=0, v1=0, v2=0
+    0x7E0802FF, 0xAAAAAAAA,                // v4 = 0xAAAAAAAA
     0xF0203100, 0x00000400,                // image_store v4, v[0:2], s[0:7] glc -> sample 0
     0xBF8C1F70,
-    0x7E020481, 0x7E0208FF, 0xBBBBBBBB,    // v2=1, v4=0xBBBBBBBB
+    0x7E040281, 0x7E0802FF, 0xBBBBBBBB,    // v2=1, v4=0xBBBBBBBB
     0xF0203100, 0x00000400,                // image_store -> sample 1
     0xBF8C1F70,
     0xF800180F, 0x00000000,                // exp mrt0 (dummy, v0 x4) done vm
@@ -84,20 +84,20 @@ static const uint32_t read_ps_binary[] = {
     0x7E1402FF, 0xC0DE0002,                // smoke: v10 = marker
     0xE0704018, 0x80020A00,                // buffer_store -> out[6]
     0xBF8C1F70,
-    0x7E020080, 0x7E020280, 0x7E020480,    // [0] image_load fragid 0
+    0x7E000280, 0x7E020280, 0x7E040280,    // [0] image_load fragid 0 (v0=0,v1=0,v2=0)
     0xF0003100, 0x00000A00,
     0xBF8C1F70,
     0xE0704000, 0x80020A00,
-    0x7E020481,                            // [1] image_load fragid 1
+    0x7E040281,                            // [1] image_load fragid 1 (v2=1)
     0xF0003100, 0x00000A00,
     0xBF8C1F70,
     0xE0704004, 0x80020A00,
-    0x7E020080, 0x7E020280, 0x7E020480, 0x7E020681,  // [2] mip v2=0,v3=1
-    0xF0042100, 0x00000A00,
+    0x7E000280, 0x7E020280, 0x7E040280, 0x7E060281,  // [2] mip v2=0,v3=1
+    0xF0043100, 0x00000A00,
     0xBF8C1F70,
     0xE0704008, 0x80020A00,
-    0x7E020480, 0x7E020680,                // [3] mip v2=0,v3=0 (control -> sample 0)
-    0xF0042100, 0x00000A00,
+    0x7E040280, 0x7E060280,                // [3] mip v2=0,v3=0 (control -> sample 0)
+    0xF0043100, 0x00000A00,
     0xBF8C1F70,
     0xE070400C, 0x80020A00,
     0xBF8C1F70,
