@@ -180,11 +180,11 @@ static uint32_t build_dcb(struct PM4Builder* b, const uint32_t* vs_addr, const u
     }
     { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
       pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
       pm4_set_context_regs(b, CTX_GENERIC_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { (1u << 30), (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
       pm4_set_context_regs(b, CTX_WINDOW_SCISSOR, sc, 2); }
-    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 15) };
+    { uint32_t sc[2] = { 0, (16u & 0x7FFF) | ((16u & 0x7FFF) << 16) };
       pm4_set_context_regs(b, CTX_VIEWPORT_SCISSOR0, sc, 2); }
     {
         pm4_emit(b, pm4_type3(PM4_SET_CONTEXT_REG, 7));
