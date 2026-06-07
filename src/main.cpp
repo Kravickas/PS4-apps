@@ -15,6 +15,9 @@
 #include <stdint.h>
 #include "pm4.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern int  sceKernelAllocateDirectMemory(long, long, unsigned long, unsigned long, int, long*);
 extern int  sceKernelMapDirectMemory(void**, unsigned long, int, int, long, unsigned long);
 extern int  sceKernelUsleep(unsigned int);
@@ -30,6 +33,9 @@ extern int  sceKernelOpen(const char*, int, int);
 extern long sceKernelWrite(int, const void*, unsigned long);
 extern int  sceKernelClose(int);
 extern int  printf(const char*, ...);
+#ifdef __cplusplus
+}
+#endif
 
 #define DISPLAY_W   1920
 #define DISPLAY_H   1080
