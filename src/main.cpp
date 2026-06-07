@@ -113,7 +113,7 @@ static const uint32_t probe_ps_binary[] = {
     0xF800180F, 0x0A0A0A0A,                // exp mrt0, v10 x4 done vm (show last result)
     0xBF810000,                            // s_endpgm
     0xBF800000,
-    0x5362724F, 0x00726468, 0x00003800, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
+    0x5362724F, 0x00726468, 0x00012C00, 0x00000000, 0x12345678, 0xDEADBEEF, 0x00000000,
 };
 
 static void my_memset(void* d, int v, unsigned long n) {
