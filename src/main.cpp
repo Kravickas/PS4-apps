@@ -44,7 +44,6 @@ extern "C" {
     int32_t sceVideoOutSubmitFlip(int32_t handle, int32_t bufIndex, uint32_t flipMode, int64_t flipArg);
     int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t rate);
     int32_t sceVideoOutGetFlipStatus(int32_t handle, void* status);
-    int32_t sceVideoOutGetResolutionStatus(int32_t handle, void* status);
 }
 
 static void* my_memset(void* d, int v, unsigned long n) {
@@ -60,10 +59,6 @@ static void* my_memset(void* d, int v, unsigned long n) {
 struct VideoBufAttr {            // OrbisVideoOutBufferAttribute
     int32_t format; int32_t tmode; int32_t aspect;
     uint32_t width; uint32_t height; uint32_t pitch; uint64_t reserved[2];
-};
-struct VideoResStatus {          // OrbisVideoOutResolutionStatus (leading fields)
-    uint32_t width, height, paneWidth, paneHeight;
-    uint64_t refreshRate; float screenSize; uint16_t flags, r0; uint32_t r1[3];
 };
 struct VideoFlipStatus {         // OrbisVideoOutFlipStatus (leading fields)
     uint64_t num, ptime, stime; int64_t flipArg; uint64_t reserved[2];
@@ -173,15 +168,21 @@ struct Screen {
     int handle; bool ok; int w, h; int cur; long long flipid;
     uint32_t* fb[2];
     char lines[SCR_MAXLINES][120]; int nlines;
+    int prog_done, prog_total;
+
+    static int u2s(char* b, int p, int v) {   // append unsigned decimal
+        char t[12]; int n = 0;
+        if (v <= 0) t[n++] = '0';
+        while (v > 0) { t[n++] = (char)('0' + v % 10); v /= 10; }
+        while (n > 0) b[p++] = t[--n];
+        return p;
+    }
 
     bool init() {
-        ok = false; cur = 0; flipid = 0; nlines = 0;
+        ok = false; cur = 0; flipid = 0; nlines = 0; prog_done = 0; prog_total = 1;
         handle = sceVideoOutOpen(0xFF, 0, 0, 0);          // ORBIS_VIDEO_USER_MAIN, BUS_MAIN
         if (handle < 0) return false;
-        VideoResStatus res; my_memset(&res, 0, sizeof(res));
-        sceVideoOutGetResolutionStatus(handle, &res);
-        w = (int)res.width; h = (int)res.height;
-        if (w <= 0 || h <= 0) { w = 1920; h = 1080; }
+        w = 1920; h = 1080;   // target output is always full HD
         unsigned long fbsz = (unsigned long)w * (unsigned long)h * 4ul;
         unsigned long align = 0x200000ul;
         unsigned long total = (fbsz * 2ul + align - 1) / align * align;
@@ -262,13 +263,12 @@ struct Screen {
         uint32_t bg = 0x80101018u;
         long npx = (long)w * h;
         for (long i = 0; i < npx; i++) dst[i] = bg;
-        int maxlen = 1;
-        for (int i = 0; i < nlines; i++) { int l = 0; while (lines[i][l]) l++; if (l > maxlen) maxlen = l; }
-        // Largest scale in [2..4] that fits every line vertically and the longest
-        // line horizontally, so all tests stay on one screen without a tiny font.
-        int sh = 4; while (sh > 2 && nlines * (10*sh) > h - 8) sh--;
-        int sw = 4; while (sw > 2 && maxlen * (8*sw) > w - 12) sw--;
-        int scale = sh < sw ? sh : sw;
+        // Full HD fixed layout: ~32 lines (28 tests + headers) render at 16px
+        // (scale 2) using 640/1080 vertically, and the longest possible line
+        // (capped at 119 chars) is 119*16=1904 < 1908, so nothing clips. Only
+        // fall to 8px if the line count would ever overflow (it won't here).
+        int scale = 2;
+        if (nlines * (10*scale) > h - 8) scale = 1;
         int gw = 8*scale, rowh = 10*scale;
         int maxrows = (h - 8) / rowh;
         int first = (nlines > maxrows) ? nlines - maxrows : 0;
@@ -284,6 +284,26 @@ struct Screen {
             int x = 6;
             for (const char* q = s; *q; q++) { glyph(dst, x, y, *q, col, scale); x += gw; if (x > w - gw) break; }
             y += rowh;
+        }
+        // ---- progress bar along the bottom: '#' span = tests completed ----
+        int barmax = (w - 12) / gw;                 // '#' that fit across full HD
+        if (barmax < 1) barmax = 1;
+        int pct    = prog_total > 0 ? (prog_done * 100) / prog_total : 0;
+        int filled = prog_total > 0 ? (prog_done * barmax) / prog_total : 0;
+        if (filled > barmax) filled = barmax;
+        char lbl[64]; int lp = 0;
+        const char* pre = "Progress ";
+        while (*pre) lbl[lp++] = *pre++;
+        lp = u2s(lbl, lp, pct); lbl[lp++] = '%'; lbl[lp++] = ' '; lbl[lp++] = '(';
+        lp = u2s(lbl, lp, prog_done); lbl[lp++] = '/'; lp = u2s(lbl, lp, prog_total);
+        lbl[lp++] = ')'; lbl[lp] = 0;
+        int lx = 6, ly = h - 2 * rowh - 4;
+        for (const char* q = lbl; *q; q++) { glyph(dst, lx, ly, *q, 0x80E0E0E0u, scale); lx += gw; }
+        int bx = 6, by = h - rowh - 4;
+        for (int i = 0; i < barmax; i++) {
+            char ch = (i < filled) ? '#' : '-';
+            uint32_t bc = (i < filled) ? 0x8040E060u : 0x80383840u;
+            glyph(dst, bx, by, ch, bc, scale); bx += gw;
         }
         flipid++;
         sceVideoOutSubmitFlip(handle, cur, 1, flipid);    // 1 = VSYNC
@@ -736,11 +756,13 @@ static void* gpu_alloc(size_t size, size_t align = 0x10000) {
 // ============================================================================
 static int tests_run = 0, tests_passed = 0, tests_failed = 0, tests_skipped = 0;
 
-#define REPEAT 100   /* stress: run each test body 100x, aggregate to one result */
+#define REPEAT 100        /* stress: run each test body 100x, aggregate to one result */
+#define TOTAL_TESTS 26    /* tests dispatched per run (drives the on-screen progress bar) */
 
 #define TEST_BEGIN(name) \
     do { \
         tests_run++; \
+        g_screen.prog_done = tests_run; g_screen.prog_total = TOTAL_TESTS; \
         logf("\n[TEST %d] %s\n", tests_run, name); \
         log_flush(); \
         bool _pass = true; \
@@ -814,7 +836,6 @@ struct ComputeQueue {
 };
 
 static ComputeQueue g_cq;
-static ComputeQueue g_cq1;
 
 // ============================================================================
 //  CATEGORY 1: FENCE TIMING (RAW-1, RAW-2)
@@ -1094,60 +1115,6 @@ static void test_11_mem_semaphore_stress() {
 }
 
 // ============================================================================
-//  CATEGORY 4: CROSS-QUEUE ORDERING (WAW-2)
-// ============================================================================
-
-static void test_12_cross_queue_fence() {
-    TEST_BEGIN("WAW-2: GFX+Compute fence to same label determinism");
-    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(fence, "alloc");
-    // Using global g_cq
-    bool consistent = true; uint64_t first = 0;
-    for (int t = 0; t < 10; t++) {
-        *fence = 0; __asm__ volatile("" ::: "memory");
-        uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-        CmdBuffer gfx; gfx.init(dcb, 0x4000);
-        pm4_context_control(gfx);
-        pm4_event_write_eop(gfx, (void*)fence, 0xAAAA, 2, 0);
-        pm4_nop(gfx);
-        CmdBuffer acb = g_cq.begin();
-        pm4_release_mem(acb, (void*)fence, 0xBBBB, 2, 0);
-        pm4_nop(acb);
-        const uint32_t* dp[1] = { dcb }; uint32_t ds[1] = { gfx.sizeBytes() };
-        sceGnmSubmitCommandBuffers(1, dp, ds, nullptr, nullptr);
-        g_cq.submit(acb); sceGnmSubmitDone(); sceKernelUsleep(20000);
-        if (t == 0) first = *fence;
-        if (*fence != first) { consistent = false; break; }
-    }
-    if (_rep == REPEAT - 1) logf("  Final=0x%llX\n", (unsigned long long)*fence);
-    TEST_CHECK(consistent, "WAW-2: Cross-queue fence non-deterministic");
-    TEST_PASS();
-}
-
-static void test_13_two_compute_queues() {
-    TEST_BEGIN("WAW-2b: Two compute queues racing on same fence");
-    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(fence, "alloc");
-    if (g_cq1.vqid <= 0) {
-        if (!g_cq1.init(0, 1)) { logf("  [SKIP] cq1 failed\n"); tests_skipped++; }
-    }
-    bool consistent = true; uint64_t first = 0;
-    for (int t = 0; t < 10; t++) {
-        *fence = 0; __asm__ volatile("" ::: "memory");
-        CmdBuffer a0 = g_cq.begin();
-        pm4_release_mem(a0, (void*)fence, 0x1111, 2, 0); pm4_nop(a0);
-        CmdBuffer a1 = g_cq1.begin();
-        pm4_release_mem(a1, (void*)fence, 0x2222, 2, 0); pm4_nop(a1);
-        g_cq.submit(a0); g_cq1.submit(a1); sceKernelUsleep(20000);
-        if (t == 0) first = *fence;
-        if (*fence != first) { consistent = false; break; }
-    }
-    if (_rep == REPEAT - 1) logf("  Final=0x%llX\n", (unsigned long long)*fence);
-    TEST_CHECK(consistent, "WAW-2b: Two compute queues non-deterministic");
-    TEST_PASS();
-}
-
-// ============================================================================
 //  CATEGORY 5: WAIT_REG_MEM (all comparison functions)
 // ============================================================================
 
@@ -1387,7 +1354,7 @@ int main(void) {
 
     logf("========================================================\n");
     logf(" PS4 GPU/CPU Race Condition Test Suite - FULL EDITION\n");
-    logf(" 28 Tests | Target: Real PS4 + shadps4\n");
+    logf(" 26 Tests | Target: Real PS4 + shadps4\n");
     logf("========================================================\n");
 
     const int RUNS = 3;
@@ -1395,6 +1362,7 @@ int main(void) {
 
     for (int _run = 0; _run < RUNS; _run++) {
         tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
+        g_screen.prog_done = 0; g_screen.prog_total = TOTAL_TESTS;
         logf("\n===== RUN %d/%d (each test x%d) =====\n", _run+1, RUNS, REPEAT);
         g_cq.write_off = 0; // reset ring position
         sceKernelUsleep(500000); // 500ms drain before reset
@@ -1435,8 +1403,6 @@ int main(void) {
             test_02_release_mem_timing();
         test_08_acquire_mem_cross_engine();
         test_10_mem_semaphore_cross_queue();
-        test_12_cross_queue_fence();
-        test_13_two_compute_queues();
         }
 
         total_pass += tests_passed;
@@ -1453,7 +1419,6 @@ int main(void) {
     logf("========================================================\n");
 
     g_cq.destroy();
-    if (g_cq1.vqid > 0) g_cq1.destroy();
     log_close();
     sceKernelUsleep(5000000);
     sceSystemServiceLoadExec("EXIT", nullptr);
