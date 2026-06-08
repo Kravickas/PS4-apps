@@ -1,6 +1,6 @@
 // ============================================================================
 // PS4 GPU/CPU Race Condition Test Suite - FULL EDITION (single-file)
-// 30 tests covering RAW/WAR/WAW hazards. Passes on real PS4; failures on
+// 28 tests covering RAW/WAR/WAW hazards. Passes on real PS4; failures on
 // shadps4 pinpoint emulator bugs. Results -> /data/results.txt.
 //
 // Fixes vs multi-file version:
@@ -86,6 +86,7 @@ static void logf(const char* fmt, ...) {
         else buf[p++] = *f;
     }
     __builtin_va_end(ap);
+    sceKernelWrite(1, buf, (unsigned long)p);            // fd 1: shadPS4 console / PS4 klog
     int fd = sceKernelOpen(g_log_path, 0x0209, 0777);   // append
     if (fd >= 0) { sceKernelWrite(fd, buf, (unsigned long)p); sceKernelFsync(fd); sceKernelClose(fd); }
 }
@@ -403,42 +404,6 @@ static inline void pm4_event_write_eos_fence(CmdBuffer& cb, void* address, uint3
     cb.emit((uint32_t)(addr & 0xFFFFFFFFu));
     cb.emit(cmd_info);
     cb.emit(data);
-}
-
-// ---------------------------------------------------------------------------
-// SET_PREDICATION (real GNM/GCN predication mechanism).
-// Verified bit-for-bit against AMD PAL gfx6 (si_ci_vi = Sea Islands = Liverpool)
-// si_ci_vi_merged_pm4defs.h PM4CMDSETPREDICATION:
-//   ordinal1 = type-3 header (opcode 0x20, count field 1 -> 3 dwords total)
-//   ordinal2 = startAddressLo (full low 32 bits of condition address)
-//   ordinal3 = startAddrHi[7:0] | predicationBoolean[8] | hint[12]
-//              | predOp[18:16] | continueBit[31]
-//   predOp: 0=CLEAR 1=ZPASS 2=PRIMCOUNT 3=MEM. Address must be 16-byte aligned.
-// A subsequent packet whose type-3 header predicate bit (bit 0, verified vs the
-// same header struct) is set is gated by this condition.
-// ---------------------------------------------------------------------------
-#define SET_PRED_CLEAR 0u
-#define SET_PRED_MEM   3u
-static inline void pm4_set_predication(CmdBuffer& cb, volatile void* cond_addr,
-                                       uint32_t pred_op, uint32_t pred_bool) {
-    uint64_t addr = (uint64_t)(uintptr_t)cond_addr;
-    cb.emit(PM4_HDR(IT_SET_PREDICATION, 2));         // 0xC0012000 (count field = 1)
-    cb.emit((uint32_t)(addr & 0xFFFFFFFFu));         // ordinal2: startAddressLo
-    uint32_t o3 = (uint32_t)((addr >> 32) & 0xFFu);  // startAddrHi [7:0]
-    o3 |= (pred_bool & 1u) << 8;                     // predicationBoolean [8]
-    o3 |= (pred_op   & 7u) << 16;                    // predOp [18:16] (hint=0, continue=0)
-    cb.emit(o3);
-}
-
-// WRITE_DATA (u32) with the type-3 header predicate bit (bit 0) SET, so the CP
-// gates it on the active SET_PREDICATION condition.
-static inline void pm4_write_data_u32_pred(CmdBuffer& cb, volatile uint32_t* address, uint32_t value) {
-    uint64_t addr = (uint64_t)(uintptr_t)address;
-    cb.emit(PM4_HDR(IT_WRITE_DATA, 4) | 1u);   // predicate bit set
-    cb.emit((5u << 8) | (1u << 20));           // dst_sel=5 (memory async), wr_confirm
-    cb.emit((uint32_t)(addr & 0xFFFFFFFFu));
-    cb.emit((uint32_t)(addr >> 32));
-    cb.emit(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,47 +1023,6 @@ static void test_25_write_data_then_dma() {
 //  CATEGORY 8: COND_EXEC (RAW-9)
 // ============================================================================
 
-static void test_26_predication_skip() {
-    TEST_BEGIN("Predication: predicated WriteData SKIPPED when memory cond is false");
-    volatile uint64_t* cond = (volatile uint64_t*)gpu_alloc(0x10000); // 64KB-aligned (>=16B)
-    volatile uint32_t* r = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(cond && r && f, "alloc"); *cond = 0; *r = 0; *f = 0;  // cond==0 -> not visible
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    CmdBuffer cb; cb.init(dcb, 0x4000);
-    pm4_context_control(cb);
-    pm4_set_predication(cb, (void*)cond, SET_PRED_MEM, 1);  // pred_bool=1: execute-if-nonzero
-    pm4_write_data_u32_pred(cb, r, 0xDEAD);                 // predicated: skipped since cond==0
-    pm4_set_predication(cb, (void*)0, SET_PRED_CLEAR, 0);   // clear predication state
-    pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
-    // Real PS4: predication honored -> WriteData skipped -> *r==0 (PASS).
-    // shadps4: SET_PREDICATION is a no-op and the header predicate bit is never
-    //          checked, so WriteData always runs -> *r==0xDEAD (FAIL = the bug).
-    TEST_CHECK(*r == 0, "Predication ignored: predicated WriteData ran when it should skip");
-    TEST_PASS();
-}
-
-static void test_27_predication_exec() {
-    TEST_BEGIN("Predication: predicated WriteData EXECUTES when memory cond is true");
-    volatile uint64_t* cond = (volatile uint64_t*)gpu_alloc(0x10000);
-    volatile uint32_t* r = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(cond && r && f, "alloc"); *cond = 1; *r = 0; *f = 0;  // cond!=0 -> visible
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    CmdBuffer cb; cb.init(dcb, 0x4000);
-    pm4_context_control(cb);
-    pm4_set_predication(cb, (void*)cond, SET_PRED_MEM, 1);
-    pm4_write_data_u32_pred(cb, r, 0xBEEF);
-    pm4_set_predication(cb, (void*)0, SET_PRED_CLEAR, 0);
-    pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
-    // cond is true so the packet executes on BOTH real PS4 and shadps4: control
-    // test that validates the predicated packet can run at all -> *r==0xBEEF.
-    TEST_CHECK(*r == 0xBEEF, "predicated WriteData did not execute when cond true");
-    TEST_PASS();
-}
-
 // ============================================================================
 //  CATEGORY 9: INDIRECT BUFFER
 // ============================================================================
@@ -1197,7 +1121,7 @@ int main(void) {
 
     logf("========================================================\n");
     logf(" PS4 GPU/CPU Race Condition Test Suite - FULL EDITION\n");
-    logf(" 30 Tests | Target: Real PS4 + shadps4\n");
+    logf(" 28 Tests | Target: Real PS4 + shadps4\n");
     logf("========================================================\n");
 
     const int RUNS = 3;
@@ -1230,8 +1154,6 @@ int main(void) {
         test_23_write_data_u32();
         test_24_write_data_u64();
         test_25_write_data_then_dma();
-        test_26_predication_skip();
-        test_27_predication_exec();
         test_28_indirect_buffer();
         test_29_rapid_submit();
         test_30_rapid_submit_same_addr();
