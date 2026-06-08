@@ -202,6 +202,13 @@ struct Screen {
         return true;
     }
 
+    static bool is_tag(const char* s) {   // s points past leading spaces
+        if (s[0] != '[') return false;
+        return (s[1]=='P'&&s[2]=='A'&&s[3]=='S'&&s[4]=='S') ||
+               (s[1]=='F'&&s[2]=='A'&&s[3]=='I'&&s[4]=='L') ||
+               (s[1]=='H'&&s[2]=='A'&&s[3]=='N'&&s[4]=='G') ||
+               (s[1]=='S'&&s[2]=='K'&&s[3]=='I'&&s[4]=='P');
+    }
     void push(const char* s, int n) {
         int i = 0;
         while (i < n) {
@@ -209,13 +216,25 @@ struct Screen {
             while (j < n && s[j] != '\n') { if (t < 119) tmp[t++] = s[j]; j++; }
             tmp[t] = 0;
             if (t > 0) {
-                if (nlines >= SCR_MAXLINES) {
-                    for (int k = 1; k < SCR_MAXLINES; k++)
-                        for (int c = 0; c < 120; c++) lines[k-1][c] = lines[k][c];
-                    nlines = SCR_MAXLINES - 1;
+                int k = 0; while (tmp[k] == ' ') k++;          // skip leading spaces
+                bool run = (t >= 9 && tmp[0]=='='&&tmp[1]=='='&&tmp[2]=='='&&tmp[3]=='='&&
+                            tmp[4]=='='&&tmp[5]==' '&&tmp[6]=='R'&&tmp[7]=='U'&&tmp[8]=='N');
+                if (run) nlines = 0;                           // new run -> show only its results
+                if (!run && is_tag(tmp + k) && nlines > 0) {   // merge result onto test line
+                    char* prev = lines[nlines-1];
+                    int pl = 0; while (prev[pl]) pl++;
+                    if (pl < 118) prev[pl++] = ' ';
+                    for (int c = k; tmp[c] && pl < 119; c++) prev[pl++] = tmp[c];
+                    prev[pl] = 0;
+                } else {
+                    if (nlines >= SCR_MAXLINES) {
+                        for (int kk = 1; kk < SCR_MAXLINES; kk++)
+                            for (int c = 0; c < 120; c++) lines[kk-1][c] = lines[kk][c];
+                        nlines = SCR_MAXLINES - 1;
+                    }
+                    for (int c = 0; c <= t; c++) lines[nlines][c] = tmp[c];
+                    nlines++;
                 }
-                for (int c = 0; c <= t; c++) lines[nlines][c] = tmp[c];
-                nlines++;
             }
             i = (j < n) ? j + 1 : j;
         }
@@ -243,8 +262,14 @@ struct Screen {
         uint32_t bg = 0x80101018u;
         long npx = (long)w * h;
         for (long i = 0; i < npx; i++) dst[i] = bg;
-        int scale = (h >= 1000) ? 2 : 1;
-        int gw = 8*scale, rowh = 8*scale + 2*scale;
+        int maxlen = 1;
+        for (int i = 0; i < nlines; i++) { int l = 0; while (lines[i][l]) l++; if (l > maxlen) maxlen = l; }
+        // Largest scale in [2..4] that fits every line vertically and the longest
+        // line horizontally, so all tests stay on one screen without a tiny font.
+        int sh = 4; while (sh > 2 && nlines * (10*sh) > h - 8) sh--;
+        int sw = 4; while (sw > 2 && maxlen * (8*sw) > w - 12) sw--;
+        int scale = sh < sw ? sh : sw;
+        int gw = 8*scale, rowh = 10*scale;
         int maxrows = (h - 8) / rowh;
         int first = (nlines > maxrows) ? nlines - maxrows : 0;
         int y = 4;
@@ -711,24 +736,29 @@ static void* gpu_alloc(size_t size, size_t align = 0x10000) {
 // ============================================================================
 static int tests_run = 0, tests_passed = 0, tests_failed = 0, tests_skipped = 0;
 
+#define REPEAT 100   /* stress: run each test body 100x, aggregate to one result */
+
 #define TEST_BEGIN(name) \
     do { \
         tests_run++; \
-        g_gpu_pool_next = 0;  /* reclaim pool: prior test's GPU work has completed */ \
         logf("\n[TEST %d] %s\n", tests_run, name); \
-        log_flush();
+        log_flush(); \
+        bool _pass = true; \
+        for (int _rep = 0; _rep < REPEAT; _rep++) { \
+            g_gpu_pool_next = 0;  /* reclaim pool each iteration */
 
 #define TEST_CHECK(cond, msg) \
-        if (!(cond)) { \
-            logf("  [FAIL] %s\n", msg); \
-            tests_failed++; log_flush(); \
-            break; \
-        }
+            if (!(cond)) { \
+                logf("  [FAIL] %s (iter %d/%d)\n", msg, _rep + 1, REPEAT); \
+                _pass = false; log_flush(); break; \
+            }
 
 #define TEST_PASS() \
-        logf("  [PASS]\n"); \
-        tests_passed++; log_flush(); \
-    } while(0)
+        } \
+        if (_pass) { logf("  [PASS]\n"); tests_passed++; } \
+        else { tests_failed++; } \
+        log_flush(); \
+    } while (0)
 
 static bool wait_fence(volatile uint64_t* fence, uint32_t timeout_us = 2000000) {
     while (*fence == 0 && timeout_us > 0) { sceKernelUsleep(10); timeout_us -= 10; }
@@ -870,7 +900,7 @@ static void test_04_acquire_mem() {
     pm4_dma_data_fill(c1, (void*)src, 0xCAFEBABE, 4);
     pm4_event_write_eop(c1, (void*)f1, 1, 2, 0);
     pm4_nop(c1);
-    submit_and_wait(d1, c1.sizeBytes()); if (!wait_fence(f1)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(d1, c1.sizeBytes()); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
 
     uint32_t* d2 = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer c2; c2.init(d2, 0x4000);
@@ -879,7 +909,7 @@ static void test_04_acquire_mem() {
     pm4_dma_data_copy(c2, (void*)dst, (void*)src, 4);
     pm4_event_write_eop(c2, (void*)f2, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(d2, c2.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(d2, c2.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*dst == 0xCAFEBABE, "WAW-5: AcquireMem no-op, copy got stale data");
     TEST_PASS();
 }
@@ -899,7 +929,7 @@ static void test_05_cp_sync_width() {
     pm4_dma_data_copy(cb, (void*)b, (void*)a, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*b == 0xBAADF00D, "WAW-6: PfpSyncMe didn't barrier fill before copy");
     TEST_PASS();
 }
@@ -925,7 +955,7 @@ static void test_06_ce_dump_const_ram() {
     pm4_event_write_eop(dcb, (void*)fence, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
-    if (!wait_fence(fence)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    if (!wait_fence(fence)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*target == 0x12345678, "RAW-8: CE dump data not visible");
     TEST_PASS();
 }
@@ -952,7 +982,7 @@ static void test_07_ce_stress() {
     pm4_event_write_eop(dcb, (void*)f, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
-    if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     bool ok = true;
     for (int i = 0; i < N; i++) {
         if (t[i] != (0xA0000000u | (uint32_t)i)) { ok = false; break; }
@@ -973,7 +1003,7 @@ static void test_08_acquire_mem_cross_engine() {
     pm4_dma_data_fill(acb, (void*)buf, 0xFEEDFACE, 4);
     pm4_release_mem(acb, (void*)f1, 1, 2, 0);
     pm4_nop(acb);
-    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
 
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer cb; cb.init(dcb, 0x4000);
@@ -982,7 +1012,7 @@ static void test_08_acquire_mem_cross_engine() {
     pm4_dma_data_copy(cb, (void*)dst, (void*)buf, 4);
     pm4_event_write_eop(cb, (void*)f2, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*dst == 0xFEEDFACE, "WAW-5b: AcquireMem didn't flush compute DMA for GFX");
     TEST_PASS();
 }
@@ -1002,7 +1032,7 @@ static void test_09_mem_semaphore_basic() {
     for (int i = 0; i < 5; i++) pm4_mem_semaphore_signal(cb, (void*)sem);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 5, "Signal count wrong");
     *f = 0;
     CmdBuffer c2; c2.init(dcb, 0x4000);
@@ -1010,7 +1040,7 @@ static void test_09_mem_semaphore_basic() {
     for (int i = 0; i < 5; i++) pm4_mem_semaphore_wait(c2, (void*)sem);
     pm4_event_write_eop(c2, (void*)f, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 0, "WAW-1: Semaphore not zero after wait/decrement");
     TEST_PASS();
 }
@@ -1050,7 +1080,7 @@ static void test_11_mem_semaphore_stress() {
     for (int i = 0; i < 32; i++) pm4_mem_semaphore_signal(cb, (void*)sem);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 32, "32x signal count wrong");
     *f = 0;
     CmdBuffer c2; c2.init(dcb, 0x4000);
@@ -1058,7 +1088,7 @@ static void test_11_mem_semaphore_stress() {
     for (int i = 0; i < 32; i++) pm4_mem_semaphore_wait(c2, (void*)sem);
     pm4_event_write_eop(c2, (void*)f, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 0, "WAW-1c: 32x signal/wait imbalanced");
     TEST_PASS();
 }
@@ -1089,7 +1119,7 @@ static void test_12_cross_queue_fence() {
         if (t == 0) first = *fence;
         if (*fence != first) { consistent = false; break; }
     }
-    logf("  Final=0x%llX\n", (unsigned long long)*fence);
+    if (_rep == REPEAT - 1) logf("  Final=0x%llX\n", (unsigned long long)*fence);
     TEST_CHECK(consistent, "WAW-2: Cross-queue fence non-deterministic");
     TEST_PASS();
 }
@@ -1112,7 +1142,7 @@ static void test_13_two_compute_queues() {
         if (t == 0) first = *fence;
         if (*fence != first) { consistent = false; break; }
     }
-    logf("  Final=0x%llX\n", (unsigned long long)*fence);
+    if (_rep == REPEAT - 1) logf("  Final=0x%llX\n", (unsigned long long)*fence);
     TEST_CHECK(consistent, "WAW-2b: Two compute queues non-deterministic");
     TEST_PASS();
 }
@@ -1165,7 +1195,7 @@ static void test_20_dma_sequential() {
     pm4_context_control(cb);
     for (uint32_t i = 1; i <= 5; i++) pm4_dma_data_fill(cb, (void*)t, i, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*t == 5, "DMA order violated");
     TEST_PASS();
 }
@@ -1184,7 +1214,7 @@ static void test_21_dma_copy_chain() {
     pm4_dma_data_copy(cb, (void*)b, (void*)a, 4);
     pm4_dma_data_copy(cb, (void*)c, (void*)b, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*c == 0x55AA55AA, "DMA chain: data lost");
     TEST_PASS();
 }
@@ -1199,7 +1229,7 @@ static void test_22_dma_large_block() {
     pm4_context_control(cb);
     pm4_dma_data_fill(cb, (void*)buf, 0xABCDABCD, 4096);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     bool ok = true;
     for (int i = 0; i < 1024; i++) { if (buf[i] != 0xABCDABCD) { ok=false; break; } }
     TEST_CHECK(ok, "DMA 4KB fill corrupted");
@@ -1219,7 +1249,7 @@ static void test_23_write_data_u32() {
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb); pm4_write_data_u32(cb, d, 0xFACEFEED);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0xFACEFEED, "WriteData u32 fail");
     TEST_PASS();
 }
@@ -1233,7 +1263,7 @@ static void test_24_write_data_u64() {
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb); pm4_write_data_u64(cb, d, 0x0123456789ABCDEFULL);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0x0123456789ABCDEFULL, "WriteData u64 fail");
     TEST_PASS();
 }
@@ -1249,7 +1279,7 @@ static void test_25_write_data_then_dma() {
     pm4_write_data_u32(cb, d, 0x11111111);
     pm4_dma_data_fill(cb, (void*)d, 0x22222222, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0x22222222, "WAW-4: DMA should overwrite WriteData");
     TEST_PASS();
 }
@@ -1275,7 +1305,7 @@ static void test_28_indirect_buffer() {
     pm4_context_control(cb);
     pm4_indirect_buffer(cb, ib, ib_cb.sizeDwords());
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
     TEST_CHECK(*r == 0x1B1B1B1B, "IB: WriteData not executed");
     TEST_PASS();
 }
@@ -1365,7 +1395,7 @@ int main(void) {
 
     for (int _run = 0; _run < RUNS; _run++) {
         tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
-        logf("\n===== RUN %d/%d =====\n", _run+1, RUNS);
+        logf("\n===== RUN %d/%d (each test x%d) =====\n", _run+1, RUNS, REPEAT);
         g_cq.write_off = 0; // reset ring position
         sceKernelUsleep(500000); // 500ms drain before reset
         gpu_pool_reset();
