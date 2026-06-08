@@ -406,14 +406,39 @@ static inline void pm4_event_write_eos_fence(CmdBuffer& cb, void* address, uint3
 }
 
 // ---------------------------------------------------------------------------
-// COND_EXEC — conditionally skip N dwords if *address == 0
+// SET_PREDICATION (real GNM/GCN predication mechanism).
+// Verified bit-for-bit against AMD PAL gfx6 (si_ci_vi = Sea Islands = Liverpool)
+// si_ci_vi_merged_pm4defs.h PM4CMDSETPREDICATION:
+//   ordinal1 = type-3 header (opcode 0x20, count field 1 -> 3 dwords total)
+//   ordinal2 = startAddressLo (full low 32 bits of condition address)
+//   ordinal3 = startAddrHi[7:0] | predicationBoolean[8] | hint[12]
+//              | predOp[18:16] | continueBit[31]
+//   predOp: 0=CLEAR 1=ZPASS 2=PRIMCOUNT 3=MEM. Address must be 16-byte aligned.
+// A subsequent packet whose type-3 header predicate bit (bit 0, verified vs the
+// same header struct) is set is gated by this condition.
 // ---------------------------------------------------------------------------
-static inline void pm4_cond_exec(CmdBuffer& cb, volatile void* bool_address, uint32_t exec_count_dw) {
-    uint64_t addr = (uint64_t)(uintptr_t)bool_address;
-    cb.emit(PM4_HDR(IT_COND_EXEC, 3));
-    cb.emit((uint32_t)((addr >> 2) << 2));          // bool_addr_lo [31:2]
-    cb.emit((uint32_t)((addr >> 32) & 0xFFFF));     // bool_addr_hi [15:0]
-    cb.emit(exec_count_dw & 0x3FFF);                // exec_count [13:0]
+#define SET_PRED_CLEAR 0u
+#define SET_PRED_MEM   3u
+static inline void pm4_set_predication(CmdBuffer& cb, volatile void* cond_addr,
+                                       uint32_t pred_op, uint32_t pred_bool) {
+    uint64_t addr = (uint64_t)(uintptr_t)cond_addr;
+    cb.emit(PM4_HDR(IT_SET_PREDICATION, 2));         // 0xC0012000 (count field = 1)
+    cb.emit((uint32_t)(addr & 0xFFFFFFFFu));         // ordinal2: startAddressLo
+    uint32_t o3 = (uint32_t)((addr >> 32) & 0xFFu);  // startAddrHi [7:0]
+    o3 |= (pred_bool & 1u) << 8;                     // predicationBoolean [8]
+    o3 |= (pred_op   & 7u) << 16;                    // predOp [18:16] (hint=0, continue=0)
+    cb.emit(o3);
+}
+
+// WRITE_DATA (u32) with the type-3 header predicate bit (bit 0) SET, so the CP
+// gates it on the active SET_PREDICATION condition.
+static inline void pm4_write_data_u32_pred(CmdBuffer& cb, volatile uint32_t* address, uint32_t value) {
+    uint64_t addr = (uint64_t)(uintptr_t)address;
+    cb.emit(PM4_HDR(IT_WRITE_DATA, 4) | 1u);   // predicate bit set
+    cb.emit((5u << 8) | (1u << 20));           // dst_sel=5 (memory async), wr_confirm
+    cb.emit((uint32_t)(addr & 0xFFFFFFFFu));
+    cb.emit((uint32_t)(addr >> 32));
+    cb.emit(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -422,9 +447,13 @@ static inline void pm4_cond_exec(CmdBuffer& cb, volatile void* bool_address, uin
 static inline void pm4_indirect_buffer(CmdBuffer& cb, void* ib_address, uint32_t ib_size_dw) {
     uint64_t addr = (uint64_t)(uintptr_t)ib_address;
     cb.emit(PM4_HDR(IT_INDIRECT_BUFFER, 3));
-    cb.emit((uint32_t)(addr & 0xFFFFFFFF));
-    cb.emit((uint32_t)(addr >> 32) & 0xFFFF);
-    cb.emit(ib_size_dw & 0xFFFFF);  // ib_size [19:0]
+    cb.emit((uint32_t)(addr & 0xFFFFFFFF));         // ibBaseLo (4-byte aligned)
+    cb.emit((uint32_t)((addr >> 32) & 0xFFFF));     // ibBaseHi [15:0]
+    // ibSize [19:0] | valid [23]. On CI (Sea Islands = Liverpool) the valid bit
+    // is required or the CP rejects the IB and the ring stalls. Verified vs AMD
+    // PAL gfx6 PM4CMDINDIRECTBUFFER.CI (valid:1 @ bit23) and libSceGnmDriver
+    // submit path (OR ordinal4,0x800000). chain/vmid/cachePolicy = 0 (as GNM).
+    cb.emit((ib_size_dw & 0xFFFFF) | (1u << 23));
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,37 +1058,44 @@ static void test_25_write_data_then_dma() {
 //  CATEGORY 8: COND_EXEC (RAW-9)
 // ============================================================================
 
-static void test_26_cond_exec_skip() {
-    TEST_BEGIN("CondExec: skip when bool==0");
-    volatile uint32_t* b = (volatile uint32_t*)gpu_alloc(0x10000);
+static void test_26_predication_skip() {
+    TEST_BEGIN("Predication: predicated WriteData SKIPPED when memory cond is false");
+    volatile uint64_t* cond = (volatile uint64_t*)gpu_alloc(0x10000); // 64KB-aligned (>=16B)
     volatile uint32_t* r = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(b && r && f, "alloc"); *b=0; *r=0; *f=0;
+    TEST_CHECK(cond && r && f, "alloc"); *cond = 0; *r = 0; *f = 0;  // cond==0 -> not visible
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb);
-    pm4_cond_exec(cb, (void*)b, 5);
-    pm4_write_data_u32(cb, r, 0xDEAD);
+    pm4_set_predication(cb, (void*)cond, SET_PRED_MEM, 1);  // pred_bool=1: execute-if-nonzero
+    pm4_write_data_u32_pred(cb, r, 0xDEAD);                 // predicated: skipped since cond==0
+    pm4_set_predication(cb, (void*)0, SET_PRED_CLEAR, 0);   // clear predication state
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
     submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
-    TEST_CHECK(*r == 0, "CondExec should skip WriteData when bool==0");
+    // Real PS4: predication honored -> WriteData skipped -> *r==0 (PASS).
+    // shadps4: SET_PREDICATION is a no-op and the header predicate bit is never
+    //          checked, so WriteData always runs -> *r==0xDEAD (FAIL = the bug).
+    TEST_CHECK(*r == 0, "Predication ignored: predicated WriteData ran when it should skip");
     TEST_PASS();
 }
 
-static void test_27_cond_exec_run() {
-    TEST_BEGIN("CondExec: execute when bool!=0");
-    volatile uint32_t* b = (volatile uint32_t*)gpu_alloc(0x10000);
+static void test_27_predication_exec() {
+    TEST_BEGIN("Predication: predicated WriteData EXECUTES when memory cond is true");
+    volatile uint64_t* cond = (volatile uint64_t*)gpu_alloc(0x10000);
     volatile uint32_t* r = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(b && r && f, "alloc"); *b=1; *r=0; *f=0;
+    TEST_CHECK(cond && r && f, "alloc"); *cond = 1; *r = 0; *f = 0;  // cond!=0 -> visible
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb);
-    pm4_cond_exec(cb, (void*)b, 5);
-    pm4_write_data_u32(cb, r, 0xBEEF);
+    pm4_set_predication(cb, (void*)cond, SET_PRED_MEM, 1);
+    pm4_write_data_u32_pred(cb, r, 0xBEEF);
+    pm4_set_predication(cb, (void*)0, SET_PRED_CLEAR, 0);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
     submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout\n"); tests_failed++; log_flush(); break; }
-    TEST_CHECK(*r == 0xBEEF, "CondExec should execute WriteData when bool!=0");
+    // cond is true so the packet executes on BOTH real PS4 and shadps4: control
+    // test that validates the predicated packet can run at all -> *r==0xBEEF.
+    TEST_CHECK(*r == 0xBEEF, "predicated WriteData did not execute when cond true");
     TEST_PASS();
 }
 
@@ -1092,11 +1128,16 @@ static void test_28_indirect_buffer() {
 static void test_29_rapid_submit() {
     TEST_BEGIN("WAR-1: 50 rapid submit/done cycles");
     const int N = 50;
+    const uint32_t SLOT_DW = 0x40;  // 64-dword command-buffer slot per submit
     volatile uint32_t* fences = (volatile uint32_t*)gpu_alloc(0x10000);
-    TEST_CHECK(fences, "alloc"); memset((void*)fences, 0, N * 4);
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    uint32_t* dcb_base = (uint32_t*)gpu_alloc(0x10000);
+    TEST_CHECK(fences && dcb_base, "alloc"); memset((void*)fences, 0, N * 4);
+    // sceGnmSubmitCommandBuffers/SubmitDone do not wait for GPU completion, so
+    // each submit uses its own buffer storage. Reusing a single buffer lets the
+    // CPU overwrite packets the GPU is still fetching (WAR hazard -> corruption).
     for (int i = 0; i < N; i++) {
-        CmdBuffer cb; cb.init(dcb, 0x4000);
+        uint32_t* dcb = dcb_base + (uint32_t)i * SLOT_DW;
+        CmdBuffer cb; cb.init(dcb, SLOT_DW);
         pm4_context_control(cb);
         pm4_write_data_u32(cb, &fences[i], (uint32_t)(i + 1));
         pm4_nop(cb);
@@ -1114,11 +1155,15 @@ static void test_29_rapid_submit() {
 
 static void test_30_rapid_submit_same_addr() {
     TEST_BEGIN("WAR-1b: 100 submits to same address (last=100)");
+    const int N = 100;
+    const uint32_t SLOT_DW = 0x40;  // 64-dword command-buffer slot per submit
     volatile uint32_t* val = (volatile uint32_t*)gpu_alloc(0x10000);
-    TEST_CHECK(val, "alloc"); *val = 0;
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    for (int i = 1; i <= 100; i++) {
-        CmdBuffer cb; cb.init(dcb, 0x4000);
+    uint32_t* dcb_base = (uint32_t*)gpu_alloc(0x10000);
+    TEST_CHECK(val && dcb_base, "alloc"); *val = 0;
+    // Own storage per submit (see test_29): no CPU-vs-GPU buffer-reuse hazard.
+    for (int i = 1; i <= N; i++) {
+        uint32_t* dcb = dcb_base + (uint32_t)(i - 1) * SLOT_DW;
+        CmdBuffer cb; cb.init(dcb, SLOT_DW);
         pm4_context_control(cb);
         pm4_write_data_u32(cb, val, (uint32_t)i);
         pm4_nop(cb);
@@ -1185,8 +1230,8 @@ int main(void) {
         test_23_write_data_u32();
         test_24_write_data_u64();
         test_25_write_data_then_dma();
-        test_26_cond_exec_skip();
-        test_27_cond_exec_run();
+        test_26_predication_skip();
+        test_27_predication_exec();
         test_28_indirect_buffer();
         test_29_rapid_submit();
         test_30_rapid_submit_same_addr();
