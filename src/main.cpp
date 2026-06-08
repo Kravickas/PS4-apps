@@ -42,12 +42,20 @@ static void* my_memset(void* d, int v, unsigned long n) {
 }
 #define memset my_memset
 
-// ---- Durable logging: only %d, %s, %llX used; fsync after every write -------
-static int g_log_fd = -1;
+// ---- Bulletproof logging --------------------------------------------------
+// shadps4 buffers file writes and only commits on close(); sceKernelFsync does
+// not force a host-disk flush. A crash on the GpuCommandProcessor thread aborts
+// the process with our file still open -> all buffered data lost. So we
+// open+write+close on EVERY line: each line is committed before the next GPU op
+// that might crash the emulator. Only %d, %s, %llX are used.
+//   flags: 0x601 = O_WRONLY|O_CREAT|O_TRUNC (first open, clears old file)
+//          0x209 = O_WRONLY|O_CREAT|O_APPEND (every subsequent line)
+static const char* g_log_path = "/data/results.txt";
 
 static void log_init() {
-    g_log_fd = sceKernelOpen("/data/results.txt", 0x0601, 0777);
-    if (g_log_fd < 0) g_log_fd = sceKernelOpen("/temp0/results.txt", 0x0601, 0777);
+    int fd = sceKernelOpen(g_log_path, 0x0601, 0777);   // truncate-create
+    if (fd < 0) { g_log_path = "/temp0/results.txt"; fd = sceKernelOpen(g_log_path, 0x0601, 0777); }
+    if (fd >= 0) sceKernelClose(fd);
 }
 
 static int ap_str(char* b, int p, const char* s) { while (*s) b[p++] = *s++; return p; }
@@ -78,11 +86,12 @@ static void logf(const char* fmt, ...) {
         else buf[p++] = *f;
     }
     __builtin_va_end(ap);
-    if (g_log_fd >= 0) { sceKernelWrite(g_log_fd, buf, (unsigned long)p); sceKernelFsync(g_log_fd); }
+    int fd = sceKernelOpen(g_log_path, 0x0209, 0777);   // append
+    if (fd >= 0) { sceKernelWrite(fd, buf, (unsigned long)p); sceKernelFsync(fd); sceKernelClose(fd); }
 }
 
-static void log_flush() { if (g_log_fd >= 0) sceKernelFsync(g_log_fd); }
-static void log_close() { if (g_log_fd >= 0) { sceKernelFsync(g_log_fd); sceKernelClose(g_log_fd); } }
+static void log_flush() {}        // each logf already commits via close()
+static void log_close() {}
 
 
 // ============================================================================
@@ -522,6 +531,7 @@ struct ComputeQueue {
         sceKernelAllocateDirectMemory(0, 0x600000000ULL, 0x10000, 0x10000, 3, &phys2);
         sceKernelMapDirectMemory((void**)&read_ptr, 0x10000, 0x33, 0, phys2, 0x10000);
         if (!ring || !read_ptr) return false;
+        memset(ring, 0, 0x10000);   // ASC thread reads ring on map; never leave garbage
         *read_ptr = 0; write_off = 0;
         vqid = sceGnmMapComputeQueue(pipe, queue, (uintptr_t)ring, 0x4000, read_ptr);
         return vqid > 0;
@@ -1135,14 +1145,10 @@ int main(void) {
         return 1;
     }
 
-    // Init persistent compute queues (shadps4 deadlocks on unmap+remap)
-    if (!g_cq.init(0, 0)) {
-        logf("FATAL: compute queue 0 init failed\n");
-        log_close();
-        return 1;
-    }
-
-
+    // NOTE: the compute queue is NOT mapped here. Mapping an ASC queue makes
+    // shadps4 start its GpuCommandProcessor thread, which aborts the emulator
+    // while parsing the ring. Defer the map until AFTER all graphics-ring tests
+    // have run and committed their results to disk (see deferred init below).
 
     logf("========================================================\n");
     logf(" PS4 GPU/CPU Race Condition Test Suite - FULL EDITION\n");
@@ -1160,17 +1166,13 @@ int main(void) {
         gpu_pool_reset();
 
         test_01_eop_fence_timing();
-        test_02_release_mem_timing();
         test_03_eop_pipeline_depth();
         test_04_acquire_mem();
         test_05_cp_sync_width();
         test_06_ce_dump_const_ram();
         test_07_ce_stress();
-        test_08_acquire_mem_cross_engine();
         test_09_mem_semaphore_basic();
-        test_10_mem_semaphore_cross_queue();
         test_11_mem_semaphore_stress();
-        test_12_cross_queue_fence();
         test_14_wrm_equal();
         test_15_wrm_gt();
         test_16_wrm_lt();
@@ -1188,10 +1190,21 @@ int main(void) {
         test_28_indirect_buffer();
         test_29_rapid_submit();
         test_30_rapid_submit_same_addr();
-        // Two-compute-queue test runs LAST: the 2nd ASC queue (vqueue 2)
-        // crashes shadps4's DingDong path; running it last guarantees all
-        // other results are already fsync'd to disk before any crash.
+
+        // ---- Compute-queue (ASC/DingDong) tests run LAST ----
+        // All graphics-ring results above are already committed to disk (one
+        // open+close per line). Mapping the ASC queue here may abort shadps4 on
+        // its GpuCommandProcessor thread, but the graphics results are safe.
+        logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
+        if (g_cq.vqid <= 0 && !g_cq.init(0, 0)) {
+            logf("[compute] queue map failed - skipping compute tests\n");
+        } else {
+            test_02_release_mem_timing();
+        test_08_acquire_mem_cross_engine();
+        test_10_mem_semaphore_cross_queue();
+        test_12_cross_queue_fence();
         test_13_two_compute_queues();
+        }
 
         total_pass += tests_passed;
         total_fail += tests_failed;
