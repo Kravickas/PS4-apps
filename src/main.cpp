@@ -686,12 +686,13 @@ static void test_06_ce_dump_const_ram() {
     uint32_t val = 0x12345678;
     pm4_write_const_ram(ccb, 0, &val, 1);
     pm4_dump_const_ram(ccb, (void*)target, 0, 1);
-    pm4_increment_ce_counter(ccb);
+    // No CE/DE counter handshake: those counters are global/persistent and GNM
+    // has already advanced de_count, so WAIT_ON_CE_COUNTER deadlocks on real HW.
+    // The CE runs the CCB sequentially; the DCB EOP fence + sceGnmSubmitDone()
+    // guarantee both engines are idle before the readback.
     uint32_t* dcb_mem = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer dcb; dcb.init(dcb_mem, 0x4000);
     pm4_context_control(dcb);
-    pm4_wait_on_ce_counter(dcb);
-    pm4_increment_de_counter(dcb);
     pm4_event_write_eop(dcb, (void*)fence, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
@@ -714,12 +715,11 @@ static void test_07_ce_stress() {
         pm4_write_const_ram(ccb, (uint32_t)(i * 4), &v, 1);
         pm4_dump_const_ram(ccb, (void*)&t[i], (uint32_t)(i * 4), 1);
     }
-    pm4_increment_ce_counter(ccb);
+    // No CE/DE counter handshake (see test_06): deadlocks on real HW. CE runs
+    // the CCB sequentially; EOP fence + sceGnmSubmitDone() provide completion.
     uint32_t* dcb_mem = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer dcb; dcb.init(dcb_mem, 0x4000);
     pm4_context_control(dcb);
-    pm4_wait_on_ce_counter(dcb);
-    pm4_increment_de_counter(dcb);
     pm4_event_write_eop(dcb, (void*)f, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
