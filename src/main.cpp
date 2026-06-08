@@ -1,9 +1,32 @@
 // ============================================================================
-// PS4 GPU Compute Dispatch Debug — minimal shader writes its lane id to dst[lane]
-// Tests: does every lane run + store? Post-marker is OUTSIDE the output range so
-// it cannot mask a missing lane. Distinguishes a real lane drop from a marker
-// collision at dst[63].
-// Results written to /temp0/results.txt (fallback /data/results.txt).
+// PS4 GPU Compute — v_cmp mask readback + v_cmp_lg_u64 test
+//
+// Built on the proven raw-PM4 dispatch path (sceGnmSubmitCommandBuffers) that
+// was verified to run all 64 lanes and land buffer_store output on shadPS4.
+//
+// Two dispatches, each hand-assembled GCN, each storing 4 uniform dwords:
+//
+//   Test 1  mask_readback (predicate lane<48):
+//     v_cmp_lt_u32 s[8:9],v0,48 ; v_cmp_lt_u32 vcc,v0,48
+//     store [ s8, s9, vcc_lo, vcc_hi ]   <- reads a v_cmp mask back AS A VALUE
+//
+//   Test 2  v_cmp_lg_u64 (A=lane<48, B=lane<40)  -- the RE3/RE4 instruction:
+//     maskA->s[8:9], maskB->v[2:3], v_cmp_lg_u64 vcc,s[8:9],v[2:3]
+//     store [ vcc?1:0, maskA_hi, maskB_hi, 0 ]
+//
+// dst is pre-filled 0xCDCDCDCD so a slot the shader never wrote is told apart
+// from a slot it wrote 0 into. V# stride=16 => each lane's dwordx4 fills its
+// own 16-byte record (in-bounds; num_records=64).
+//
+// Expected on PS4 hardware (64 lanes):
+//   mask_readback = [0xFFFFFFFF, 0x0000FFFF, 0xFFFFFFFF, 0x0000FFFF]
+//   lg_u64        = [1, 0x0000FFFF, 0x000000FF, 0]
+// shadPS4 is 32-lane, so the hi words are 0 and lg's compare is 0 (both
+// predicates are all-true across 32 lanes) -- explainable, not garbage. The
+// decisive observable is whether the lo words read back as the real mask
+// (0xFFFFFFFF) or as garbage (the per-lane-U1 readback bug).
+//
+// Results -> /temp0/results.txt (fallback /data/results.txt).
 // ============================================================================
 
 #include <stdint.h>
@@ -85,9 +108,9 @@ static void* gpu_alloc(unsigned long size) {
     return ptr;
 }
 
-static void zero(void* s, unsigned long n) {
-    unsigned char* p = (unsigned char*)s;
-    while (n--) *p++ = 0;
+static void fill32(void* s, unsigned long dwords, uint32_t v) {
+    uint32_t* p = (uint32_t*)s;
+    for (unsigned long i = 0; i < dwords; i++) p[i] = v;
 }
 
 // ---- PM4 -------------------------------------------------------------------
@@ -105,46 +128,56 @@ static void zero(void* s, unsigned long n) {
 #define CS_SETTINGS_LO   0x212
 #define CS_USER_DATA_0   0x240
 
-#define NUM_ELEMENTS 64
+#define CD 0xCDCDCDCDu   // pre-fill sentinel: "shader never wrote here"
 
-// Shader: writes its own lane id (v0) to dst[lane]. No buffer_load, no src buffer.
-// Lane id (not a constant) so each dst[i] should equal i -- lets us see exactly
-// which lanes wrote, instead of a constant that hides per-lane coverage.
-//   v_mov_b32 v1, v0                            ; v1 = lane id (thread_id_x, TIDIG_COMP_CNT=0)
-//   buffer_store_dword v1, v0, s[0:3], 0 idxen  ; dst[v0] = v1
-//   s_waitcnt vmcnt(0)
-//   s_endpgm
-//   [OrbShdr BinaryInfo: type=5(CS), length=20 bytes]
-static const uint32_t g_shader[] = {
-    0x7E020300,                        // v_mov_b32 v1, v0   (v1 = lane id)
-    0xE0702000, 0x80000100,            // buffer_store_dword v1, v0, s[0:3], 0 idxen
+// ---- Shader 1: mask_readback, predicate lane<48 ----------------------------
+// RSRC1 = 0x41 : VGPRS=1 (v0..v7), SGPRS=1 (s0..s15)
+static const uint32_t g_shader_mask[] = {
+    0xD1820008, 0x00016100,            // v_cmp_lt_u32 s[8:9], v0, 48   maskA->s[8:9]
+    0xD182006A, 0x00016100,            // v_cmp_lt_u32 vcc,    v0, 48   maskA->vcc
+    0x7E080208,                        // v_mov_b32 v4, s8
+    0x7E0A0209,                        // v_mov_b32 v5, s9
+    0x7E0C026A,                        // v_mov_b32 v6, vcc_lo
+    0x7E0E026B,                        // v_mov_b32 v7, vcc_hi
+    0xE0782000, 0x80000400,            // buffer_store_dwordx4 v[4:7], v0, s[0:3] idxen
     0xBF8C0F70,                        // s_waitcnt vmcnt(0)
     0xBF810000,                        // s_endpgm
     0x5362724F, 0x00726468,            // "OrbShdr\0"
-    0x00001414,                        // type=5(CS), length=20 bytes
+    0x00003014,                        // type=5(CS), length=48 bytes
     0x00000000, 0x00000000, 0x00000000, 0x00000000,
 };
 
-int main(void) {
-    log_init();
-    logf("=== Compute Dispatch Debug ===\n");
+// ---- Shader 2: v_cmp_lg_u64, A=lane<48, B=lane<40 --------------------------
+// RSRC1 = 0x42 : VGPRS=2 (v0..v11), SGPRS=1 (s0..s15)
+static const uint32_t g_shader_lg[] = {
+    0xD1820008, 0x00016100,            // v_cmp_lt_u32 s[8:9], v0, 48   maskA->s[8:9]
+    0xD182006A, 0x00015100,            // v_cmp_lt_u32 vcc,    v0, 40   maskB->vcc
+    0x7E04026A,                        // v_mov_b32 v2, vcc_lo          maskB->v[2:3]
+    0x7E06026B,                        // v_mov_b32 v3, vcc_hi
+    0xD1CA006A, 0x00020408,            // v_cmp_lg_u64 vcc, s[8:9], v[2:3]
+    0x7E100281,                        // v_mov_b32 v8, 1
+    0x00081080,                        // v_cndmask_b32 v4, 0, v8, vcc  v4 = vcc?1:0
+    0x7E0A0209,                        // v_mov_b32 v5, s9              maskA_hi
+    0x7E0C0303,                        // v_mov_b32 v6, v3              maskB_hi
+    0x7E0E0280,                        // v_mov_b32 v7, 0
+    0xE0782000, 0x80000400,            // buffer_store_dwordx4 v[4:7], v0, s[0:3] idxen
+    0xBF8C0F70,                        // s_waitcnt vmcnt(0)
+    0xBF810000,                        // s_endpgm
+    0x5362724F, 0x00726468,            // "OrbShdr\0"
+    0x00004414,                        // type=5(CS), length=68 bytes
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+};
 
-    uint32_t* shader = (uint32_t*)gpu_alloc(0x10000);
-    uint32_t* dst    = (uint32_t*)gpu_alloc(0x10000);
-    uint32_t* dcb    = (uint32_t*)gpu_alloc(0x10000);
-    if (!shader || !dst || !dcb) { logf("alloc fail\n"); log_close(); return 1; }
-
-    zero(shader, 0x10000);
-    zero(dst, 0x10000);
-    zero(dcb, 0x10000);
-    for (uint32_t i = 0; i < sizeof(g_shader) / 4; i++) shader[i] = g_shader[i];
-
-    // V# for dst: stride=4, num_records=64, XYZW / UINT / 32-bit
+// One dispatch: program the shader, V# (stride=16 -> per-lane 16-byte record),
+// user data s[0:3]=V#, 64x1x1, dispatch 1 group; post-marker at dst[256]
+// (just past the 64 records) confirms the PM4 ran to completion.
+static void run_dispatch(uint32_t* dcb, const uint32_t* shader, uint32_t* dst,
+                         uint32_t rsrc1) {
     uint64_t dst_addr = (uint64_t)(uintptr_t)dst;
     uint32_t vdesc[4] = {
         (uint32_t)(dst_addr & 0xFFFFFFFF),
-        ((uint32_t)(dst_addr >> 32) & 0xFFF) | (4 << 16),
-        NUM_ELEMENTS,
+        ((uint32_t)(dst_addr >> 32) & 0xFFF) | (16 << 16),   // stride = 16 bytes
+        64,                                                   // num_records
         (4<<0)|(5<<3)|(6<<6)|(7<<9)|(4<<12)|(4<<15),
     };
 
@@ -153,81 +186,86 @@ int main(void) {
 
     EMIT(PM4_HDR(IT_CONTEXT_CONTROL, 2)); EMIT(0x80000000); EMIT(0x80000000);
 
-    // Pre-dispatch marker: dst[0] = 0x11111111
-    uint64_t m0 = (uint64_t)(uintptr_t)&dst[0];
-    EMIT(PM4_HDR(IT_WRITE_DATA, 4)); EMIT((5<<8)|(1<<20));
-    EMIT(m0 & 0xFFFFFFFF); EMIT(m0 >> 32); EMIT(0x11111111);
-
-    // Shader address
     uint64_t sa = (uint64_t)(uintptr_t)shader;
     EMIT(PM4_HDR(IT_SET_SH_REG, 3)); EMIT(CS_ADDRESS_LO);
     EMIT((sa >> 8) & 0xFFFFFFFF); EMIT((sa >> 40) & 0xFF);
 
-    // Thread group 64x1x1
     EMIT(PM4_HDR(IT_SET_SH_REG, 2)); EMIT(CS_NUM_THREAD_X); EMIT((64<<16)|64);
     EMIT(PM4_HDR(IT_SET_SH_REG, 2)); EMIT(CS_NUM_THREAD_Y); EMIT((1<<16)|1);
     EMIT(PM4_HDR(IT_SET_SH_REG, 2)); EMIT(CS_NUM_THREAD_Z); EMIT((1<<16)|1);
 
-    // RSRC1=0 (vgprs/sgprs minimal), RSRC2 user_sgpr=4
-    EMIT(PM4_HDR(IT_SET_SH_REG, 3)); EMIT(CS_SETTINGS_LO); EMIT(0x00000000); EMIT(0x00000008);
+    // RSRC1 = per-shader register count, RSRC2 user_sgpr=4 (s[0:3]=V#)
+    EMIT(PM4_HDR(IT_SET_SH_REG, 3)); EMIT(CS_SETTINGS_LO); EMIT(rsrc1); EMIT(0x00000008);
 
-    // User data: V# → s[0:3]
     EMIT(PM4_HDR(IT_SET_SH_REG, 5)); EMIT(CS_USER_DATA_0);
     EMIT(vdesc[0]); EMIT(vdesc[1]); EMIT(vdesc[2]); EMIT(vdesc[3]);
 
-    // Dispatch 1 group
     EMIT(PM4_HDR(IT_DISPATCH_DIRECT, 4)); EMIT(1); EMIT(1); EMIT(1); EMIT(1);
 
-    // Post-dispatch marker: dst[64] = 0x22222222  (OUTSIDE the 0..63 shader range,
-    // so it cannot collide with the shader's own write to dst[63])
-    uint64_t m1 = (uint64_t)(uintptr_t)&dst[64];
+    uint64_t m = (uint64_t)(uintptr_t)&dst[256];
     EMIT(PM4_HDR(IT_WRITE_DATA, 4)); EMIT((5<<8)|(1<<20));
-    EMIT(m1 & 0xFFFFFFFF); EMIT(m1 >> 32); EMIT(0x22222222);
+    EMIT(m & 0xFFFFFFFF); EMIT(m >> 32); EMIT(0x22222222);
 
     EMIT(PM4_HDR(IT_NOP, 1)); EMIT(0);
     #undef EMIT
-
-    logf("DCB: %d dwords\n", off);
 
     const uint32_t* dp[1] = { dcb };
     uint32_t ds[1] = { off * 4 };
     sceGnmSubmitCommandBuffers(1, dp, ds, nullptr, nullptr);
     sceGnmSubmitDone();
     sceKernelUsleep(2000000);
+}
 
-    logf("dst[0]  = %x", dst[0]);
-    if      (dst[0] == 0x11111111) logf(" (pre-marker survived: lane 0 did NOT write)\n");
-    else if (dst[0] == 0x00000000) logf(" (lane 0 wrote its id 0)\n");
-    else                           logf(" (unexpected)\n");
-
-    logf("dst[63] = %x", dst[63]);
-    if      (dst[63] == 63) logf(" (lane 63 wrote its id)\n");
-    else if (dst[63] == 0)  logf(" (lane 63 did NOT write: still zero)\n");
-    else                    logf(" (unexpected)\n");
-
-    logf("dst[64] = %x", dst[64]);
-    if      (dst[64] == 0x22222222) logf(" (post-marker: PM4 continued past dispatch)\n");
-    else                            logf(" (post-marker missing!)\n");
-
-    // dst[i] should equal i. For i>0 a non-written slot stays 0 (zeroed);
-    // for i==0 a non-written slot stays the pre-marker 0x11111111.
-    int hits = 0;
-    int wrong = 0;
-    for (int i = 0; i < NUM_ELEMENTS; i++) {
-        uint32_t unwritten = (i == 0) ? 0x11111111u : 0u;
-        if (dst[i] == (uint32_t)i)        hits++;
-        else if (dst[i] != unwritten)     wrong++;
-    }
-    logf("\nLanes that wrote their id: %d/%d", hits, NUM_ELEMENTS);
-    if (wrong) logf("  (%d slots hold a wrong value)", wrong);
+static void report(const char* name, uint32_t* dst,
+                   uint32_t e0, uint32_t e1, uint32_t e2, uint32_t e3) {
     logf("\n");
+    logf(name);
+    logf("\n");
+    logf("  dst[256] marker = %x", dst[256]);
+    logf(dst[256] == 0x22222222 ? "  (PM4 ran to completion)\n" : "  (marker MISSING!)\n");
 
-    if (hits == NUM_ELEMENTS)
-        logf("=== ALL 64 LANES WROTE - dispatch fully correct ===\n");
-    else if (hits == NUM_ELEMENTS - 1 && dst[63] == 0)
-        logf("=== 63/64: lane 63 genuinely did NOT write (real lane drop) ===\n");
+    uint32_t v0 = dst[0], v1 = dst[1], v2 = dst[2], v3 = dst[3];
+    logf("  got      = [ %x", v0); logf(", %x", v1); logf(", %x", v2); logf(", %x", v3); logf(" ]\n");
+    logf("  PS4-64   = [ %x", e0); logf(", %x", e1); logf(", %x", e2); logf(", %x", e3); logf(" ]\n");
+
+    int unwritten = (v0==CD) + (v1==CD) + (v2==CD) + (v3==CD);
+    if (unwritten) logf("  %d/4 slots still 0xCDCDCDCD -- store did NOT fully land\n", unwritten);
+    else           logf("  all 4 slots written (store landed)\n");
+
+    if (v0==e0 && v1==e1 && v2==e2 && v3==e3)
+        logf("  == matches PS4-64 exactly ==\n");
     else
-        logf("=== %d/64 lanes wrote - investigate the gap ===\n", hits);
+        logf("  != PS4-64 (on 32-lane shadPS4 the hi words are 0; compare narrows)\n");
+}
+
+int main(void) {
+    log_init();
+    logf("=== v_cmp mask readback + v_cmp_lg_u64 ===\n");
+
+    uint32_t* shaderA = (uint32_t*)gpu_alloc(0x10000);
+    uint32_t* shaderB = (uint32_t*)gpu_alloc(0x10000);
+    uint32_t* dstA    = (uint32_t*)gpu_alloc(0x10000);
+    uint32_t* dstB    = (uint32_t*)gpu_alloc(0x10000);
+    uint32_t* dcb     = (uint32_t*)gpu_alloc(0x10000);
+    if (!shaderA || !shaderB || !dstA || !dstB || !dcb) {
+        logf("alloc fail\n"); log_close(); return 1;
+    }
+
+    fill32(shaderA, 0x10000/4, 0);
+    fill32(shaderB, 0x10000/4, 0);
+    for (uint32_t i = 0; i < sizeof(g_shader_mask)/4; i++) shaderA[i] = g_shader_mask[i];
+    for (uint32_t i = 0; i < sizeof(g_shader_lg)/4;   i++) shaderB[i] = g_shader_lg[i];
+
+    fill32(dstA, 0x10000/4, CD);
+    fill32(dstB, 0x10000/4, CD);
+
+    run_dispatch(dcb, shaderA, dstA, 0x41);
+    run_dispatch(dcb, shaderB, dstB, 0x42);
+
+    report("Test 1  mask_readback  (lane<48)", dstA,
+           0xFFFFFFFF, 0x0000FFFF, 0xFFFFFFFF, 0x0000FFFF);
+    report("Test 2  v_cmp_lg_u64   (A=lane<48, B=lane<40)", dstB,
+           0x00000001, 0x0000FFFF, 0x000000FF, 0x00000000);
 
     log_close();
     sceKernelUsleep(3000000);
