@@ -728,8 +728,10 @@ static inline void pm4_context_control(CmdBuffer& cb) {
 // ---------------------------------------------------------------------------
 static inline void pm4_event_write_eos_fence(CmdBuffer& cb, void* address, uint32_t data) {
     uint64_t addr = (uint64_t)(uintptr_t)address;
-    uint32_t dw1 = (0x04u) | (4u << 8); // CS_DONE, event_index=4
-    uint32_t cmd_info = ((uint32_t)(addr >> 32) & 0xFFFF) | (2u << 29); // command=SignalFence
+    // eventType=CS_DONE(0x2F), eventIndex=CS_DONE/PS_DONE(6) at bits[9:6]
+    uint32_t dw1 = (0x2Fu) | (6u << 6);
+    // addressHi[15:0] | command=STORE_32BIT_DATA_TO_MEMORY(2) at bits[31:29]
+    uint32_t cmd_info = ((uint32_t)(addr >> 32) & 0xFFFF) | (2u << 29);
     cb.emit(PM4_HDR(IT_EVENT_WRITE_EOS, 4));
     cb.emit(dw1);
     cb.emit((uint32_t)(addr & 0xFFFFFFFFu));
@@ -1385,6 +1387,66 @@ static void test_30_rapid_submit_same_addr() {
 }
 
 // ============================================================================
+//  CATEGORY 11: PACKET-FEATURE / ORDERING (new)
+// ============================================================================
+
+// CP-DMA with cpSync=1 makes the CP block until the fill completes, so the
+// following ME WriteData is strictly ordered after it and must win. (Complement
+// of test_25, which has WriteData first and the DMA winning.)
+static void test_31_dma_then_write_data() {
+    TEST_BEGIN("WAW-4b: DMA(sync) fill then WriteData (WriteData wins)");
+    volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
+    volatile uint32_t* tgt = (volatile uint32_t*)gpu_alloc(0x10000);
+    TEST_CHECK(f && tgt, "alloc"); *f = 0; *tgt = 0;
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_dma_data_fill(cb, (void*)tgt, 0x1111, 4);   // cpSync=1: CP waits for DMA completion
+    pm4_write_data_u32(cb, tgt, 0x2222);            // ME write, strictly after the synced DMA
+    pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
+    TEST_CHECK(*tgt == 0x2222, "WAW-4b: WriteData should overwrite synced DMA");
+    TEST_PASS();
+}
+
+// EVENT_WRITE_EOS(CS_DONE) sits earlier in the pipe than EVENT_WRITE_EOP (end of
+// pipe), so its fence store must already be visible once the EOP fence fires.
+// We wait on the reliable EOP fence, so a non-signalling EOS fails the check
+// rather than hanging.
+static void test_32_eos_before_eop() {
+    TEST_BEGIN("RAW-9: EVENT_WRITE_EOS CS_DONE signals before EOP");
+    volatile uint32_t* eos = (volatile uint32_t*)gpu_alloc(0x10000);
+    volatile uint64_t* eop = (volatile uint64_t*)gpu_alloc(0x10000);
+    TEST_CHECK(eos && eop, "alloc"); *eos = 0; *eop = 0;
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_event_write_eos_fence(cb, (void*)eos, 0xE05);
+    pm4_event_write_eop(cb, (void*)eop, 1, 2, 0);
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(eop)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
+    TEST_CHECK(*eos == 0xE05, "RAW-9: EOS CS_DONE did not signal before EOP");
+    TEST_PASS();
+}
+
+// EVENT_WRITE_EOP with data_sel=SEND_GPU_CLOCK(3) stores the 64-bit GPU clock to
+// the fence address instead of an immediate, so it must come back non-zero.
+static void test_33_eop_timestamp() {
+    TEST_BEGIN("RAW-1c: EOP timestamp (data_sel=GpuClock) is non-zero");
+    volatile uint64_t* ts = (volatile uint64_t*)gpu_alloc(0x10000);
+    TEST_CHECK(ts, "alloc"); *ts = 0;
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_event_write_eop(cb, (void*)ts, 0, 3, 0);   // data_sel=3: write 64-bit GPU clock
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(ts)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
+    TEST_CHECK(*ts != 0, "RAW-1c: GPU clock timestamp not written");
+    TEST_PASS();
+}
+
+// ============================================================================
 //  TEST REGISTRY + CONTROLLER MENU
 // ============================================================================
 
@@ -1414,6 +1476,9 @@ static TestEntry g_tests[] = {
     { test_28_indirect_buffer,          "IndirectBuffer secondary cmd",        false, true },
     { test_29_rapid_submit,             "WAR-1  50 rapid submit/done",         false, true },
     { test_30_rapid_submit_same_addr,   "WAR-1b 100 submits same addr",        false, true },
+    { test_31_dma_then_write_data,      "WAW-4b DMA(sync) then WriteData",     false, true },
+    { test_32_eos_before_eop,           "RAW-9  EOS CS_DONE before EOP",       false, true },
+    { test_33_eop_timestamp,            "RAW-1c EOP GPU-clock timestamp",      false, true },
     { test_02_release_mem_timing,       "RAW-2  Compute ReleaseMem fence",     true,  true },
     { test_08_acquire_mem_cross_engine, "WAW-5b AcquireMem compute->GFX",      true,  true },
     { test_10_mem_semaphore_cross_queue,"WAW-1b Cross-queue MemSemaphore",     true,  true },
