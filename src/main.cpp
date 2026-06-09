@@ -44,6 +44,11 @@ extern "C" {
     int32_t sceVideoOutSubmitFlip(int32_t handle, int32_t bufIndex, uint32_t flipMode, int64_t flipArg);
     int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t rate);
     int32_t sceVideoOutGetFlipStatus(int32_t handle, void* status);
+    int32_t scePadInit(void);
+    int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void* param);
+    int32_t scePadReadState(int32_t handle, void* data);
+    int32_t sceUserServiceInitialize(void* params);
+    int32_t sceUserServiceGetInitialUser(int32_t* userId);
 }
 
 static void* my_memset(void* d, int v, unsigned long n) {
@@ -164,11 +169,38 @@ static const unsigned char FONT[95][8] = {
 };
 
 #define SCR_MAXLINES 160
+// DualShock4 button masks (verified vs orbis/_types/pad.h)
+#define PAD_UP       0x0010u
+#define PAD_RIGHT    0x0020u
+#define PAD_DOWN     0x0040u
+#define PAD_LEFT     0x0080u
+#define PAD_L2       0x0100u
+#define PAD_R2       0x0200u
+#define PAD_L1       0x0400u
+#define PAD_R1       0x0800u
+#define PAD_TRIANGLE 0x1000u
+#define PAD_CIRCLE   0x2000u
+#define PAD_CROSS    0x4000u
+#define PAD_SQUARE   0x8000u
+#define PAD_OPTIONS  0x0008u
+#define PAD_TOUCHPAD 0x100000u
+
+// OrbisPadData: buttons is the first field; struct is ~120 bytes. Over-size to be safe.
+struct PadState { uint32_t buttons; uint8_t _rest[252]; };
+
+// Run-control state, set from the controller menu. Read by Screen::render for the bar.
+static int       g_tries      = 100;   // iterations per selected test
+static long long g_runs_done  = 0;     // iterations completed this run
+static long long g_runs_base  = 0;     // iterations from already-finished tests
+static long long g_runs_total = 1;     // selected_tests * g_tries
+static long long g_tick_step  = 1;     // render the bar every N iterations
+static int       g_cursor     = 0;     // highlighted menu row
+
 struct Screen {
     int handle; bool ok; int w, h; int cur; long long flipid;
     uint32_t* fb[2];
     char lines[SCR_MAXLINES][120]; int nlines;
-    int prog_done, prog_total;
+    long long last_tick;   // g_runs_done value at last bar render (throttle)
 
     static int u2s(char* b, int p, int v) {   // append unsigned decimal
         char t[12]; int n = 0;
@@ -179,7 +211,7 @@ struct Screen {
     }
 
     bool init() {
-        ok = false; cur = 0; flipid = 0; nlines = 0; prog_done = 0; prog_total = 1;
+        ok = false; cur = 0; flipid = 0; nlines = 0; last_tick = 0;
         handle = sceVideoOutOpen(0xFF, 0, 0, 0);          // ORBIS_VIDEO_USER_MAIN, BUS_MAIN
         if (handle < 0) return false;
         w = 1920; h = 1080;   // target output is always full HD
@@ -257,16 +289,56 @@ struct Screen {
         }
     }
 
+    void clear(uint32_t bg) { long n = (long)w * h; for (long i = 0; i < n; i++) fb[cur][i] = bg; }
+
+    void text(int x, int y, const char* s, uint32_t col, int scale) {
+        int gw = 8 * scale;
+        for (const char* q = s; *q; q++) { glyph(fb[cur], x, y, *q, col, scale); x += gw; if (x > w - gw) break; }
+    }
+
+    void present() {
+        flipid++;
+        sceVideoOutSubmitFlip(handle, cur, 1, flipid);    // 1 = VSYNC
+        VideoFlipStatus st;
+        for (int t = 0; t < 300; t++) {                   // bounded ~30ms; no hard stall
+            my_memset(&st, 0, sizeof(st));
+            sceVideoOutGetFlipStatus(handle, &st);
+            if (st.flipArg == flipid) break;
+            sceKernelUsleep(100);
+        }
+        cur = 1 - cur;
+    }
+
+    // progress bar along the bottom: '#' span = completed iterations / total
+    void draw_bar(int scale) {
+        uint32_t* dst = fb[cur];
+        int gw = 8 * scale, rowh = 10 * scale;
+        int barmax = (w - 12) / gw;                 // '#' that fit across full HD
+        if (barmax < 1) barmax = 1;
+        long long rt = g_runs_total > 0 ? g_runs_total : 1;
+        int pct    = (int)(g_runs_done * 100 / rt);
+        int filled = (int)(g_runs_done * barmax / rt);
+        if (filled > barmax) filled = barmax;
+        char lbl[80]; int lp = 0;
+        const char* pre = "Progress ";
+        while (*pre) lbl[lp++] = *pre++;
+        lp = u2s(lbl, lp, pct); lbl[lp++] = '%'; lbl[lp++] = ' '; lbl[lp++] = '(';
+        lp = u2s(lbl, lp, (int)g_runs_done); lbl[lp++] = '/'; lp = u2s(lbl, lp, (int)g_runs_total);
+        lbl[lp++] = ' '; lbl[lp++] = 'r'; lbl[lp++] = 'u'; lbl[lp++] = 'n'; lbl[lp++] = 's'; lbl[lp++] = ')';
+        lbl[lp] = 0;
+        text(6, h - 2 * rowh - 4, lbl, 0x80E0E0E0u, scale);
+        int bx = 6, by = h - rowh - 4;
+        for (int i = 0; i < barmax; i++) {
+            char ch = (i < filled) ? '#' : '-';
+            uint32_t bc = (i < filled) ? 0x8040E060u : 0x80383840u;
+            glyph(dst, bx, by, ch, bc, scale); bx += gw;
+        }
+    }
+
     void render() {
         if (!ok) return;
+        clear(0x80101018u);
         uint32_t* dst = fb[cur];
-        uint32_t bg = 0x80101018u;
-        long npx = (long)w * h;
-        for (long i = 0; i < npx; i++) dst[i] = bg;
-        // Full HD fixed layout: ~32 lines (28 tests + headers) render at 16px
-        // (scale 2) using 640/1080 vertically, and the longest possible line
-        // (capped at 119 chars) is 119*16=1904 < 1908, so nothing clips. Only
-        // fall to 8px if the line count would ever overflow (it won't here).
         int scale = 2;
         if (nlines * (10*scale) > h - 8) scale = 1;
         int gw = 8*scale, rowh = 10*scale;
@@ -285,36 +357,16 @@ struct Screen {
             for (const char* q = s; *q; q++) { glyph(dst, x, y, *q, col, scale); x += gw; if (x > w - gw) break; }
             y += rowh;
         }
-        // ---- progress bar along the bottom: '#' span = tests completed ----
-        int barmax = (w - 12) / gw;                 // '#' that fit across full HD
-        if (barmax < 1) barmax = 1;
-        int pct    = prog_total > 0 ? (prog_done * 100) / prog_total : 0;
-        int filled = prog_total > 0 ? (prog_done * barmax) / prog_total : 0;
-        if (filled > barmax) filled = barmax;
-        char lbl[64]; int lp = 0;
-        const char* pre = "Progress ";
-        while (*pre) lbl[lp++] = *pre++;
-        lp = u2s(lbl, lp, pct); lbl[lp++] = '%'; lbl[lp++] = ' '; lbl[lp++] = '(';
-        lp = u2s(lbl, lp, prog_done); lbl[lp++] = '/'; lp = u2s(lbl, lp, prog_total);
-        lbl[lp++] = ')'; lbl[lp] = 0;
-        int lx = 6, ly = h - 2 * rowh - 4;
-        for (const char* q = lbl; *q; q++) { glyph(dst, lx, ly, *q, 0x80E0E0E0u, scale); lx += gw; }
-        int bx = 6, by = h - rowh - 4;
-        for (int i = 0; i < barmax; i++) {
-            char ch = (i < filled) ? '#' : '-';
-            uint32_t bc = (i < filled) ? 0x8040E060u : 0x80383840u;
-            glyph(dst, bx, by, ch, bc, scale); bx += gw;
-        }
-        flipid++;
-        sceVideoOutSubmitFlip(handle, cur, 1, flipid);    // 1 = VSYNC
-        VideoFlipStatus st;
-        for (int t = 0; t < 300; t++) {                   // bounded ~30ms; no hard stall
-            my_memset(&st, 0, sizeof(st));
-            sceVideoOutGetFlipStatus(handle, &st);
-            if (st.flipArg == flipid) break;
-            sceKernelUsleep(100);
-        }
-        cur = 1 - cur;
+        draw_bar(scale);
+        present();
+    }
+
+    // throttled bar refresh during a long test (called every iteration)
+    void tick() {
+        if (!ok) return;
+        if (g_runs_done - last_tick < g_tick_step) return;
+        last_tick = g_runs_done;
+        render();
     }
 };
 static Screen g_screen;
@@ -756,27 +808,27 @@ static void* gpu_alloc(size_t size, size_t align = 0x10000) {
 // ============================================================================
 static int tests_run = 0, tests_passed = 0, tests_failed = 0, tests_skipped = 0;
 
-#define REPEAT 100        /* stress: run each test body 100x, aggregate to one result */
-#define TOTAL_TESTS 26    /* tests dispatched per run (drives the on-screen progress bar) */
+// g_tries iterations per test; progress counts every iteration toward g_runs_total.
 
 #define TEST_BEGIN(name) \
     do { \
         tests_run++; \
-        g_screen.prog_done = tests_run; g_screen.prog_total = TOTAL_TESTS; \
         logf("\n[TEST %d] %s\n", tests_run, name); \
         log_flush(); \
         bool _pass = true; \
-        for (int _rep = 0; _rep < REPEAT; _rep++) { \
-            g_gpu_pool_next = 0;  /* reclaim pool each iteration */
+        for (int _rep = 0; _rep < g_tries; _rep++) { \
+            g_gpu_pool_next = 0;  /* reclaim pool each iteration */ \
+            g_runs_done = g_runs_base + _rep + 1; g_screen.tick();
 
 #define TEST_CHECK(cond, msg) \
             if (!(cond)) { \
-                logf("  [FAIL] %s (iter %d/%d)\n", msg, _rep + 1, REPEAT); \
+                logf("  [FAIL] %s (iter %d/%d)\n", msg, _rep + 1, g_tries); \
                 _pass = false; log_flush(); break; \
             }
 
 #define TEST_PASS() \
         } \
+        g_runs_base += g_tries; g_runs_done = g_runs_base; \
         if (_pass) { logf("  [PASS]\n"); tests_passed++; } \
         else { tests_failed++; } \
         log_flush(); \
@@ -921,7 +973,7 @@ static void test_04_acquire_mem() {
     pm4_dma_data_fill(c1, (void*)src, 0xCAFEBABE, 4);
     pm4_event_write_eop(c1, (void*)f1, 1, 2, 0);
     pm4_nop(c1);
-    submit_and_wait(d1, c1.sizeBytes()); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(d1, c1.sizeBytes()); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
 
     uint32_t* d2 = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer c2; c2.init(d2, 0x4000);
@@ -930,7 +982,7 @@ static void test_04_acquire_mem() {
     pm4_dma_data_copy(c2, (void*)dst, (void*)src, 4);
     pm4_event_write_eop(c2, (void*)f2, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(d2, c2.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(d2, c2.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*dst == 0xCAFEBABE, "WAW-5: AcquireMem no-op, copy got stale data");
     TEST_PASS();
 }
@@ -950,7 +1002,7 @@ static void test_05_cp_sync_width() {
     pm4_dma_data_copy(cb, (void*)b, (void*)a, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*b == 0xBAADF00D, "WAW-6: PfpSyncMe didn't barrier fill before copy");
     TEST_PASS();
 }
@@ -976,7 +1028,7 @@ static void test_06_ce_dump_const_ram() {
     pm4_event_write_eop(dcb, (void*)fence, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
-    if (!wait_fence(fence)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    if (!wait_fence(fence)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*target == 0x12345678, "RAW-8: CE dump data not visible");
     TEST_PASS();
 }
@@ -1003,7 +1055,7 @@ static void test_07_ce_stress() {
     pm4_event_write_eop(dcb, (void*)f, 1, 2, 0);
     pm4_nop(dcb);
     submit_and_wait(dcb_mem, dcb.sizeBytes(), ccb_mem, ccb.sizeBytes());
-    if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     bool ok = true;
     for (int i = 0; i < N; i++) {
         if (t[i] != (0xA0000000u | (uint32_t)i)) { ok = false; break; }
@@ -1024,7 +1076,7 @@ static void test_08_acquire_mem_cross_engine() {
     pm4_dma_data_fill(acb, (void*)buf, 0xFEEDFACE, 4);
     pm4_release_mem(acb, (void*)f1, 1, 2, 0);
     pm4_nop(acb);
-    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
 
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
     CmdBuffer cb; cb.init(dcb, 0x4000);
@@ -1033,7 +1085,7 @@ static void test_08_acquire_mem_cross_engine() {
     pm4_dma_data_copy(cb, (void*)dst, (void*)buf, 4);
     pm4_event_write_eop(cb, (void*)f2, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*dst == 0xFEEDFACE, "WAW-5b: AcquireMem didn't flush compute DMA for GFX");
     TEST_PASS();
 }
@@ -1053,7 +1105,7 @@ static void test_09_mem_semaphore_basic() {
     for (int i = 0; i < 5; i++) pm4_mem_semaphore_signal(cb, (void*)sem);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 5, "Signal count wrong");
     *f = 0;
     CmdBuffer c2; c2.init(dcb, 0x4000);
@@ -1061,7 +1113,7 @@ static void test_09_mem_semaphore_basic() {
     for (int i = 0; i < 5; i++) pm4_mem_semaphore_wait(c2, (void*)sem);
     pm4_event_write_eop(c2, (void*)f, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 0, "WAW-1: Semaphore not zero after wait/decrement");
     TEST_PASS();
 }
@@ -1101,7 +1153,7 @@ static void test_11_mem_semaphore_stress() {
     for (int i = 0; i < 32; i++) pm4_mem_semaphore_signal(cb, (void*)sem);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0);
     pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 32, "32x signal count wrong");
     *f = 0;
     CmdBuffer c2; c2.init(dcb, 0x4000);
@@ -1109,7 +1161,7 @@ static void test_11_mem_semaphore_stress() {
     for (int i = 0; i < 32; i++) pm4_mem_semaphore_wait(c2, (void*)sem);
     pm4_event_write_eop(c2, (void*)f, 1, 2, 0);
     pm4_nop(c2);
-    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, c2.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*sem == 0, "WAW-1c: 32x signal/wait imbalanced");
     TEST_PASS();
 }
@@ -1162,7 +1214,7 @@ static void test_20_dma_sequential() {
     pm4_context_control(cb);
     for (uint32_t i = 1; i <= 5; i++) pm4_dma_data_fill(cb, (void*)t, i, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*t == 5, "DMA order violated");
     TEST_PASS();
 }
@@ -1181,7 +1233,7 @@ static void test_21_dma_copy_chain() {
     pm4_dma_data_copy(cb, (void*)b, (void*)a, 4);
     pm4_dma_data_copy(cb, (void*)c, (void*)b, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*c == 0x55AA55AA, "DMA chain: data lost");
     TEST_PASS();
 }
@@ -1196,7 +1248,7 @@ static void test_22_dma_large_block() {
     pm4_context_control(cb);
     pm4_dma_data_fill(cb, (void*)buf, 0xABCDABCD, 4096);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     bool ok = true;
     for (int i = 0; i < 1024; i++) { if (buf[i] != 0xABCDABCD) { ok=false; break; } }
     TEST_CHECK(ok, "DMA 4KB fill corrupted");
@@ -1216,7 +1268,7 @@ static void test_23_write_data_u32() {
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb); pm4_write_data_u32(cb, d, 0xFACEFEED);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0xFACEFEED, "WriteData u32 fail");
     TEST_PASS();
 }
@@ -1230,7 +1282,7 @@ static void test_24_write_data_u64() {
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb); pm4_write_data_u64(cb, d, 0x0123456789ABCDEFULL);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0x0123456789ABCDEFULL, "WriteData u64 fail");
     TEST_PASS();
 }
@@ -1246,7 +1298,7 @@ static void test_25_write_data_then_dma() {
     pm4_write_data_u32(cb, d, 0x11111111);
     pm4_dma_data_fill(cb, (void*)d, 0x22222222, 4);
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*d == 0x22222222, "WAW-4: DMA should overwrite WriteData");
     TEST_PASS();
 }
@@ -1272,7 +1324,7 @@ static void test_28_indirect_buffer() {
     pm4_context_control(cb);
     pm4_indirect_buffer(cb, ib, ib_cb.sizeDwords());
     pm4_event_write_eop(cb, (void*)f, 1, 2, 0); pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, REPEAT); _pass = false; log_flush(); break; }
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
     TEST_CHECK(*r == 0x1B1B1B1B, "IB: WriteData not executed");
     TEST_PASS();
 }
@@ -1333,94 +1385,216 @@ static void test_30_rapid_submit_same_addr() {
 }
 
 // ============================================================================
+//  TEST REGISTRY + CONTROLLER MENU
+// ============================================================================
+
+struct TestEntry { void (*fn)(); const char* name; bool compute; bool sel; };
+
+static TestEntry g_tests[] = {
+    { test_01_eop_fence_timing,         "RAW-1  EOP fence before DMA",        false, true },
+    { test_03_eop_pipeline_depth,       "RAW-1b 8 sequential EOP fences",     false, true },
+    { test_04_acquire_mem,              "WAW-5  AcquireMem cache invalidate",  false, true },
+    { test_05_cp_sync_width,            "WAW-6  PfpSyncMe barrier width",      false, true },
+    { test_06_ce_dump_const_ram,        "RAW-8  CE DumpConstRam dirty track",  false, true },
+    { test_07_ce_stress,                "RAW-8b CE heap 8x write+dump",        false, true },
+    { test_09_mem_semaphore_basic,      "WAW-1  MemSemaphore 5x sig+wait",     false, true },
+    { test_11_mem_semaphore_stress,     "WAW-1c MemSemaphore 32x sig+wait",    false, true },
+    { test_14_wrm_equal,                "WaitRegMem Equal",                    false, true },
+    { test_15_wrm_gt,                   "WaitRegMem GreaterThan",              false, true },
+    { test_16_wrm_lt,                   "WaitRegMem LessThan",                 false, true },
+    { test_17_wrm_masked,               "WaitRegMem Masked Equal",             false, true },
+    { test_18_wrm_gte,                  "WaitRegMem GreaterEqual",             false, true },
+    { test_19_wrm_not_equal,            "WaitRegMem NotEqual",                 false, true },
+    { test_20_dma_sequential,           "DMA Sequential fills",                false, true },
+    { test_21_dma_copy_chain,           "DMA Copy chain A->B->C",              false, true },
+    { test_22_dma_large_block,          "DMA 4KB fill integrity",              false, true },
+    { test_23_write_data_u32,           "WriteData u32 after EOP",             false, true },
+    { test_24_write_data_u64,           "WriteData u64 visibility",            false, true },
+    { test_25_write_data_then_dma,      "WAW-4  WriteData then DMA fill",      false, true },
+    { test_28_indirect_buffer,          "IndirectBuffer secondary cmd",        false, true },
+    { test_29_rapid_submit,             "WAR-1  50 rapid submit/done",         false, true },
+    { test_30_rapid_submit_same_addr,   "WAR-1b 100 submits same addr",        false, true },
+    { test_02_release_mem_timing,       "RAW-2  Compute ReleaseMem fence",     true,  true },
+    { test_08_acquire_mem_cross_engine, "WAW-5b AcquireMem compute->GFX",      true,  true },
+    { test_10_mem_semaphore_cross_queue,"WAW-1b Cross-queue MemSemaphore",     true,  true },
+};
+static const int g_ntests = (int)(sizeof(g_tests) / sizeof(g_tests[0]));
+
+static int g_pad = -1;
+
+static bool pad_setup() {
+    sceUserServiceInitialize(nullptr);
+    int uid = -1; sceUserServiceGetInitialUser(&uid);
+    scePadInit();
+    g_pad = scePadOpen(uid, 0 /* STANDARD */, 0, nullptr);
+    return g_pad >= 0;
+}
+
+static uint32_t pad_buttons() {
+    if (g_pad < 0) return 0;
+    PadState pd; my_memset(&pd, 0, sizeof(pd));
+    scePadReadState(g_pad, &pd);
+    return pd.buttons;
+}
+
+static void draw_menu() {
+    if (!g_screen.ok) return;
+    g_screen.clear(0x80101018u);
+    int scale = 2, rowh = 10 * scale;
+    int sel = 0; for (int i = 0; i < g_ntests; i++) if (g_tests[i].sel) sel++;
+    g_screen.text(6, 4, "PS4 RACE SUITE  --  SELECT TESTS", 0x80FFFFFFu, scale);
+    char st[96]; int p = 0;
+    const char* a = "Tries "; while (*a) st[p++] = *a++;
+    p = Screen::u2s(st, p, g_tries);
+    const char* b = "   Selected "; while (*b) st[p++] = *b++;
+    p = Screen::u2s(st, p, sel); st[p++] = '/'; p = Screen::u2s(st, p, g_ntests);
+    const char* c = "   Total "; while (*c) st[p++] = *c++;
+    p = Screen::u2s(st, p, sel * g_tries);
+    const char* d = " runs"; while (*d) st[p++] = *d++; st[p] = 0;
+    g_screen.text(6, 4 + rowh, st, 0x8080D0FFu, scale);
+    int y0 = 4 + rowh * 2 + 4;
+    for (int i = 0; i < g_ntests; i++) {
+        char row[80]; int rp = 0;
+        row[rp++] = (i == g_cursor) ? '>' : ' '; row[rp++] = ' ';
+        row[rp++] = '['; row[rp++] = g_tests[i].sel ? 'x' : ' '; row[rp++] = ']'; row[rp++] = ' ';
+        if (i + 1 < 10) row[rp++] = '0';
+        rp = Screen::u2s(row, rp, i + 1); row[rp++] = ' ';
+        const char* nm = g_tests[i].name; while (*nm && rp < 78) row[rp++] = *nm++;
+        row[rp] = 0;
+        uint32_t col = g_tests[i].sel ? 0x8080FF80u : 0x80707078u;
+        if (i == g_cursor) col = g_tests[i].sel ? 0x80B0FFB0u : 0x80E0E0E0u;
+        g_screen.text(6, y0 + i * rowh, row, col, scale);
+    }
+    g_screen.text(6, g_screen.h - rowh * 3 - 4,
+                  "L1 +10  R1 +100  L2 +1000  R2 +10000  O reset", 0x80E0E0E0u, scale);
+    g_screen.text(6, g_screen.h - rowh * 2 - 4,
+                  "D-pad move  X toggle  Triangle all/none  OPTIONS run  Touchpad quit",
+                  0x80E0E0E0u, scale);
+    g_screen.present();
+}
+
+static void quit_app() {
+    if (g_cq.vqid > 0) g_cq.destroy();
+    log_close();
+    sceSystemServiceLoadExec("EXIT", nullptr);
+}
+
+static void menu_loop() {
+    uint32_t prev = pad_buttons();
+    int rep = 0;
+    draw_menu();
+    while (true) {
+        uint32_t bn = pad_buttons();
+        uint32_t edge = bn & ~prev;
+        bool dirty = false;
+        int move = 0;
+        if (edge & PAD_UP) move = -1;
+        else if (edge & PAD_DOWN) move = +1;
+        else if (bn & PAD_UP)   { if (++rep > 8 && rep % 3 == 0) move = -1; }
+        else if (bn & PAD_DOWN) { if (++rep > 8 && rep % 3 == 0) move = +1; }
+        else rep = 0;
+        if (move) { g_cursor = (g_cursor + move + g_ntests) % g_ntests; dirty = true; }
+        if (edge & PAD_L1) { g_tries += 10;    dirty = true; }
+        if (edge & PAD_R1) { g_tries += 100;   dirty = true; }
+        if (edge & PAD_L2) { g_tries += 1000;  dirty = true; }
+        if (edge & PAD_R2) { g_tries += 10000; dirty = true; }
+        if (edge & PAD_CIRCLE) { g_tries = 1;  dirty = true; }
+        if (g_tries < 1) g_tries = 1;
+        if (g_tries > 1000000) g_tries = 1000000;
+        if (edge & PAD_CROSS) { g_tests[g_cursor].sel = !g_tests[g_cursor].sel; dirty = true; }
+        if (edge & PAD_TRIANGLE) {
+            bool all = true; for (int i = 0; i < g_ntests; i++) if (!g_tests[i].sel) all = false;
+            for (int i = 0; i < g_ntests; i++) g_tests[i].sel = !all;
+            dirty = true;
+        }
+        if (edge & PAD_TOUCHPAD) quit_app();
+        if (edge & PAD_OPTIONS) {
+            int s = 0; for (int i = 0; i < g_ntests; i++) if (g_tests[i].sel) s++;
+            if (s > 0) break;
+        }
+        prev = bn;
+        if (dirty) draw_menu();
+        sceKernelUsleep(16000);
+    }
+}
+
+static void run_selected() {
+    int sel = 0; bool need_compute = false;
+    for (int i = 0; i < g_ntests; i++)
+        if (g_tests[i].sel) { sel++; if (g_tests[i].compute) need_compute = true; }
+    g_runs_total = (long long)sel * g_tries;
+    g_runs_base = 0; g_runs_done = 0; g_screen.last_tick = 0;
+    g_tick_step = g_runs_total / 200; if (g_tick_step < 1) g_tick_step = 1;
+    tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
+    g_screen.nlines = 0;
+    g_cq.write_off = 0;
+    sceKernelUsleep(200000);
+    gpu_pool_reset();
+
+    logf("========================================================\n");
+    logf(" RACE SUITE  |  %d tests x %d tries = %d runs\n", sel, g_tries, (int)g_runs_total);
+    logf("========================================================\n");
+
+    // Graphics-ring tests first so their results commit before any compute map.
+    for (int i = 0; i < g_ntests; i++)
+        if (g_tests[i].sel && !g_tests[i].compute) g_tests[i].fn();
+
+    if (need_compute) {
+        logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
+        if (g_cq.vqid <= 0 && !g_cq.init(0, 0))
+            logf("[compute] queue map failed - skipping compute tests\n");
+        else
+            for (int i = 0; i < g_ntests; i++)
+                if (g_tests[i].sel && g_tests[i].compute) g_tests[i].fn();
+    }
+
+    logf("\n========================================================\n");
+    logf(" Done: %d passed, %d failed / %d tests\n", tests_passed, tests_failed, tests_run);
+    logf("========================================================\n");
+    logf(" Press X for menu   Touchpad to quit\n");
+}
+
+static void wait_back() {
+    uint32_t prev = pad_buttons();
+    while (true) {
+        uint32_t bn = pad_buttons();
+        uint32_t edge = bn & ~prev;
+        if (edge & PAD_CROSS) break;
+        if (edge & PAD_TOUCHPAD) quit_app();
+        prev = bn;
+        sceKernelUsleep(16000);
+    }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
 int main(void) {
-    g_screen.init();   // on-screen results (video out); falls back silently if unavailable
+    g_screen.init();   // on-screen results (video out); silent fallback if unavailable
     log_init();
 
-    // Init GPU memory pool (one big allocation, reused across all runs)
     if (!gpu_pool_init()) {
         logf("FATAL: GPU pool init failed\n");
         log_close();
         return 1;
     }
 
-    // NOTE: the compute queue is NOT mapped here. Mapping an ASC queue makes
-    // shadps4 start its GpuCommandProcessor thread, which aborts the emulator
-    // while parsing the ring. Defer the map until AFTER all graphics-ring tests
-    // have run and committed their results to disk (see deferred init below).
-
-    logf("========================================================\n");
-    logf(" PS4 GPU/CPU Race Condition Test Suite - FULL EDITION\n");
-    logf(" 26 Tests | Target: Real PS4 + shadps4\n");
-    logf("========================================================\n");
-
-    const int RUNS = 3;
-    int total_pass = 0, total_fail = 0;
-
-    for (int _run = 0; _run < RUNS; _run++) {
-        tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
-        g_screen.prog_done = 0; g_screen.prog_total = TOTAL_TESTS;
-        logf("\n===== RUN %d/%d (each test x%d) =====\n", _run+1, RUNS, REPEAT);
-        g_cq.write_off = 0; // reset ring position
-        sceKernelUsleep(500000); // 500ms drain before reset
-        gpu_pool_reset();
-
-        test_01_eop_fence_timing();
-        test_03_eop_pipeline_depth();
-        test_04_acquire_mem();
-        test_05_cp_sync_width();
-        test_06_ce_dump_const_ram();
-        test_07_ce_stress();
-        test_09_mem_semaphore_basic();
-        test_11_mem_semaphore_stress();
-        test_14_wrm_equal();
-        test_15_wrm_gt();
-        test_16_wrm_lt();
-        test_17_wrm_masked();
-        test_18_wrm_gte();
-        test_19_wrm_not_equal();
-        test_20_dma_sequential();
-        test_21_dma_copy_chain();
-        test_22_dma_large_block();
-        test_23_write_data_u32();
-        test_24_write_data_u64();
-        test_25_write_data_then_dma();
-        test_28_indirect_buffer();
-        test_29_rapid_submit();
-        test_30_rapid_submit_same_addr();
-
-        // ---- Compute-queue (ASC/DingDong) tests run LAST ----
-        // All graphics-ring results above are already committed to disk (one
-        // open+close per line). Mapping the ASC queue here may abort shadps4 on
-        // its GpuCommandProcessor thread, but the graphics results are safe.
-        logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
-        if (g_cq.vqid <= 0 && !g_cq.init(0, 0)) {
-            logf("[compute] queue map failed - skipping compute tests\n");
-        } else {
-            test_02_release_mem_timing();
-        test_08_acquire_mem_cross_engine();
-        test_10_mem_semaphore_cross_queue();
-        }
-
-        total_pass += tests_passed;
-        total_fail += tests_failed;
+    if (!pad_setup()) {
+        // No controller: run every test once at the default tries, then exit.
+        for (int i = 0; i < g_ntests; i++) g_tests[i].sel = true;
+        run_selected();
+        g_cq.destroy();
+        log_close();
+        sceKernelUsleep(5000000);
+        sceSystemServiceLoadExec("EXIT", nullptr);
+        return 0;
     }
 
-
-    logf("\n========================================================\n");
-    logf(" Results: %d passed, %d failed / %d total (across %d runs)\n",
-           total_pass, total_fail, total_pass + total_fail, RUNS);
-    logf("========================================================\n");
-    if (total_fail == 0) logf(" ALL %d TESTS PASSED\n", total_pass);
-    else logf(" %d HAZARDS DETECTED (out of %d)\n", total_fail, total_pass + total_fail);
-    logf("========================================================\n");
-
-    g_cq.destroy();
-    log_close();
-    sceKernelUsleep(5000000);
-    sceSystemServiceLoadExec("EXIT", nullptr);
+    for (;;) {
+        menu_loop();      // pick tests + tries (OPTIONS to run)
+        run_selected();   // run with live progress bar
+        wait_back();      // X returns to the menu
+    }
     return 0;
 }
