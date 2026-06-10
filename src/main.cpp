@@ -1120,10 +1120,59 @@ struct DrawRes {
 };
 static DrawRes g_draw;
 
+// Proven default hardware-state preamble: the register-defaults block that
+// sceGnmDrawInitDefaultHardwareState emits (verbatim from shadPS4's base,
+// non-Neo InitSequence). Real PS4 requires this before any draw — without it
+// dozens of context/SPI registers hold undefined values and the GPU hangs.
+// shadPS4 self-initializes so it tolerated the omission; hardware does not.
+static const uint32_t g_hw_init[] = {
+    0xc0001200u, 0u,                        // IT_CLEAR_STATE
+    0xc0017600u, 0x216u, 0xffffffffu,
+    0xc0017600u, 0x217u, 0xffffffffu,
+    0xc0017600u, 0x215u, 0u,
+    0xc0016900u, 0x2f9u, 0x2du,
+    0xc0016900u, 0x282u, 8u,
+    0xc0016900u, 0x280u, 0x80008u,
+    0xc0016900u, 0x281u, 0xffff0000u,
+    0xc0016900u, 0x204u, 0u,
+    0xc0016900u, 0x206u, 0x43fu,
+    0xc0016900u, 0x83u,  0xffffu,
+    0xc0016900u, 0x317u, 0x10u,
+    0xc0016900u, 0x2fau, 0x3f800000u,
+    0xc0016900u, 0x2fcu, 0x3f800000u,
+    0xc0016900u, 0x2fbu, 0x3f800000u,
+    0xc0016900u, 0x2fdu, 0x3f800000u,
+    0xc0016900u, 0x202u, 0xcc0010u,
+    0xc0016900u, 0x30eu, 0xffffffffu,
+    0xc0016900u, 0x30fu, 0xffffffffu,
+    0xc0002f00u, 1u,
+    0xc0017600u, 7u,     0x1ffu,
+    0xc0017600u, 0x46u,  0x1ffu,
+    0xc0017600u, 0x87u,  0x1ffu,
+    0xc0017600u, 0xc7u,  0x1ffu,
+    0xc0017600u, 0x107u, 0u,
+    0xc0017600u, 0x147u, 0x1ffu,
+    0xc0016900u, 0x1b1u, 2u,
+    0xc0016900u, 0x101u, 0u,
+    0xc0016900u, 0x100u, 0xffffffffu,
+    0xc0016900u, 0x103u, 0u,
+    0xc0016900u, 0x284u, 0u,
+    0xc0016900u, 0x290u, 0u,
+    0xc0016900u, 0x2aeu, 0u,
+    0xc0016900u, 0x292u, 0u,
+    0xc0016900u, 0x293u, 0x6000000u,
+    0xc0016900u, 0x2f8u, 0u,
+    0xc0016900u, 0x2deu, 0x1e9u,
+    0xc0036900u, 0x295u, 0x100u, 0x100u, 4u,
+    0xc0017900u, 0x200u, 0xe0000000u,
+};
+
 // Emit the full graphics pipeline state and binds for the fullscreen quad.
 // Does NOT issue the draw — the caller issues pm4_draw_index_auto[_pred].
 static void emit_draw_state(CmdBuffer& cb) {
     const uint32_t W = DRAW_W, H = DRAW_H;
+
+    for (unsigned i = 0; i < sizeof(g_hw_init)/4; i++) cb.emit(g_hw_init[i]);
 
     { uint64_t a = (uint64_t)(uintptr_t)g_draw.vs_gpu;
       uint32_t r[4] = { (uint32_t)(a>>8), (uint32_t)(a>>40), 0x0Bu, (4u<<1) };
