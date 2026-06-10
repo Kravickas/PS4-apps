@@ -1062,6 +1062,8 @@ struct DrawRes {
     void*     depth;
     uint32_t* vb;
     uint32_t* desc;
+    void*     vs_gpu;   // shader code must live in GPU-mapped memory, not the ELF segment
+    void*     ps_gpu;
     uint32_t  vsharp[4];
     bool      ready;
 
@@ -1079,7 +1081,16 @@ struct DrawRes {
         depth = dmem(0x100000);
         vb    = (uint32_t*)dmem(0x10000);
         desc  = (uint32_t*)dmem(0x10000);
-        if (!color || !depth || !vb || !desc) return false;
+        vs_gpu = dmem(0x10000);
+        ps_gpu = dmem(0x10000);
+        if (!color || !depth || !vb || !desc || !vs_gpu || !ps_gpu) return false;
+
+        // Shader code must be fetched from GPU-mapped memory; copy the binaries
+        // out of the ELF data segment into direct memory (256-byte aligned base).
+        for (unsigned i = 0; i < sizeof(vs_draw_binary)/4; i++)
+            ((uint32_t*)vs_gpu)[i] = vs_draw_binary[i];
+        for (unsigned i = 0; i < sizeof(ps_draw_binary)/4; i++)
+            ((uint32_t*)ps_gpu)[i] = ps_draw_binary[i];
 
         float* f = (float*)vb;
         for (int i = 0; i < 16; i++) f[i] = (i % 5 == 0) ? 1.0f : 0.0f;  // identity MVP @ V#+0
@@ -1114,11 +1125,11 @@ static DrawRes g_draw;
 static void emit_draw_state(CmdBuffer& cb) {
     const uint32_t W = DRAW_W, H = DRAW_H;
 
-    { uint64_t a = (uint64_t)(uintptr_t)vs_draw_binary;
+    { uint64_t a = (uint64_t)(uintptr_t)g_draw.vs_gpu;
       uint32_t r[4] = { (uint32_t)(a>>8), (uint32_t)(a>>40), 0x0Bu, (4u<<1) };
       pm4_set_sh_regs(cb, SH_VS_PGM_LO, r, 4); }
 
-    { uint64_t a = (uint64_t)(uintptr_t)ps_draw_binary;
+    { uint64_t a = (uint64_t)(uintptr_t)g_draw.ps_gpu;
       uint32_t r[4] = { (uint32_t)(a>>8), (uint32_t)(a>>40), 0x0Au, (2u<<1) };
       pm4_set_sh_regs(cb, SH_PS_PGM_LO, r, 4);
       uint32_t ud[2] = { (uint32_t)((uint64_t)(uintptr_t)g_draw.desc),
