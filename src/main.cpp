@@ -608,7 +608,7 @@ static inline void pm4_mem_semaphore_signal(CmdBuffer& cb, volatile void* addres
     uint64_t addr = (uint64_t)(uintptr_t)address;
     cb.emit(PM4_HDR(IT_MEM_SEMAPHORE, 2));
     cb.emit((uint32_t)((addr >> 3) << 3));           // addr_lo [31:3]
-    uint32_t dw2 = ((uint32_t)(addr >> 32) & 0xFF);  // addr_hi
+    uint32_t dw2 = ((uint32_t)(addr >> 32) & 0xFFFF);  // addr_hi [15:0] (CI/VI)
     dw2 |= (6u << 29);  // sem_sel = SignalSemaphore
     dw2 |= (0u << 20);  // signal_type = Increment
     cb.emit(dw2);
@@ -618,14 +618,14 @@ static inline void pm4_mem_semaphore_wait(CmdBuffer& cb, volatile void* address)
     uint64_t addr = (uint64_t)(uintptr_t)address;
     cb.emit(PM4_HDR(IT_MEM_SEMAPHORE, 2));
     cb.emit((uint32_t)((addr >> 3) << 3));
-    uint32_t dw2 = ((uint32_t)(addr >> 32) & 0xFF);
+    uint32_t dw2 = ((uint32_t)(addr >> 32) & 0xFFFF);  // addr_hi [15:0] (CI/VI)
     dw2 |= (7u << 29);  // sem_sel = WaitSemaphore
     cb.emit(dw2);
 }
 
 // ---------------------------------------------------------------------------
 // DMA_DATA — GPU-side memory fill or copy
-//   src_sel: 0=data (immediate), 1=memory, 3=memory_l2
+//   src_sel: 0=memory, 1=gds, 2=data (immediate), 3=memory_l2
 //   dst_sel: 0=memory, 1=gds, 3=memory_l2
 // ---------------------------------------------------------------------------
 static inline void pm4_dma_data_fill(CmdBuffer& cb, void* dst, uint32_t value, uint32_t num_bytes) {
@@ -654,11 +654,61 @@ static inline void pm4_dma_data_copy(CmdBuffer& cb, void* dst, void* src, uint32
 }
 
 // ---------------------------------------------------------------------------
+// Predicated CP-DMA fill — same as pm4_dma_data_fill but with the type-3
+// predicate bit set, so SET_PREDICATION gates whether the CP runs it. PAL sets
+// this same bit on DMA_DATA (gfx6CmdUtil.cpp BuildDmaData uses dmaData.predicate).
+// ---------------------------------------------------------------------------
+static inline void pm4_dma_data_fill_pred(CmdBuffer& cb, void* dst, uint32_t value,
+                                          uint32_t num_bytes) {
+    uint64_t daddr = (uint64_t)(uintptr_t)dst;
+    cb.emit(PM4_HDR(IT_DMA_DATA, 6) | 1u);        // bit0 = predicate
+    cb.emit((2u << 29) | (0u << 20) | (1u << 31));
+    cb.emit(value);
+    cb.emit(0);
+    cb.emit((uint32_t)(daddr & 0xFFFFFFFF));
+    cb.emit((uint32_t)(daddr >> 32));
+    cb.emit(num_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// SET_PREDICATION — gate subsequent predicated packets on a predicate source.
+// pred_op: 0=CLEAR(disable), 3=MEM(value at addr). boolean = DrawIf polarity;
+// continueBit=0 replaces active predication. Fields per PM4CMDSETPREDICATION:
+// startAddrHi[7:0], predicationBoolean[8], predOp[18:16].
+// ---------------------------------------------------------------------------
+static const uint32_t SET_PRED_CLEAR = 0;
+static const uint32_t SET_PRED_MEM   = 3;
+static inline void pm4_set_predication(CmdBuffer& cb, void* pred_addr, uint32_t pred_op,
+                                       uint32_t boolean) {
+    uint64_t addr = (uint64_t)(uintptr_t)pred_addr;
+    cb.emit(PM4_HDR(IT_SET_PREDICATION, 2));
+    cb.emit((uint32_t)(addr & 0xFFFFFFFF));                  // startAddressLo
+    cb.emit(((uint32_t)(addr >> 32) & 0xFF)                  // startAddrHi[7:0]
+            | ((boolean & 1u) << 8)                          // predicationBoolean[8]
+            | ((pred_op & 7u) << 16));                       // predOp[18:16]
+}
+
+// ---------------------------------------------------------------------------
+// EVENT_WRITE_EOS, PS_DONE — graphics-ring end-of-shader fence. PS_DONE=0x30 is
+// the pixel-shader-done event (CS_DONE=0x2f is the compute-ring variant; using it
+// on the GFX ring is invalid). eventIndex CSDONE_PSDONE=6 [11:8], command
+// STORE_32BIT_DATA_TO_MEMORY=2 [31:29]. Body = 4 dwords.
+// ---------------------------------------------------------------------------
+static inline void pm4_event_write_eos_psdone(CmdBuffer& cb, void* address, uint32_t data) {
+    uint64_t addr = (uint64_t)(uintptr_t)address;
+    cb.emit(PM4_HDR(IT_EVENT_WRITE_EOS, 4));
+    cb.emit(0x30u | (6u << 8));                              // PS_DONE, eventIndex=6
+    cb.emit((uint32_t)(addr & 0xFFFFFFFF));                 // addressLo
+    cb.emit(((uint32_t)(addr >> 32) & 0xFFFF) | (2u << 29)); // addrHi[15:0], command=STORE_32BIT
+    cb.emit(data);
+}
+
+// ---------------------------------------------------------------------------
 // ACQUIRE_MEM — invalidate GPU caches (should be barrier on real HW)
 // ---------------------------------------------------------------------------
 static inline void pm4_acquire_mem(CmdBuffer& cb) {
     cb.emit(PM4_HDR(IT_ACQUIRE_MEM, 6));
-    cb.emit(0x02800000); // cp_coher_cntl: TC|SH action ena
+    cb.emit(0x02800000); // cp_coher_cntl: TC_ACTION_ENA (b23) | CB_ACTION_ENA (b25)
     cb.emit(0xFFFFFFFF); // cp_coher_size_lo
     cb.emit(0x000000FF); // cp_coher_size_hi
     cb.emit(0);          // cp_coher_base_lo
@@ -726,18 +776,6 @@ static inline void pm4_context_control(CmdBuffer& cb) {
 // EVENT_WRITE_EOS — end-of-shader event with fence or GDS store
 //   command: 2 = SignalFence, 1 = GdsStore
 // ---------------------------------------------------------------------------
-static inline void pm4_event_write_eos_fence(CmdBuffer& cb, void* address, uint32_t data) {
-    uint64_t addr = (uint64_t)(uintptr_t)address;
-    // eventType=CS_DONE(0x2F), eventIndex=CS_DONE/PS_DONE(6) at bits[9:6]
-    uint32_t dw1 = (0x2Fu) | (6u << 6);
-    // addressHi[15:0] | command=STORE_32BIT_DATA_TO_MEMORY(2) at bits[31:29]
-    uint32_t cmd_info = ((uint32_t)(addr >> 32) & 0xFFFF) | (2u << 29);
-    cb.emit(PM4_HDR(IT_EVENT_WRITE_EOS, 4));
-    cb.emit(dw1);
-    cb.emit((uint32_t)(addr & 0xFFFFFFFFu));
-    cb.emit(cmd_info);
-    cb.emit(data);
-}
 
 // ---------------------------------------------------------------------------
 // INDIRECT_BUFFER — jump to secondary command buffer
@@ -892,7 +930,7 @@ struct ComputeQueue {
 static ComputeQueue g_cq;
 
 // ============================================================================
-//  CATEGORY 1: FENCE TIMING (RAW-1, RAW-2)
+//  CATEGORY 1: FENCE TIMING (RAW-1)
 // ============================================================================
 
 static void test_01_eop_fence_timing() {
@@ -914,24 +952,7 @@ static void test_01_eop_fence_timing() {
     TEST_PASS();
 }
 
-static void test_02_release_mem_timing() {
-    TEST_BEGIN("RAW-2: Compute ReleaseMem fence fires before DMA completes");
-    volatile uint32_t* data = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(data && fence, "alloc");
-    *data = 0; *fence = 0;
-    CmdBuffer acb = g_cq.begin();
-    pm4_dma_data_fill(acb, (void*)data, 0xBAADF00D, 4);
-    pm4_release_mem(acb, (void*)fence, 1, 2, 0);
-    pm4_nop(acb);
-    g_cq.submit(acb);
-    sceKernelUsleep(20000);
-    TEST_CHECK(wait_fence(fence), "fence timeout");
-    TEST_CHECK(*data == 0xBAADF00D, "RAW-2: Compute DMA stale when ReleaseMem arrived");
-    TEST_PASS();
-}
-
-static void test_03_eop_pipeline_depth() {
+static void test_02_eop_pipeline_depth() {
     TEST_BEGIN("RAW-1b: 8 sequential EOP fences preserve ordering");
     const int N = 8;
     volatile uint64_t* fences = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -960,7 +981,7 @@ static void test_03_eop_pipeline_depth() {
 //  CATEGORY 2: CACHE COHERENCE (WAW-5, WAW-6, RAW-8)
 // ============================================================================
 
-static void test_04_acquire_mem() {
+static void test_03_acquire_mem() {
     TEST_BEGIN("WAW-5: AcquireMem cache invalidation is no-op");
     volatile uint32_t* src = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint32_t* dst = (volatile uint32_t*)gpu_alloc(0x10000);
@@ -989,7 +1010,7 @@ static void test_04_acquire_mem() {
     TEST_PASS();
 }
 
-static void test_05_cp_sync_width() {
+static void test_04_cp_sync_width() {
     TEST_BEGIN("WAW-6: PfpSyncMe barrier too narrow");
     volatile uint32_t* a = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint32_t* b = (volatile uint32_t*)gpu_alloc(0x10000);
@@ -1009,7 +1030,7 @@ static void test_05_cp_sync_width() {
     TEST_PASS();
 }
 
-static void test_06_ce_dump_const_ram() {
+static void test_05_ce_dump_const_ram() {
     TEST_BEGIN("RAW-8: CE DumpConstRam bypasses dirty tracking");
     volatile uint32_t* target = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1035,7 +1056,7 @@ static void test_06_ce_dump_const_ram() {
     TEST_PASS();
 }
 
-static void test_07_ce_stress() {
+static void test_06_ce_stress() {
     TEST_BEGIN("RAW-8b: CE constant heap 8x write+dump");
     const int N = 8;
     volatile uint32_t* t = (volatile uint32_t*)gpu_alloc(0x10000);
@@ -1066,37 +1087,11 @@ static void test_07_ce_stress() {
     TEST_PASS();
 }
 
-static void test_08_acquire_mem_cross_engine() {
-    TEST_BEGIN("WAW-5b: AcquireMem cross-engine (compute->GFX)");
-    volatile uint32_t* buf = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint32_t* dst = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint64_t* f1 = (volatile uint64_t*)gpu_alloc(0x10000);
-    volatile uint64_t* f2 = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(buf && dst && f1 && f2, "alloc");
-    *buf = 0; *dst = 0; *f1 = 0; *f2 = 0;
-    CmdBuffer acb = g_cq.begin();
-    pm4_dma_data_fill(acb, (void*)buf, 0xFEEDFACE, 4);
-    pm4_release_mem(acb, (void*)f1, 1, 2, 0);
-    pm4_nop(acb);
-    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
-
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    CmdBuffer cb; cb.init(dcb, 0x4000);
-    pm4_context_control(cb);
-    pm4_acquire_mem(cb);
-    pm4_dma_data_copy(cb, (void*)dst, (void*)buf, 4);
-    pm4_event_write_eop(cb, (void*)f2, 1, 2, 0);
-    pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
-    TEST_CHECK(*dst == 0xFEEDFACE, "WAW-5b: AcquireMem didn't flush compute DMA for GFX");
-    TEST_PASS();
-}
-
 // ============================================================================
 //  CATEGORY 3: MEM_SEMAPHORE (WAW-1)
 // ============================================================================
 
-static void test_09_mem_semaphore_basic() {
+static void test_07_mem_semaphore_basic() {
     TEST_BEGIN("WAW-1: MemSemaphore 5x signal + 5x wait");
     volatile uint64_t* sem = (volatile uint64_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1120,31 +1115,7 @@ static void test_09_mem_semaphore_basic() {
     TEST_PASS();
 }
 
-static void test_10_mem_semaphore_cross_queue() {
-    TEST_BEGIN("WAW-1b: Cross-queue MemSemaphore (GFX signal, Compute wait)");
-    volatile uint64_t* sem = (volatile uint64_t*)gpu_alloc(0x10000);
-    volatile uint64_t* gf = (volatile uint64_t*)gpu_alloc(0x10000);
-    volatile uint64_t* cf = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(sem && gf && cf, "alloc"); *sem = 0; *gf = 0; *cf = 0;
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    CmdBuffer gfx; gfx.init(dcb, 0x4000);
-    pm4_context_control(gfx);
-    pm4_mem_semaphore_signal(gfx, (void*)sem);
-    pm4_event_write_eop(gfx, (void*)gf, 1, 2, 0);
-    pm4_nop(gfx);
-    CmdBuffer acb = g_cq.begin();
-    pm4_mem_semaphore_wait(acb, (void*)sem);
-    pm4_release_mem(acb, (void*)cf, 1, 2, 0);
-    pm4_nop(acb);
-    const uint32_t* dp[1] = { dcb }; uint32_t ds[1] = { gfx.sizeBytes() };
-    sceGnmSubmitCommandBuffers(1, dp, ds, nullptr, nullptr);
-    g_cq.submit(acb); sceGnmSubmitDone(); sceKernelUsleep(30000);
-    TEST_CHECK(wait_fence(gf, 100000), "GFX fence timeout");
-    TEST_CHECK(wait_fence(cf, 500000), "WAW-1b: Compute never unblocked by GFX semaphore");
-    TEST_PASS();
-}
-
-static void test_11_mem_semaphore_stress() {
+static void test_08_mem_semaphore_stress() {
     TEST_BEGIN("WAW-1c: MemSemaphore 32x signal + 32x wait");
     volatile uint64_t* sem = (volatile uint64_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1169,7 +1140,7 @@ static void test_11_mem_semaphore_stress() {
 }
 
 // ============================================================================
-//  CATEGORY 5: WAIT_REG_MEM (all comparison functions)
+//  CATEGORY 4: WAIT_REG_MEM (all comparison functions)
 // ============================================================================
 
 static void test_wait_reg_mem_func(const char* name, uint32_t write_val,
@@ -1195,18 +1166,18 @@ static void test_wait_reg_mem_func(const char* name, uint32_t write_val,
     TEST_PASS();
 }
 
-static void test_14_wrm_equal()     { test_wait_reg_mem_func("WaitRegMem: Equal",        42, 42, 0xFFFFFFFF, 3); }
-static void test_15_wrm_gt()        { test_wait_reg_mem_func("WaitRegMem: GreaterThan",   11, 10, 0xFFFFFFFF, 6); }
-static void test_16_wrm_lt()        { test_wait_reg_mem_func("WaitRegMem: LessThan",      50,100, 0xFFFFFFFF, 1); }
-static void test_17_wrm_masked()    { test_wait_reg_mem_func("WaitRegMem: Masked Equal", 0xFF000042, 0x42, 0xFF, 3); }
-static void test_18_wrm_gte()       { test_wait_reg_mem_func("WaitRegMem: GreaterEqual",  10, 10, 0xFFFFFFFF, 5); }
-static void test_19_wrm_not_equal() { test_wait_reg_mem_func("WaitRegMem: NotEqual",       7,  8, 0xFFFFFFFF, 4); }
+static void test_09_wrm_equal()     { test_wait_reg_mem_func("WaitRegMem: Equal",        42, 42, 0xFFFFFFFF, 3); }
+static void test_10_wrm_gt()        { test_wait_reg_mem_func("WaitRegMem: GreaterThan",   11, 10, 0xFFFFFFFF, 6); }
+static void test_11_wrm_lt()        { test_wait_reg_mem_func("WaitRegMem: LessThan",      50,100, 0xFFFFFFFF, 1); }
+static void test_12_wrm_masked()    { test_wait_reg_mem_func("WaitRegMem: Masked Equal", 0xFF000042, 0x42, 0xFF, 3); }
+static void test_13_wrm_gte()       { test_wait_reg_mem_func("WaitRegMem: GreaterEqual",  10, 10, 0xFFFFFFFF, 5); }
+static void test_14_wrm_not_equal() { test_wait_reg_mem_func("WaitRegMem: NotEqual",       7,  8, 0xFFFFFFFF, 4); }
 
 // ============================================================================
-//  CATEGORY 6: DMA ORDERING
+//  CATEGORY 5: DMA ORDERING
 // ============================================================================
 
-static void test_20_dma_sequential() {
+static void test_15_dma_sequential() {
     TEST_BEGIN("DMA: Sequential fills (last=5)");
     volatile uint32_t* t = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1221,7 +1192,7 @@ static void test_20_dma_sequential() {
     TEST_PASS();
 }
 
-static void test_21_dma_copy_chain() {
+static void test_16_dma_copy_chain() {
     TEST_BEGIN("DMA: Copy chain A->B->C");
     volatile uint32_t* a = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint32_t* b = (volatile uint32_t*)gpu_alloc(0x10000);
@@ -1240,7 +1211,7 @@ static void test_21_dma_copy_chain() {
     TEST_PASS();
 }
 
-static void test_22_dma_large_block() {
+static void test_17_dma_large_block() {
     TEST_BEGIN("DMA: 4KB fill integrity");
     volatile uint32_t* buf = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1258,10 +1229,10 @@ static void test_22_dma_large_block() {
 }
 
 // ============================================================================
-//  CATEGORY 7: WRITE_DATA & WAW-4
+//  CATEGORY 6: WRITE_DATA & WAW-4
 // ============================================================================
 
-static void test_23_write_data_u32() {
+static void test_18_write_data_u32() {
     TEST_BEGIN("WriteData: u32 visibility after EOP");
     volatile uint32_t* d = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1275,7 +1246,7 @@ static void test_23_write_data_u32() {
     TEST_PASS();
 }
 
-static void test_24_write_data_u64() {
+static void test_19_write_data_u64() {
     TEST_BEGIN("WriteData: u64 visibility");
     volatile uint64_t* d = (volatile uint64_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1289,7 +1260,7 @@ static void test_24_write_data_u64() {
     TEST_PASS();
 }
 
-static void test_25_write_data_then_dma() {
+static void test_20_write_data_then_dma() {
     TEST_BEGIN("WAW-4: WriteData then DMA fill same address (DMA wins)");
     volatile uint32_t* d = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1306,14 +1277,10 @@ static void test_25_write_data_then_dma() {
 }
 
 // ============================================================================
-//  CATEGORY 8: COND_EXEC (RAW-9)
+//  CATEGORY 7: INDIRECT BUFFER
 // ============================================================================
 
-// ============================================================================
-//  CATEGORY 9: INDIRECT BUFFER
-// ============================================================================
-
-static void test_28_indirect_buffer() {
+static void test_21_indirect_buffer() {
     TEST_BEGIN("IndirectBuffer: secondary cmd buffer execution");
     volatile uint32_t* r = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
@@ -1332,10 +1299,10 @@ static void test_28_indirect_buffer() {
 }
 
 // ============================================================================
-//  CATEGORY 10: SUBMIT STRESS (WAR-1)
+//  CATEGORY 8: SUBMIT STRESS (WAR-1)
 // ============================================================================
 
-static void test_29_rapid_submit() {
+static void test_22_rapid_submit() {
     TEST_BEGIN("WAR-1: 50 rapid submit/done cycles");
     const int N = 50;
     const uint32_t SLOT_DW = 0x40;  // 64-dword command-buffer slot per submit
@@ -1363,7 +1330,7 @@ static void test_29_rapid_submit() {
     TEST_PASS();
 }
 
-static void test_30_rapid_submit_same_addr() {
+static void test_23_rapid_submit_same_addr() {
     TEST_BEGIN("WAR-1b: 100 submits to same address (last=100)");
     const int N = 100;
     const uint32_t SLOT_DW = 0x40;  // 64-dword command-buffer slot per submit
@@ -1387,13 +1354,13 @@ static void test_30_rapid_submit_same_addr() {
 }
 
 // ============================================================================
-//  CATEGORY 11: PACKET-FEATURE / ORDERING (new)
+//  CATEGORY 9: PACKET-FEATURE / ORDERING
 // ============================================================================
 
 // CP-DMA with cpSync=1 makes the CP block until the fill completes, so the
 // following ME WriteData is strictly ordered after it and must win. (Complement
 // of test_25, which has WriteData first and the DMA winning.)
-static void test_31_dma_then_write_data() {
+static void test_24_dma_then_write_data() {
     TEST_BEGIN("WAW-4b: DMA(sync) fill then WriteData (WriteData wins)");
     volatile uint64_t* f = (volatile uint64_t*)gpu_alloc(0x10000);
     volatile uint32_t* tgt = (volatile uint32_t*)gpu_alloc(0x10000);
@@ -1410,29 +1377,9 @@ static void test_31_dma_then_write_data() {
     TEST_PASS();
 }
 
-// EVENT_WRITE_EOS(CS_DONE) sits earlier in the pipe than EVENT_WRITE_EOP (end of
-// pipe), so its fence store must already be visible once the EOP fence fires.
-// We wait on the reliable EOP fence, so a non-signalling EOS fails the check
-// rather than hanging.
-static void test_32_eos_before_eop() {
-    TEST_BEGIN("RAW-9: EVENT_WRITE_EOS CS_DONE signals before EOP");
-    volatile uint32_t* eos = (volatile uint32_t*)gpu_alloc(0x10000);
-    volatile uint64_t* eop = (volatile uint64_t*)gpu_alloc(0x10000);
-    TEST_CHECK(eos && eop, "alloc"); *eos = 0; *eop = 0;
-    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    CmdBuffer cb; cb.init(dcb, 0x4000);
-    pm4_context_control(cb);
-    pm4_event_write_eos_fence(cb, (void*)eos, 0xE05);
-    pm4_event_write_eop(cb, (void*)eop, 1, 2, 0);
-    pm4_nop(cb);
-    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(eop)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
-    TEST_CHECK(*eos == 0xE05, "RAW-9: EOS CS_DONE did not signal before EOP");
-    TEST_PASS();
-}
-
 // EVENT_WRITE_EOP with data_sel=SEND_GPU_CLOCK(3) stores the 64-bit GPU clock to
 // the fence address instead of an immediate, so it must come back non-zero.
-static void test_33_eop_timestamp() {
+static void test_25_eop_timestamp() {
     TEST_BEGIN("RAW-1c: EOP timestamp (data_sel=GpuClock) is non-zero");
     volatile uint64_t* ts = (volatile uint64_t*)gpu_alloc(0x10000);
     TEST_CHECK(ts, "alloc"); *ts = 0;
@@ -1447,41 +1394,178 @@ static void test_33_eop_timestamp() {
 }
 
 // ============================================================================
+//  CATEGORY 10: PREDICATION & EOS
+// ============================================================================
+
+// PRED-1: SET_PREDICATION(MEM) gates predicated CP-DMA fills. Two predicate
+// values (1, 0) drive two predicated fills in one submit; on real PS4 the
+// predicate distinguishes them so exactly the gated-out fill is skipped. shadPS4
+// main leaves IT_SET_PREDICATION unimplemented, so both fills run -> the targets
+// match. Polarity-independent: asserts the two outcomes DIFFER, not which fires.
+// CLEAR then restores unconditional execution.
+static void test_26_predication() {
+    TEST_BEGIN("PRED-1: SET_PREDICATION (MEM) gates a predicated CP-DMA fill");
+    volatile uint8_t* buf = (volatile uint8_t*)gpu_alloc(0x10000);
+    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    TEST_CHECK(buf && fence && dcb, "alloc");
+    volatile uint64_t* pred1 = (volatile uint64_t*)(buf + 0x00);   // predicate != 0
+    volatile uint64_t* pred0 = (volatile uint64_t*)(buf + 0x40);   // predicate == 0
+    volatile uint32_t* tgt1  = (volatile uint32_t*)(buf + 0x80);
+    volatile uint32_t* tgt0  = (volatile uint32_t*)(buf + 0xC0);
+    volatile uint32_t* tgtc  = (volatile uint32_t*)(buf + 0x100);
+    *pred1 = 1; *pred0 = 0; *tgt1 = 0; *tgt0 = 0; *tgtc = 0; *fence = 0;
+
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_set_predication(cb, (void*)pred1, SET_PRED_MEM, 1);
+    pm4_dma_data_fill_pred(cb, (void*)tgt1, 0xAAAAAAAA, 4);
+    pm4_set_predication(cb, (void*)pred0, SET_PRED_MEM, 1);     // continueBit=0 replaces
+    pm4_dma_data_fill_pred(cb, (void*)tgt0, 0xAAAAAAAA, 4);
+    pm4_set_predication(cb, nullptr, SET_PRED_CLEAR, 0);       // predication off
+    pm4_dma_data_fill_pred(cb, (void*)tgtc, 0xAAAAAAAA, 4);
+    pm4_event_write_eop(cb, (void*)fence, 1, 2, 0);            // not predicated
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes());
+    TEST_CHECK(wait_fence(fence), "fence timeout");
+    bool x1 = (*tgt1 == 0xAAAAAAAA);
+    bool x0 = (*tgt0 == 0xAAAAAAAA);
+    TEST_CHECK(*tgtc == 0xAAAAAAAA, "PRED-1: CLEAR did not restore unconditional exec");
+    TEST_CHECK(x1 != x0, "PRED-1: predication did not distinguish predicate 1 vs 0");
+    TEST_PASS();
+}
+
+// EVENT_WRITE_EOS with PS_DONE (graphics end-of-shader) writes its data before
+// the trailing EOP (end-of-pipe) fence, so the EOS value must already be visible
+// when the EOP fence signals.
+static void test_27_eos_psdone() {
+    TEST_BEGIN("RAW-1d: EVENT_WRITE_EOS PS_DONE visible when EOP fence signals");
+    volatile uint32_t* eos = (volatile uint32_t*)gpu_alloc(0x10000);
+    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    TEST_CHECK(eos && fence && dcb, "alloc");
+    *eos = 0; *fence = 0;
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_event_write_eos_psdone(cb, (void*)eos, 0x5005DA7A);
+    pm4_event_write_eop(cb, (void*)fence, 1, 2, 0);
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes());
+    TEST_CHECK(wait_fence(fence), "fence timeout");
+    TEST_CHECK(*eos == 0x5005DA7A, "RAW-1d: EOS PS_DONE not visible at EOP");
+    TEST_PASS();
+}
+
+// ============================================================================
+//  CATEGORY 11: COMPUTE QUEUE (async ACE ring)
+// ============================================================================
+
+static void test_28_release_mem_timing() {
+    TEST_BEGIN("RAW-2: Compute ReleaseMem fence fires before DMA completes");
+    volatile uint32_t* data = (volatile uint32_t*)gpu_alloc(0x10000);
+    volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
+    TEST_CHECK(data && fence, "alloc");
+    *data = 0; *fence = 0;
+    CmdBuffer acb = g_cq.begin();
+    pm4_dma_data_fill(acb, (void*)data, 0xBAADF00D, 4);
+    pm4_release_mem(acb, (void*)fence, 1, 2, 0);
+    pm4_nop(acb);
+    g_cq.submit(acb);
+    sceKernelUsleep(20000);
+    TEST_CHECK(wait_fence(fence), "fence timeout");
+    TEST_CHECK(*data == 0xBAADF00D, "RAW-2: Compute DMA stale when ReleaseMem arrived");
+    TEST_PASS();
+}
+
+static void test_29_acquire_mem_cross_engine() {
+    TEST_BEGIN("WAW-5b: AcquireMem cross-engine (compute->GFX)");
+    volatile uint32_t* buf = (volatile uint32_t*)gpu_alloc(0x10000);
+    volatile uint32_t* dst = (volatile uint32_t*)gpu_alloc(0x10000);
+    volatile uint64_t* f1 = (volatile uint64_t*)gpu_alloc(0x10000);
+    volatile uint64_t* f2 = (volatile uint64_t*)gpu_alloc(0x10000);
+    TEST_CHECK(buf && dst && f1 && f2, "alloc");
+    *buf = 0; *dst = 0; *f1 = 0; *f2 = 0;
+    CmdBuffer acb = g_cq.begin();
+    pm4_dma_data_fill(acb, (void*)buf, 0xFEEDFACE, 4);
+    pm4_release_mem(acb, (void*)f1, 1, 2, 0);
+    pm4_nop(acb);
+    g_cq.submit(acb); sceKernelUsleep(10000); if (!wait_fence(f1)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
+
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    CmdBuffer cb; cb.init(dcb, 0x4000);
+    pm4_context_control(cb);
+    pm4_acquire_mem(cb);
+    pm4_dma_data_copy(cb, (void*)dst, (void*)buf, 4);
+    pm4_event_write_eop(cb, (void*)f2, 1, 2, 0);
+    pm4_nop(cb);
+    submit_and_wait(dcb, cb.sizeBytes()); if (!wait_fence(f2)) { logf("  [HANG] fence timeout (iter %d/%d)\n", _rep + 1, g_tries); _pass = false; log_flush(); break; }
+    TEST_CHECK(*dst == 0xFEEDFACE, "WAW-5b: AcquireMem didn't flush compute DMA for GFX");
+    TEST_PASS();
+}
+
+static void test_30_mem_semaphore_cross_queue() {
+    TEST_BEGIN("WAW-1b: Cross-queue MemSemaphore (GFX signal, Compute wait)");
+    volatile uint64_t* sem = (volatile uint64_t*)gpu_alloc(0x10000);
+    volatile uint64_t* gf = (volatile uint64_t*)gpu_alloc(0x10000);
+    volatile uint64_t* cf = (volatile uint64_t*)gpu_alloc(0x10000);
+    TEST_CHECK(sem && gf && cf, "alloc"); *sem = 0; *gf = 0; *cf = 0;
+    uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
+    CmdBuffer gfx; gfx.init(dcb, 0x4000);
+    pm4_context_control(gfx);
+    pm4_mem_semaphore_signal(gfx, (void*)sem);
+    pm4_event_write_eop(gfx, (void*)gf, 1, 2, 0);
+    pm4_nop(gfx);
+    CmdBuffer acb = g_cq.begin();
+    pm4_mem_semaphore_wait(acb, (void*)sem);
+    pm4_release_mem(acb, (void*)cf, 1, 2, 0);
+    pm4_nop(acb);
+    const uint32_t* dp[1] = { dcb }; uint32_t ds[1] = { gfx.sizeBytes() };
+    sceGnmSubmitCommandBuffers(1, dp, ds, nullptr, nullptr);
+    g_cq.submit(acb); sceGnmSubmitDone(); sceKernelUsleep(30000);
+    TEST_CHECK(wait_fence(gf, 100000), "GFX fence timeout");
+    TEST_CHECK(wait_fence(cf, 500000), "WAW-1b: Compute never unblocked by GFX semaphore");
+    TEST_PASS();
+}
+
+// ============================================================================
 //  TEST REGISTRY + CONTROLLER MENU
 // ============================================================================
 
-struct TestEntry { void (*fn)(); const char* name; bool compute; bool sel; };
+struct TestEntry { void (*fn)(); const char* name; bool compute; bool sel; int tries; };
 
 static TestEntry g_tests[] = {
-    { test_01_eop_fence_timing,         "RAW-1  EOP fence before DMA",        false, true },
-    { test_03_eop_pipeline_depth,       "RAW-1b 8 sequential EOP fences",     false, true },
-    { test_04_acquire_mem,              "WAW-5  AcquireMem cache invalidate",  false, true },
-    { test_05_cp_sync_width,            "WAW-6  PfpSyncMe barrier width",      false, true },
-    { test_06_ce_dump_const_ram,        "RAW-8  CE DumpConstRam dirty track",  false, true },
-    { test_07_ce_stress,                "RAW-8b CE heap 8x write+dump",        false, true },
-    { test_09_mem_semaphore_basic,      "WAW-1  MemSemaphore 5x sig+wait",     false, true },
-    { test_11_mem_semaphore_stress,     "WAW-1c MemSemaphore 32x sig+wait",    false, true },
-    { test_14_wrm_equal,                "WaitRegMem Equal",                    false, true },
-    { test_15_wrm_gt,                   "WaitRegMem GreaterThan",              false, true },
-    { test_16_wrm_lt,                   "WaitRegMem LessThan",                 false, true },
-    { test_17_wrm_masked,               "WaitRegMem Masked Equal",             false, true },
-    { test_18_wrm_gte,                  "WaitRegMem GreaterEqual",             false, true },
-    { test_19_wrm_not_equal,            "WaitRegMem NotEqual",                 false, true },
-    { test_20_dma_sequential,           "DMA Sequential fills",                false, true },
-    { test_21_dma_copy_chain,           "DMA Copy chain A->B->C",              false, true },
-    { test_22_dma_large_block,          "DMA 4KB fill integrity",              false, true },
-    { test_23_write_data_u32,           "WriteData u32 after EOP",             false, true },
-    { test_24_write_data_u64,           "WriteData u64 visibility",            false, true },
-    { test_25_write_data_then_dma,      "WAW-4  WriteData then DMA fill",      false, true },
-    { test_28_indirect_buffer,          "IndirectBuffer secondary cmd",        false, true },
-    { test_29_rapid_submit,             "WAR-1  50 rapid submit/done",         false, true },
-    { test_30_rapid_submit_same_addr,   "WAR-1b 100 submits same addr",        false, true },
-    { test_31_dma_then_write_data,      "WAW-4b DMA(sync) then WriteData",     false, true },
-    { test_32_eos_before_eop,           "RAW-9  EOS CS_DONE before EOP",       false, true },
-    { test_33_eop_timestamp,            "RAW-1c EOP GPU-clock timestamp",      false, true },
-    { test_02_release_mem_timing,       "RAW-2  Compute ReleaseMem fence",     true,  true },
-    { test_08_acquire_mem_cross_engine, "WAW-5b AcquireMem compute->GFX",      true,  true },
-    { test_10_mem_semaphore_cross_queue,"WAW-1b Cross-queue MemSemaphore",     true,  true },
+    { test_01_eop_fence_timing,         "RAW-1  EOP fence before DMA",         false, true, 100 },
+    { test_02_eop_pipeline_depth,       "RAW-1b 8 sequential EOP fences",      false, true, 100 },
+    { test_03_acquire_mem,              "WAW-5  AcquireMem cache invalidate",  false, true, 100 },
+    { test_04_cp_sync_width,            "WAW-6  PfpSyncMe barrier width",      false, true, 100 },
+    { test_05_ce_dump_const_ram,        "RAW-8  CE DumpConstRam dirty track",  false, true, 100 },
+    { test_06_ce_stress,                "RAW-8b CE heap 8x write+dump",        false, true, 100 },
+    { test_07_mem_semaphore_basic,      "WAW-1  MemSemaphore 5x sig+wait",     false, true, 100 },
+    { test_08_mem_semaphore_stress,     "WAW-1c MemSemaphore 32x sig+wait",    false, true, 100 },
+    { test_09_wrm_equal,                "WaitRegMem Equal",                    false, true, 100 },
+    { test_10_wrm_gt,                   "WaitRegMem GreaterThan",              false, true, 100 },
+    { test_11_wrm_lt,                   "WaitRegMem LessThan",                 false, true, 100 },
+    { test_12_wrm_masked,               "WaitRegMem Masked Equal",             false, true, 100 },
+    { test_13_wrm_gte,                  "WaitRegMem GreaterEqual",             false, true, 100 },
+    { test_14_wrm_not_equal,            "WaitRegMem NotEqual",                 false, true, 100 },
+    { test_15_dma_sequential,           "DMA Sequential fills",                false, true, 100 },
+    { test_16_dma_copy_chain,           "DMA Copy chain A->B->C",              false, true, 100 },
+    { test_17_dma_large_block,          "DMA 4KB fill integrity",              false, true, 100 },
+    { test_18_write_data_u32,           "WriteData u32 after EOP",             false, true, 100 },
+    { test_19_write_data_u64,           "WriteData u64 visibility",            false, true, 100 },
+    { test_20_write_data_then_dma,      "WAW-4  WriteData then DMA fill",      false, true, 100 },
+    { test_21_indirect_buffer,          "IndirectBuffer secondary cmd",        false, true, 100 },
+    { test_22_rapid_submit,             "WAR-1  50 rapid submit/done",         false, true, 100 },
+    { test_23_rapid_submit_same_addr,   "WAR-1b 100 submits same addr",        false, true, 100 },
+    { test_24_dma_then_write_data,      "WAW-4b DMA(sync) then WriteData",     false, true, 100 },
+    { test_25_eop_timestamp,            "RAW-1c EOP GPU-clock timestamp",      false, true, 100 },
+    // -- predication & EOS --
+    { test_26_predication,              "PRED-1 SET_PREDICATION gates DMA",    false, true, 100 },
+    { test_27_eos_psdone,               "RAW-1d EOS PS_DONE before EOP",       false, true, 100 },
+    // -- compute queue (async ACE ring) --
+    { test_28_release_mem_timing,       "RAW-2  Compute ReleaseMem fence",     true,  true, 100 },
+    { test_29_acquire_mem_cross_engine, "WAW-5b AcquireMem compute->GFX",      true,  true, 100 },
+    { test_30_mem_semaphore_cross_queue,"WAW-1b Cross-queue MemSemaphore",     true,  true, 100 },
 };
 static const int g_ntests = (int)(sizeof(g_tests) / sizeof(g_tests[0]));
 
@@ -1505,35 +1589,56 @@ static uint32_t pad_buttons() {
 static void draw_menu() {
     if (!g_screen.ok) return;
     g_screen.clear(0x80101018u);
-    int scale = 2, rowh = 10 * scale;
-    int sel = 0; for (int i = 0; i < g_ntests; i++) if (g_tests[i].sel) sel++;
-    g_screen.text(6, 4, "PS4 RACE SUITE  --  SELECT TESTS", 0x80FFFFFFu, scale);
+    int scale = 2, rowh = 10 * scale, gw = 8 * scale;
+    int sel = 0; long long total = 0;
+    for (int i = 0; i < g_ntests; i++) if (g_tests[i].sel) { sel++; total += g_tests[i].tries; }
+
+    // logo, top-right
+    const char* logo = "shadPS4";
+    int lw = 0; for (const char* q = logo; *q; q++) lw++;
+    g_screen.text(g_screen.w - lw * gw - 8, 4, logo, 0x804AA0FFu, scale);
+
+    g_screen.text(6, 4, "PS4 RACE SUITE -- SELECT TESTS", 0x80FFFFFFu, scale);
+
     char st[96]; int p = 0;
-    const char* a = "Tries "; while (*a) st[p++] = *a++;
-    p = Screen::u2s(st, p, g_tries);
-    const char* b = "   Selected "; while (*b) st[p++] = *b++;
+    const char* b = "Selected "; while (*b) st[p++] = *b++;
     p = Screen::u2s(st, p, sel); st[p++] = '/'; p = Screen::u2s(st, p, g_ntests);
     const char* c = "   Total "; while (*c) st[p++] = *c++;
-    p = Screen::u2s(st, p, sel * g_tries);
+    p = Screen::u2s(st, p, (int)total);
     const char* d = " runs"; while (*d) st[p++] = *d++; st[p] = 0;
     g_screen.text(6, 4 + rowh, st, 0x8080D0FFu, scale);
+
     int y0 = 4 + rowh * 2 + 4;
+    // row 0: ALL TESTS bulk control
+    {
+        const char* all = "  >> ALL TESTS  (set tries for every test)";
+        char arow[64]; int ap = 0;
+        arow[ap++] = (g_cursor == 0) ? '>' : ' ';
+        const char* s = all + 1; while (*s) arow[ap++] = *s++; arow[ap] = 0;
+        g_screen.text(6, y0, arow, (g_cursor == 0) ? 0x804AA0FFu : 0x80FFFFFFu, scale);
+    }
     for (int i = 0; i < g_ntests; i++) {
-        char row[80]; int rp = 0;
-        row[rp++] = (i == g_cursor) ? '>' : ' '; row[rp++] = ' ';
+        bool oncur = (g_cursor == i + 1);
+        char row[96]; int rp = 0;
+        row[rp++] = oncur ? '>' : ' '; row[rp++] = ' ';
         row[rp++] = '['; row[rp++] = g_tests[i].sel ? 'x' : ' '; row[rp++] = ']'; row[rp++] = ' ';
         if (i + 1 < 10) row[rp++] = '0';
         rp = Screen::u2s(row, rp, i + 1); row[rp++] = ' ';
-        const char* nm = g_tests[i].name; while (*nm && rp < 78) row[rp++] = *nm++;
+        const char* nm = g_tests[i].name; while (*nm && rp < 58) row[rp++] = *nm++;
+        while (rp < 52) row[rp++] = ' ';            // align the tries column
+        row[rp++] = '[';
+        rp = Screen::u2s(row, rp, g_tests[i].tries);
+        row[rp++] = 'x'; row[rp++] = ']';
         row[rp] = 0;
-        uint32_t col = g_tests[i].sel ? 0x8080FF80u : 0x80707078u;
-        if (i == g_cursor) col = g_tests[i].sel ? 0x80B0FFB0u : 0x80E0E0E0u;
-        g_screen.text(6, y0 + i * rowh, row, col, scale);
+        // selected = white, unselected = dark grey
+        uint32_t col = g_tests[i].sel ? 0x80FFFFFFu : 0x80606068u;
+        if (oncur) col = 0x804AA0FFu;                                 // cursor line blue
+        g_screen.text(6, y0 + (i + 1) * rowh, row, col, scale);
     }
     g_screen.text(6, g_screen.h - rowh * 3 - 4,
-                  "L1 +10  R1 +100  L2 +1000  R2 +10000  O reset", 0x80E0E0E0u, scale);
+                  "D-pad move   X toggle   O reset 10", 0x80E0E0E0u, scale);
     g_screen.text(6, g_screen.h - rowh * 2 - 4,
-                  "D-pad move  X toggle  Triangle all/none  OPTIONS run  Touchpad quit",
+                  "L1 -10  R1 +10  L2 -1000  R2 +1000   OPTIONS run   Touchpad quit",
                   0x80E0E0E0u, scale);
     g_screen.present();
 }
@@ -1552,25 +1657,41 @@ static void menu_loop() {
         uint32_t bn = pad_buttons();
         uint32_t edge = bn & ~prev;
         bool dirty = false;
+        int rows = g_ntests + 1;                      // row 0 = ALL TESTS
         int move = 0;
         if (edge & PAD_UP) move = -1;
         else if (edge & PAD_DOWN) move = +1;
         else if (bn & PAD_UP)   { if (++rep > 8 && rep % 3 == 0) move = -1; }
         else if (bn & PAD_DOWN) { if (++rep > 8 && rep % 3 == 0) move = +1; }
         else rep = 0;
-        if (move) { g_cursor = (g_cursor + move + g_ntests) % g_ntests; dirty = true; }
-        if (edge & PAD_L1) { g_tries += 10;    dirty = true; }
-        if (edge & PAD_R1) { g_tries += 100;   dirty = true; }
-        if (edge & PAD_L2) { g_tries += 1000;  dirty = true; }
-        if (edge & PAD_R2) { g_tries += 10000; dirty = true; }
-        if (edge & PAD_CIRCLE) { g_tries = 1;  dirty = true; }
-        if (g_tries < 1) g_tries = 1;
-        if (g_tries > 1000000) g_tries = 1000000;
-        if (edge & PAD_CROSS) { g_tests[g_cursor].sel = !g_tests[g_cursor].sel; dirty = true; }
-        if (edge & PAD_TRIANGLE) {
-            bool all = true; for (int i = 0; i < g_ntests; i++) if (!g_tests[i].sel) all = false;
-            for (int i = 0; i < g_ntests; i++) g_tests[i].sel = !all;
+        if (move) { g_cursor = (g_cursor + move + rows) % rows; dirty = true; }
+
+        int delta = 0;
+        if (edge & PAD_L1) delta = -10;
+        if (edge & PAD_R1) delta = +10;
+        if (edge & PAD_L2) delta = -1000;
+        if (edge & PAD_R2) delta = +1000;
+        bool reset = (edge & PAD_CIRCLE) != 0;
+        if (delta || reset) {
             dirty = true;
+            int lo = (g_cursor == 0) ? 0 : g_cursor - 1;
+            int hi = (g_cursor == 0) ? g_ntests - 1 : g_cursor - 1;
+            for (int i = lo; i <= hi; i++) {
+                int t = reset ? 10 : g_tests[i].tries + delta;
+                if (t < 1) t = 1; if (t > 1000000) t = 1000000;
+                g_tests[i].tries = t;
+            }
+        }
+
+        if (edge & PAD_CROSS) {
+            dirty = true;
+            if (g_cursor == 0) {                      // toggle all selected
+                bool all = true;
+                for (int i = 0; i < g_ntests; i++) if (!g_tests[i].sel) all = false;
+                for (int i = 0; i < g_ntests; i++) g_tests[i].sel = !all;
+            } else {
+                g_tests[g_cursor - 1].sel = !g_tests[g_cursor - 1].sel;
+            }
         }
         if (edge & PAD_TOUCHPAD) quit_app();
         if (edge & PAD_OPTIONS) {
@@ -1585,9 +1706,13 @@ static void menu_loop() {
 
 static void run_selected() {
     int sel = 0; bool need_compute = false;
+    g_runs_total = 0;
     for (int i = 0; i < g_ntests; i++)
-        if (g_tests[i].sel) { sel++; if (g_tests[i].compute) need_compute = true; }
-    g_runs_total = (long long)sel * g_tries;
+        if (g_tests[i].sel) {
+            sel++; g_runs_total += g_tests[i].tries;
+            if (g_tests[i].compute) need_compute = true;
+        }
+    if (g_runs_total < 1) g_runs_total = 1;
     g_runs_base = 0; g_runs_done = 0; g_screen.last_tick = 0;
     g_tick_step = g_runs_total / 200; if (g_tick_step < 1) g_tick_step = 1;
     tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
@@ -1597,12 +1722,14 @@ static void run_selected() {
     gpu_pool_reset();
 
     logf("========================================================\n");
-    logf(" RACE SUITE  |  %d tests x %d tries = %d runs\n", sel, g_tries, (int)g_runs_total);
+    logf(" RACE SUITE  |  %d tests, %d total runs\n", sel, (int)g_runs_total);
     logf("========================================================\n");
 
     // Graphics-ring tests first so their results commit before any compute map.
     for (int i = 0; i < g_ntests; i++)
-        if (g_tests[i].sel && !g_tests[i].compute) g_tests[i].fn();
+        if (g_tests[i].sel && !g_tests[i].compute) {
+            g_tries = g_tests[i].tries; g_tests[i].fn();
+        }
 
     if (need_compute) {
         logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
@@ -1610,7 +1737,9 @@ static void run_selected() {
             logf("[compute] queue map failed - skipping compute tests\n");
         else
             for (int i = 0; i < g_ntests; i++)
-                if (g_tests[i].sel && g_tests[i].compute) g_tests[i].fn();
+                if (g_tests[i].sel && g_tests[i].compute) {
+                    g_tries = g_tests[i].tries; g_tests[i].fn();
+                }
     }
 
     logf("\n========================================================\n");
