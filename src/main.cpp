@@ -1,14 +1,20 @@
 // ============================================================================
 // PS4 GPU/CPU Race Condition Test Suite - FULL EDITION (single-file)
-// 28 tests covering RAW/WAR/WAW hazards. Passes on real PS4; failures on
-// shadps4 pinpoint emulator bugs. Results -> /data/results.txt.
+// 30 tests covering RAW/WAR/WAW hazards plus predication, EOS, and cross-engine
+// sync. Most pass on real PS4; failures on shadps4 pinpoint emulator bugs.
+// Tests 26/27 (predication, EOS PS_DONE) and 29/30 (cross-engine/cross-queue)
+// currently fail on real hardware too — the packets are spec-correct (verified
+// vs PAL gfx6), so those are recorded findings, not encoding bugs. Results ->
+// /data/results.txt.
 //
 // Fixes vs multi-file version:
 //   * Durable logging: fsync after EVERY write, so a crash never loses results.
 //   * Output path /data/ first (writable, reliably visible) then /temp0/.
-//   * Two-compute-queue test (13) runs LAST: its 2nd ASC DingDong crashes
-//     shadps4, so running it last preserves all other results on disk.
-//   * ComputeQueue::begin() guards ring write position against underflow.
+//   * GFX-ring tests run before the compute queue is mapped, so their results
+//     commit even if the ASC queue map aborts under shadps4.
+//   * ComputeQueue maps the ASC queue once and keeps the ring write pointer
+//     monotonic, NOP-padding the tail on wrap so a re-run never resubmits a
+//     write pointer behind the CP read pointer.
 // ============================================================================
 
 #include <stdint.h>
@@ -674,7 +680,8 @@ static inline void pm4_dma_data_fill_pred(CmdBuffer& cb, void* dst, uint32_t val
 // SET_PREDICATION — gate subsequent predicated packets on a predicate source.
 // pred_op: 0=CLEAR(disable), 3=MEM(value at addr). boolean = DrawIf polarity;
 // continueBit=0 replaces active predication. Fields per PM4CMDSETPREDICATION:
-// startAddrHi[7:0], predicationBoolean[8], predOp[18:16].
+// startAddrHi[7:0], predicationBoolean[8], predOp[18:16]. PAL requires the
+// predicate address to be 16-byte aligned (BuildSetPredication asserts addr&0xF==0).
 // ---------------------------------------------------------------------------
 static const uint32_t SET_PRED_CLEAR = 0;
 static const uint32_t SET_PRED_MEM   = 3;
@@ -771,11 +778,6 @@ static inline void pm4_context_control(CmdBuffer& cb) {
     cb.emit(0x80000000);  // LOAD_ENABLE
     cb.emit(0x80000000);  // SHADOW_ENABLE
 }
-
-// ---------------------------------------------------------------------------
-// EVENT_WRITE_EOS — end-of-shader event with fence or GDS store
-//   command: 2 = SignalFence, 1 = GdsStore
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // INDIRECT_BUFFER — jump to secondary command buffer
@@ -910,10 +912,14 @@ struct ComputeQueue {
         return vqid > 0;
     }
     CmdBuffer begin() {
-        // Queue is fully drained between submits (each test waits/sleeps), so
-        // wrapping the ring write position to 0 when it nears the end is safe
-        // and prevents (0x4000 - write_off) from underflowing -> OOB ring ptr.
-        if (write_off + 0x400 > 0x4000) write_off = 0;
+        // The CP processes the ring from its read pointer up to the submitted
+        // write pointer, so on wrap it walks the tail (read ptr..ring end)
+        // before returning to 0. Fill that tail with type-2 NOPs so the CP
+        // skips valid padding instead of stale ring memory, then wrap.
+        if (write_off + 0x400 > 0x4000) {
+            for (uint32_t i = write_off; i < 0x4000; i++) ring[i] = 0x80000000u;
+            write_off = 0;
+        }
         CmdBuffer cb;
         cb.buf = ring + write_off;
         cb.offset = 0;
@@ -924,10 +930,261 @@ struct ComputeQueue {
         write_off += cb.sizeDwords();
         sceGnmDingDong((uint32_t)vqid, write_off);
     }
-    void destroy() { if (vqid > 0) sceGnmUnmapComputeQueue((uint32_t)vqid); }
+    void destroy() { if (vqid > 0) { sceGnmUnmapComputeQueue((uint32_t)vqid); vqid = -1; } }
 };
 
 static ComputeQueue g_cq;
+
+// ============================================================================
+//  DRAW PIPELINE (predication + EOS tests)
+//  A fullscreen-quad draw: standard MVP vertex shader fed an identity MVP plus
+//  6 NDC verts (passes straight through), and a solid-color pixel shader. This
+//  gives the pixel pipe real work so EVENT_WRITE_EOS PS_DONE actually fires
+//  (test 27) and gives SET_PREDICATION a draw to gate (test 26). Shaders and
+//  register state are ported from the CUBETST00 background pass. The VS
+//  PGM_RSRC1 VGPR count is corrected: the cube set 4 (20 VGPRs) but the VS
+//  exports up to v45 (needs >=46), so 0x0B selects 48 VGPRs.
+// ============================================================================
+
+static const uint32_t CTX_DEPTH_RENDER_CONTROL  = 0x000;
+static const uint32_t CTX_DEPTH_VIEW            = 0x002;
+static const uint32_t CTX_DEPTH_RENDER_OVERRIDE = 0x003;
+static const uint32_t CTX_SCREEN_SCISSOR        = 0x00C;
+static const uint32_t CTX_DB_Z_INFO             = 0x010;
+static const uint32_t CTX_DB_STENCIL_INFO       = 0x011;
+static const uint32_t CTX_DB_Z_READ_BASE        = 0x012;
+static const uint32_t CTX_DB_DEPTH_SIZE         = 0x016;
+static const uint32_t CTX_DB_DEPTH_SLICE        = 0x017;
+static const uint32_t CTX_WINDOW_SCISSOR        = 0x081;
+static const uint32_t CTX_COLOR_TARGET_MASK     = 0x08E;
+static const uint32_t CTX_COLOR_SHADER_MASK     = 0x08F;
+static const uint32_t CTX_GENERIC_SCISSOR       = 0x090;
+static const uint32_t CTX_VIEWPORT_SCISSOR0     = 0x094;
+static const uint32_t CTX_INDEX_OFFSET          = 0x102;
+static const uint32_t CTX_VIEWPORT0             = 0x10F;
+static const uint32_t CTX_PS_INPUT_CNTL_0       = 0x191;
+static const uint32_t CTX_VS_OUTPUT_CONFIG      = 0x1B1;
+static const uint32_t CTX_PS_INPUT_ENA          = 0x1B3;
+static const uint32_t CTX_PS_INPUT_ADDR         = 0x1B4;
+static const uint32_t CTX_NUM_INTERP            = 0x1B6;
+static const uint32_t CTX_SHADER_POS_FORMAT     = 0x1C3;
+static const uint32_t CTX_Z_EXPORT_FORMAT       = 0x1C4;
+static const uint32_t CTX_COLOR_EXPORT_FORMAT   = 0x1C5;
+static const uint32_t CTX_BLEND_CONTROL0        = 0x1E0;
+static const uint32_t CTX_DEPTH_CONTROL         = 0x200;
+static const uint32_t CTX_COLOR_CONTROL         = 0x202;
+static const uint32_t CTX_CLIPPER_CONTROL       = 0x204;
+static const uint32_t CTX_POLYGON_CONTROL       = 0x205;
+static const uint32_t CTX_VIEWPORT_CONTROL      = 0x206;
+static const uint32_t CTX_VS_OUTPUT_CONTROL     = 0x207;
+static const uint32_t CTX_MODE_CONTROL          = 0x292;
+static const uint32_t CTX_INDEX_SIZE            = 0x29D;
+static const uint32_t CTX_STAGE_ENABLE          = 0x2D5;
+static const uint32_t CTX_AA_CONFIG             = 0x2F8;
+static const uint32_t CTX_CB_COLOR0_BASE        = 0x318;
+
+static const uint32_t SH_PS_PGM_LO              = 0x08;
+static const uint32_t SH_PS_USER_DATA_0         = 0x0C;
+static const uint32_t SH_VS_PGM_LO              = 0x48;
+static const uint32_t SH_VS_USER_DATA_0         = 0x4C;
+
+static const uint32_t UCFG_PRIMITIVE_TYPE       = 0x242;
+static const uint32_t UCFG_NUM_INSTANCES        = 0x24D;
+
+static const uint32_t DRAW_W = 64;
+static const uint32_t DRAW_H = 64;
+
+// VS: MVP vertex shader (CUBETST00 vs_shader_binary). Reads MVP at V#+0,
+// sun at V#+64, and vert[vid] at V#+80 (stride 48: pos.xyzw, normal, clip.xy).
+static const uint32_t vs_draw_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x0000001C, 0x7E020280, 0xE0381000,
+    0x80000C01, 0xE0381010, 0x80001001, 0xE0381020,
+    0x80001401, 0xE0381030, 0x80001801, 0x34020085,
+    0x34040084, 0x4A020501, 0x4A0202C0, 0x4A020290,
+    0xE0381000, 0x80000201, 0xE0381010, 0x80000601,
+    0xE0381020, 0x80002C01, 0xBF8C0070, 0x1038050C,
+    0x1040070D, 0x0638411C, 0x1040090E, 0x0638411C,
+    0x10400B0F, 0x0638411C, 0x103A0510, 0x10400711,
+    0x063A411D, 0x10400912, 0x063A411D, 0x10400B13,
+    0x063A411D, 0x103C0514, 0x10400715, 0x063C411E,
+    0x10400916, 0x063C411E, 0x10400B17, 0x063C411E,
+    0x103E0518, 0x10400719, 0x063E411F, 0x1040091A,
+    0x063E411F, 0x10400B1B, 0x063E411F, 0xF80000CF,
+    0x1F1E1D1C, 0x7E4602F2, 0xF800020F, 0x08072D2C,
+    0xF8000A1F, 0x06040302, 0xBF810000, 0xBF800000,
+    0x5362724F, 0x00726468, 0x0000F004, 0x00000000,
+    0x47505508, 0xAABBEE02, 0x00000000,
+};
+
+// PS: solid-color (CUBETST00 ps_shadow_clear_binary) — outputs (1,0,0,1).
+static const uint32_t ps_draw_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x00000009,
+    0x7E5002F2, 0x7E520280, 0x7E540280, 0x7E5602F2,
+    0xF800180F, 0x2B2A2928,
+    0xBF810000,
+    0x5362724F, 0x00726468,
+    0x00002400, 0x00000000, 0xDEADBEEF,
+    0xCAFE0108, 0x00000000,
+};
+
+static inline void emit_f(CmdBuffer& cb, float v) {
+    union { float f; uint32_t u; } c; c.f = v; cb.emit(c.u);
+}
+
+static inline void pm4_set_context_reg(CmdBuffer& cb, uint32_t off, uint32_t val) {
+    cb.emit(PM4_HDR(IT_SET_CONTEXT_REG, 2)); cb.emit(off); cb.emit(val);
+}
+static inline void pm4_set_context_regs(CmdBuffer& cb, uint32_t off,
+                                        const uint32_t* vals, uint32_t n) {
+    cb.emit(PM4_HDR(IT_SET_CONTEXT_REG, n + 1)); cb.emit(off);
+    for (uint32_t i = 0; i < n; i++) cb.emit(vals[i]);
+}
+static inline void pm4_set_sh_regs(CmdBuffer& cb, uint32_t off,
+                                   const uint32_t* vals, uint32_t n) {
+    cb.emit(PM4_HDR(IT_SET_SH_REG, n + 1)); cb.emit(off);
+    for (uint32_t i = 0; i < n; i++) cb.emit(vals[i]);
+}
+static inline void pm4_set_uconfig_reg(CmdBuffer& cb, uint32_t off, uint32_t val) {
+    cb.emit(PM4_HDR(IT_SET_UCONFIG_REG, 2)); cb.emit(off); cb.emit(val);
+}
+static inline void pm4_draw_index_auto(CmdBuffer& cb, uint32_t count) {
+    cb.emit(PM4_HDR(IT_DRAW_INDEX_AUTO, 2)); cb.emit(count); cb.emit(2);
+}
+// Predicated draw: predicate bit (bit 0) set in the type-3 header so an active
+// SET_PREDICATION gates this draw.
+static inline void pm4_draw_index_auto_pred(CmdBuffer& cb, uint32_t count) {
+    cb.emit(PM4_HDR(IT_DRAW_INDEX_AUTO, 2) | 1u); cb.emit(count); cb.emit(2);
+}
+
+// Persistent draw resources (direct memory — survives the per-iteration pool reset).
+struct DrawRes {
+    void*     color;
+    void*     depth;
+    uint32_t* vb;
+    uint32_t* desc;
+    uint32_t  vsharp[4];
+    bool      ready;
+
+    static void* dmem(size_t size) {
+        long phys = 0; void* ptr = nullptr;
+        if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, 0x10000, 3, &phys) < 0)
+            return nullptr;
+        if (sceKernelMapDirectMemory(&ptr, size, 0x33, 0, phys, 0x10000) < 0)
+            return nullptr;
+        return ptr;
+    }
+
+    bool init() {
+        color = dmem(0x100000);
+        depth = dmem(0x100000);
+        vb    = (uint32_t*)dmem(0x10000);
+        desc  = (uint32_t*)dmem(0x10000);
+        if (!color || !depth || !vb || !desc) return false;
+
+        float* f = (float*)vb;
+        for (int i = 0; i < 16; i++) f[i] = (i % 5 == 0) ? 1.0f : 0.0f;  // identity MVP @ V#+0
+        f[16] = 0.20f; f[17] = 0.50f; f[18] = 0.67f; f[19] = 0.0f;       // sun @ V#+64
+
+        float* bg = (float*)((char*)vb + 80);                            // verts @ V#+80
+        static const float bp[6][4] = {
+            {-1,-1,.999f,1}, {1,-1,.999f,1}, {1,1,.999f,1},
+            {-1,-1,.999f,1}, {1,1,.999f,1}, {-1,1,.999f,1},
+        };
+        for (int v = 0; v < 6; v++) {
+            int i = v * 12;
+            bg[i]   = bp[v][0]; bg[i+1] = bp[v][1]; bg[i+2] = bp[v][2]; bg[i+3] = bp[v][3];
+            bg[i+4] = 0; bg[i+5] = 0; bg[i+6] = 0; bg[i+7] = 0;
+            bg[i+8] = bp[v][0]; bg[i+9] = bp[v][1]; bg[i+10] = 0; bg[i+11] = 0;
+        }
+
+        uint64_t a = (uint64_t)(uintptr_t)vb;
+        vsharp[0] = (uint32_t)a;
+        vsharp[1] = (uint32_t)(a >> 32) & 0xFFFF;
+        vsharp[2] = 0x10000;
+        vsharp[3] = (1u<<3)|(2u<<6)|(3u<<9)|(4u<<12)|(4u<<15);
+
+        ready = true;
+        return true;
+    }
+};
+static DrawRes g_draw;
+
+// Emit the full graphics pipeline state and binds for the fullscreen quad.
+// Does NOT issue the draw — the caller issues pm4_draw_index_auto[_pred].
+static void emit_draw_state(CmdBuffer& cb) {
+    const uint32_t W = DRAW_W, H = DRAW_H;
+
+    { uint64_t a = (uint64_t)(uintptr_t)vs_draw_binary;
+      uint32_t r[4] = { (uint32_t)(a>>8), (uint32_t)(a>>40), 0x0Bu, (4u<<1) };
+      pm4_set_sh_regs(cb, SH_VS_PGM_LO, r, 4); }
+
+    { uint64_t a = (uint64_t)(uintptr_t)ps_draw_binary;
+      uint32_t r[4] = { (uint32_t)(a>>8), (uint32_t)(a>>40), 0x0Au, (2u<<1) };
+      pm4_set_sh_regs(cb, SH_PS_PGM_LO, r, 4);
+      uint32_t ud[2] = { (uint32_t)((uint64_t)(uintptr_t)g_draw.desc),
+                         (uint32_t)((uint64_t)(uintptr_t)g_draw.desc >> 32) };
+      pm4_set_sh_regs(cb, SH_PS_USER_DATA_0, ud, 2); }
+
+    { uint32_t s[2] = { 0, (W & 0x7FFF) | ((H & 0x7FFF) << 16) };
+      pm4_set_context_regs(cb, CTX_SCREEN_SCISSOR, s, 2);
+      pm4_set_context_regs(cb, CTX_GENERIC_SCISSOR, s, 2);
+      pm4_set_context_regs(cb, CTX_VIEWPORT_SCISSOR0, s, 2);
+      s[0] = (1u << 31);
+      pm4_set_context_regs(cb, CTX_WINDOW_SCISSOR, s, 2); }
+
+    cb.emit(PM4_HDR(IT_SET_CONTEXT_REG, 7)); cb.emit(CTX_VIEWPORT0);
+    emit_f(cb, (float)W * 0.5f);  emit_f(cb, (float)W * 0.5f);
+    emit_f(cb, (float)H * -0.5f); emit_f(cb, (float)H * 0.5f);
+    emit_f(cb, 1.0f);             emit_f(cb, 0.0f);
+
+    pm4_set_context_reg(cb, CTX_INDEX_OFFSET, 0);
+
+    pm4_set_context_reg(cb, CTX_DEPTH_RENDER_CONTROL, 1u);
+    pm4_set_context_reg(cb, CTX_DEPTH_VIEW, 0);
+    pm4_set_context_reg(cb, CTX_DEPTH_RENDER_OVERRIDE, 0);
+    pm4_set_context_reg(cb, 0x00B, 0x3F800000u);
+    pm4_set_context_reg(cb, CTX_DB_Z_INFO, 3u);
+    pm4_set_context_reg(cb, CTX_DB_STENCIL_INFO, 0);
+    { uint32_t z = (uint32_t)((uint64_t)(uintptr_t)g_draw.depth >> 8);
+      uint32_t d[4] = { z, 0, z, 0 };
+      pm4_set_context_regs(cb, CTX_DB_Z_READ_BASE, d, 4); }
+    pm4_set_context_reg(cb, CTX_DB_DEPTH_SIZE, ((W/8)-1) | (((H/8)-1)<<11));
+    pm4_set_context_reg(cb, CTX_DB_DEPTH_SLICE, (W*H/64)-1);
+    pm4_set_context_reg(cb, CTX_DEPTH_CONTROL, (1u<<1)|(7u<<4));
+
+    pm4_set_context_reg(cb, CTX_POLYGON_CONTROL, 0);
+
+    { uint32_t c = (uint32_t)((uint64_t)(uintptr_t)g_draw.color >> 8);
+      uint32_t r[14] = { c, (W/8)-1, (W*H/64)-1, 0, 0x09A8u, 0,0,0,0,0,0,0,0,0 };
+      pm4_set_context_regs(cb, CTX_CB_COLOR0_BASE, r, 14);
+      cb.emit(0xC0001000u); cb.emit(W | (H << 16)); }
+
+    pm4_set_context_reg(cb, CTX_COLOR_TARGET_MASK, 0xF);
+    pm4_set_context_reg(cb, CTX_COLOR_SHADER_MASK, 0xF);
+    pm4_set_context_reg(cb, CTX_PS_INPUT_CNTL_0, 0);
+    pm4_set_context_reg(cb, CTX_PS_INPUT_CNTL_0 + 1, 1);
+    pm4_set_context_reg(cb, CTX_VS_OUTPUT_CONFIG, 1);
+    pm4_set_context_reg(cb, CTX_PS_INPUT_ENA, 0x02);
+    pm4_set_context_reg(cb, CTX_PS_INPUT_ADDR, 0x02);
+    pm4_set_context_reg(cb, CTX_NUM_INTERP, 2);
+    pm4_set_context_reg(cb, CTX_SHADER_POS_FORMAT, 4);
+    pm4_set_context_reg(cb, CTX_Z_EXPORT_FORMAT, 0);
+    pm4_set_context_reg(cb, CTX_COLOR_EXPORT_FORMAT, 9);
+    pm4_set_context_reg(cb, CTX_COLOR_CONTROL, 0x00CC0010u);
+    pm4_set_context_reg(cb, 0x203, 0);
+    pm4_set_context_reg(cb, CTX_CLIPPER_CONTROL, 1u<<19);
+    pm4_set_context_reg(cb, CTX_VIEWPORT_CONTROL, 0x43F);
+    pm4_set_context_reg(cb, CTX_VS_OUTPUT_CONTROL, 0);
+    pm4_set_context_reg(cb, CTX_MODE_CONTROL, 0);
+    pm4_set_context_reg(cb, CTX_STAGE_ENABLE, 0);
+    pm4_set_context_reg(cb, CTX_AA_CONFIG, 0);
+    pm4_set_context_reg(cb, CTX_BLEND_CONTROL0, 0);
+    pm4_set_context_reg(cb, CTX_INDEX_SIZE, 0);
+    pm4_set_uconfig_reg(cb, UCFG_PRIMITIVE_TYPE, 4);
+    pm4_set_uconfig_reg(cb, UCFG_NUM_INSTANCES, 1);
+    pm4_set_sh_regs(cb, SH_VS_USER_DATA_0, g_draw.vsharp, 4);
+}
+
 
 // ============================================================================
 //  CATEGORY 1: FENCE TIMING (RAW-1)
@@ -1337,7 +1594,7 @@ static void test_23_rapid_submit_same_addr() {
     volatile uint32_t* val = (volatile uint32_t*)gpu_alloc(0x10000);
     uint32_t* dcb_base = (uint32_t*)gpu_alloc(0x10000);
     TEST_CHECK(val && dcb_base, "alloc"); *val = 0;
-    // Own storage per submit (see test_29): no CPU-vs-GPU buffer-reuse hazard.
+    // Own storage per submit: no CPU-vs-GPU buffer-reuse hazard.
     for (int i = 1; i <= N; i++) {
         uint32_t* dcb = dcb_base + (uint32_t)(i - 1) * SLOT_DW;
         CmdBuffer cb; cb.init(dcb, SLOT_DW);
@@ -1404,11 +1661,12 @@ static void test_25_eop_timestamp() {
 // match. Polarity-independent: asserts the two outcomes DIFFER, not which fires.
 // CLEAR then restores unconditional execution.
 static void test_26_predication() {
-    TEST_BEGIN("PRED-1: SET_PREDICATION (MEM) gates a predicated CP-DMA fill");
+    TEST_BEGIN("PRED-1: SET_PREDICATION (MEM) gates a predicated draw + CP-DMA fill");
+    if (!g_draw.ready) g_draw.init();
     volatile uint8_t* buf = (volatile uint8_t*)gpu_alloc(0x10000);
     volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    TEST_CHECK(buf && fence && dcb, "alloc");
+    TEST_CHECK(g_draw.ready && buf && fence && dcb, "alloc");
     volatile uint64_t* pred1 = (volatile uint64_t*)(buf + 0x00);   // predicate != 0
     volatile uint64_t* pred0 = (volatile uint64_t*)(buf + 0x40);   // predicate == 0
     volatile uint32_t* tgt1  = (volatile uint32_t*)(buf + 0x80);
@@ -1418,13 +1676,16 @@ static void test_26_predication() {
 
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb);
+    emit_draw_state(cb);                                          // graphics state (unpredicated)
     pm4_set_predication(cb, (void*)pred1, SET_PRED_MEM, 1);
-    pm4_dma_data_fill_pred(cb, (void*)tgt1, 0xAAAAAAAA, 4);
-    pm4_set_predication(cb, (void*)pred0, SET_PRED_MEM, 1);     // continueBit=0 replaces
-    pm4_dma_data_fill_pred(cb, (void*)tgt0, 0xAAAAAAAA, 4);
-    pm4_set_predication(cb, nullptr, SET_PRED_CLEAR, 0);       // predication off
+    pm4_draw_index_auto_pred(cb, 6);                              // gated draw -> runs
+    pm4_dma_data_fill_pred(cb, (void*)tgt1, 0xAAAAAAAA, 4);       // gated observable -> fills
+    pm4_set_predication(cb, (void*)pred0, SET_PRED_MEM, 1);       // continueBit=0 replaces
+    pm4_draw_index_auto_pred(cb, 6);                              // gated draw -> skipped
+    pm4_dma_data_fill_pred(cb, (void*)tgt0, 0xAAAAAAAA, 4);       // gated observable -> skipped
+    pm4_set_predication(cb, nullptr, SET_PRED_CLEAR, 0);          // predication off
     pm4_dma_data_fill_pred(cb, (void*)tgtc, 0xAAAAAAAA, 4);
-    pm4_event_write_eop(cb, (void*)fence, 1, 2, 0);            // not predicated
+    pm4_event_write_eop(cb, (void*)fence, 1, 2, 0);               // not predicated
     pm4_nop(cb);
     submit_and_wait(dcb, cb.sizeBytes());
     TEST_CHECK(wait_fence(fence), "fence timeout");
@@ -1439,14 +1700,17 @@ static void test_26_predication() {
 // the trailing EOP (end-of-pipe) fence, so the EOS value must already be visible
 // when the EOP fence signals.
 static void test_27_eos_psdone() {
-    TEST_BEGIN("RAW-1d: EVENT_WRITE_EOS PS_DONE visible when EOP fence signals");
+    TEST_BEGIN("RAW-1d: EVENT_WRITE_EOS PS_DONE visible when EOP fence signals (real draw)");
+    if (!g_draw.ready) g_draw.init();
     volatile uint32_t* eos = (volatile uint32_t*)gpu_alloc(0x10000);
     volatile uint64_t* fence = (volatile uint64_t*)gpu_alloc(0x10000);
     uint32_t* dcb = (uint32_t*)gpu_alloc(0x10000);
-    TEST_CHECK(eos && fence && dcb, "alloc");
+    TEST_CHECK(g_draw.ready && eos && fence && dcb, "alloc");
     *eos = 0; *fence = 0;
     CmdBuffer cb; cb.init(dcb, 0x4000);
     pm4_context_control(cb);
+    emit_draw_state(cb);
+    pm4_draw_index_auto(cb, 6);                               // real pixel work -> drains PS pipe
     pm4_event_write_eos_psdone(cb, (void*)eos, 0x5005DA7A);
     pm4_event_write_eop(cb, (void*)fence, 1, 2, 0);
     pm4_nop(cb);
@@ -1717,7 +1981,6 @@ static void run_selected() {
     g_tick_step = g_runs_total / 200; if (g_tick_step < 1) g_tick_step = 1;
     tests_run = 0; tests_passed = 0; tests_failed = 0; tests_skipped = 0;
     g_screen.nlines = 0;
-    g_cq.write_off = 0;
     sceKernelUsleep(200000);
     gpu_pool_reset();
 
@@ -1732,10 +1995,12 @@ static void run_selected() {
         }
 
     if (need_compute) {
-        logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
-        if (g_cq.vqid <= 0 && !g_cq.init(0, 0))
-            logf("[compute] queue map failed - skipping compute tests\n");
-        else
+        if (g_cq.vqid <= 0) {
+            logf("\n[compute] mapping ASC queue (may abort shadps4)...\n");
+            if (!g_cq.init(0, 0))
+                logf("[compute] queue map failed - skipping compute tests\n");
+        }
+        if (g_cq.vqid > 0)
             for (int i = 0; i < g_ntests; i++)
                 if (g_tests[i].sel && g_tests[i].compute) {
                     g_tries = g_tests[i].tries; g_tests[i].fn();
