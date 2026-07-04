@@ -289,6 +289,25 @@ static inline void pm4_event_write_eop(struct PM4Builder* b,
     pm4_emit(b, 0);                                     // data_hi
 }
 
+/* End-of-pipe fence that ALSO flushes CB/DB + L1/L2 (TC) back to memory, so a
+   later CPU or texture read of the render target sees the rendered pixels.
+   Event CACHE_FLUSH_AND_INV_TS_EVENT(20) + EOP_TCL1_ACTION_EN(1<<16) |
+   EOP_TC_ACTION_EN(1<<17). Matches the Linux radeon CIK gfx fence (PS4 Liverpool
+   is CIK-class). Plain pm4_event_write_eop uses CACHE_FLUSH_TS(4), which does
+   NOT write the color cache back to memory -> a CPU readback sees stale data.
+   CPU-polled (INT_SEL=0). */
+static inline void pm4_event_write_eop_flush(struct PM4Builder* b,
+                                             volatile uint32_t* fence_addr,
+                                             uint32_t fence_value) {
+    uint64_t addr = (uint64_t)(uintptr_t)fence_addr;
+    pm4_emit(b, pm4_type3(PM4_EVENT_WRITE_EOP, 5));
+    pm4_emit(b, (1u << 16) | (1u << 17) | 20u | (5u << 8));  // TCL1|TC actions | CACHE_FLUSH_AND_INV_TS | event_index=5
+    pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFFu));
+    pm4_emit(b, (uint32_t)(addr >> 32) | 0x20000000u);       // addr_hi | DATA_SEL=1(Data32), INT_SEL=0
+    pm4_emit(b, fence_value);
+    pm4_emit(b, 0);
+}
+
 static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
     if (count == 0) return;
     pm4_emit(b, pm4_type3(PM4_NOP, count));
