@@ -1995,44 +1995,52 @@ static void coh_submit(uint32_t *dcb, uint32_t sz, volatile uint32_t *fence, uin
     for(int w=0; w<200000 && *fence!=fv; w++) sceKernelUsleep(50);
 }
 
-static void coh_emit(const char *label, volatile uint32_t *bg, unsigned long idx){
+static void coh_log(const char *label, uint32_t v){
     char o[80]; unsigned n=0; const char *p=label;
     while(*p) o[n++]=*p++;
-    n+=(unsigned)lg_hex(o+n,(unsigned long long)bg[idx]);
+    n+=(unsigned)lg_hex(o+n,(unsigned long long)v);
     o[n++]='\n'; trace_line(o,n);
 }
 
-static void run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
+/* Verdict code (also drives the on-screen color in main):
+ *   0 PASS         center stayed 0 after the fill -> RT reflects the GPU write
+ *   1 FAIL         center !=0 after the fill      -> write NOT reflected
+ *   2 INCONCLUSIVE fill or readback broken (s2!=0) -> test itself is invalid
+ *   3 ALLOC        target allocation failed
+ */
+static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
     unsigned long bytes=(unsigned long)DISPLAY_W*DISPLAY_H*4;
     void *M=gpu_alloc(bytes,0x100000);
     struct PM4Builder pm4;
     volatile uint32_t *bg=(volatile uint32_t*)M;
     unsigned long ci=(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/2; /* center bg */
     unsigned long co=(unsigned long)10*DISPLAY_W + 10;                     /* inside corner */
+    uint32_t s2, fin;
 
     trace_msg("COH start\n");
-    if(!M){ trace_msg("COH alloc failed\n"); return; }
+    if(!M){ trace_msg("COH alloc failed\n"); return 3; }
 
     /* Stage 1: establish nonzero — fulltri gradient over the whole target. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,DISPLAY_W,DISPLAY_H,fence,1),fence,1);
-    coh_emit("COH s1 center=",bg,ci);
+    coh_log("COH s1 center=",bg[ci]);
 
     /* Stage 2: NON-render GPU write — CP DMA fill the target memory with 0. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_fill(&pm4,M,bytes,0u,fence,2),fence,2);
-    coh_emit("COH s2 center=",bg,ci);
+    s2=bg[ci]; coh_log("COH s2 after-fill=",s2);
 
-    /* Stage 3: re-render, drawing ONLY a 64x64 corner; background untouched. */
+    /* Stage 3: re-render, drawing ONLY a 64x64 corner; center untouched. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,64,64,fence,3),fence,3);
+    fin=bg[ci]; coh_log("COH final center=",fin); coh_log("COH final corner=",bg[co]);
 
-    coh_emit("COH result bg=",bg,ci);
-    coh_emit("COH result corner=",bg,co);
-    if(bg[ci]==0u)
-        trace_msg("COH VERDICT: background=0 -> PS4 RT reflects the GPU fill.\n");
-    else
-        trace_msg("COH VERDICT: background!=0 -> unexpected; revisit model.\n");
+    /* s2 is the sanity gate: the fill wrote 0 to the whole target, so the
+       center MUST read 0 here. If it doesn't, the fill or the CPU readback is
+       broken and any pass/fail below would be meaningless. */
+    if(s2!=0u){ trace_msg("COH VERDICT: INCONCLUSIVE (fill/readback broken)\n"); return 2; }
+    if(fin==0u){ trace_msg("COH VERDICT: PASS (RT reflects the GPU fill)\n"); return 0; }
+    trace_msg("COH VERDICT: FAIL (fill not reflected)\n"); return 1;
 }
 #endif /* COHERENCE_TEST */
 
@@ -2367,8 +2375,18 @@ int main(void) {
 
 #ifdef COHERENCE_TEST
     trace_init();
-    run_coherence_test(dcb_mem[0], fence);
-    for(;;) sceKernelUsleep(1000000);   /* results are in /data/trace.log */
+    {
+        /* 0 PASS=green   1 FAIL=red   2 INCONCLUSIVE=blue   3 ALLOC=magenta  (BGRA8) */
+        static const uint32_t coh_col[4]={0xFF00FF00u,0xFFFF0000u,0xFF0000FFu,0xFFFF00FFu};
+        struct PM4Builder cpm4;
+        int coh_rc=run_coherence_test(dcb_mem[0], fence);
+        unsigned long fb_bytes=(unsigned long)DISPLAY_W*DISPLAY_H*4;
+        *fence=0; pm4_init(&cpm4,dcb_mem[0],DCB_SIZE/4);
+        coh_submit(dcb_mem[0],
+                   build_coh_fill(&cpm4,fb[0],fb_bytes,coh_col[coh_rc],fence,9),fence,9);
+        sceVideoOutSubmitFlip(video,0,1,0);
+    }
+    for(;;) sceKernelUsleep(1000000);   /* verdict = screen color; raw hex in /data/trace.log */
 #endif
 
 
