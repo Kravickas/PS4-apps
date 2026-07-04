@@ -260,9 +260,22 @@ int main(void){
     struct PM4Builder pm4;
     int rc=run_coherence_test(dcb, fence);
 
-    *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    coh_submit(dcb,build_coh_fill(&pm4,fb[0],fb_size,coh_col[rc],fence,9),fence,9);
-    sceVideoOutSubmitFlip(video,0,1,0);
+    /* Paint the verdict into fb[0] and flip with the PROPER handshake: the DCB
+       MUST end with pm4_prepare_flip (last 64 dwords) or the display/buffer-label
+       state desyncs and corrupts other flip consumers (debug overlay, system UI).
+       Same submit sequence the cube app uses. */
+    *fence=0;
+    pm4_init(&pm4,dcb,DCB_SIZE/4);
+    build_coh_fill(&pm4,fb[0],fb_size,coh_col[rc],fence,9);   /* dma_fill + EOP */
+    pm4_prepare_flip(&pm4);                                    /* last 64 dwords */
+    {
+        const uint32_t *a[1]={dcb}; uint32_t s[1]={pm4.off*4};
+        sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
+        sceGnmSubmitDone();
+        for(int w=0; w<10000 && *fence!=9; w++) sceKernelUsleep(100);
+        sceVideoOutSubmitFlip(video,0,1,0);
+        sceKernelUsleep(16000);
+    }
 
     for(;;) sceKernelUsleep(1000000);
     return 0;
