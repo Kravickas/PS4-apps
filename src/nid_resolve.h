@@ -4,7 +4,7 @@
    the OpenOrbis SDK's <stdint.h> when building via the SDK toolchain. */
 #include <stdint.h>
 
-extern int sceKernelAllocateDirectMemory(long, long, unsigned long, unsigned long, int, unsigned long*);
+extern int sceKernelAllocateDirectMemory(long, long, unsigned long, unsigned long, int, long*);
 extern int sceKernelMapDirectMemory(void**, unsigned long, int, int, long, unsigned long);
 extern unsigned int sceKernelUsleep(unsigned int);
 extern int sceKernelOpen(const char*, int, unsigned short);
