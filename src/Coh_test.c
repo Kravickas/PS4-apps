@@ -161,7 +161,7 @@ static uint32_t build_coh_render(struct PM4Builder *b, void *color, void *ps_gpu
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);   /* trilist */
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
     pm4_draw_index_auto(b,3);
-    pm4_event_write_eop(b,fence,fv);
+    pm4_event_write_eop_flush(b,fence,fv);
     return b->off*4;
 }
 
@@ -172,7 +172,7 @@ static uint32_t build_coh_fill(struct PM4Builder *b, void *dst, unsigned long by
     unsigned long off=0;
     while(off<bytes){ unsigned long n=bytes-off; if(n>CHUNK)n=CHUNK;
         pm4_dma_fill(b,(char*)dst+off,(uint32_t)n,value); off+=n; }
-    pm4_event_write_eop(b,fence,fv);
+    pm4_event_write_eop_flush(b,fence,fv);
     return b->off*4;
 }
 
@@ -181,6 +181,7 @@ static void coh_submit(uint32_t *dcb, uint32_t sz, volatile uint32_t *fence, uin
     sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
     sceGnmSubmitDone();
     for(int w=0; w<200000 && *fence!=fv; w++) sceKernelUsleep(50);
+    sceKernelUsleep(2000);   /* let any in-flight L2 writeback drain before CPU read */
 }
 
 static void coh_log(const char *label, uint32_t v){
@@ -193,7 +194,7 @@ static void coh_log(const char *label, uint32_t v){
 /* Verdict code (also drives the on-screen color in main):
  *   0 PASS         center stayed 0 after the fill -> RT reflects the GPU write
  *   1 FAIL         center !=0 after the fill      -> write NOT reflected
- *   2 INCONCLUSIVE fill or readback broken (s2!=0) -> test itself is invalid
+ *   2 INCONCLUSIVE render/fill/readback broken (s1==0 or s2!=0) -> test invalid
  *   3 ALLOC        target allocation failed
  */
 static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
@@ -203,7 +204,7 @@ static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
     volatile uint32_t *bg=(volatile uint32_t*)M;
     unsigned long ci=(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/2; /* center bg */
     unsigned long co=(unsigned long)10*DISPLAY_W + 10;                     /* inside corner */
-    uint32_t s2, fin;
+    uint32_t s1, s2, fin;
 
     trace_msg("COH start\n");
     if(!M){ trace_msg("COH alloc failed\n"); return 3; }
@@ -211,7 +212,7 @@ static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
     /* Stage 1: establish nonzero — fulltri gradient over the whole target. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,DISPLAY_W,DISPLAY_H,fence,1),fence,1);
-    coh_log("COH s1 center=",bg[ci]);
+    s1=bg[ci]; coh_log("COH s1 center=",s1);
 
     /* Stage 2: NON-render GPU write — CP DMA fill the target memory with 0. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
@@ -223,10 +224,14 @@ static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
     coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,64,64,fence,3),fence,3);
     fin=bg[ci]; coh_log("COH final center=",fin); coh_log("COH final corner=",bg[co]);
 
-    /* s2 is the sanity gate: the fill wrote 0 to the whole target, so the
-       center MUST read 0 here. If it doesn't, the fill or the CPU readback is
-       broken and any pass/fail below would be meaningless. */
-    if(s2!=0u){ trace_msg("COH VERDICT: INCONCLUSIVE (fill/readback broken)\n"); return 2; }
+    /* Two sanity gates before any verdict:
+       - s1 MUST be nonzero: stage 1 rendered a gradient over the whole target,
+         so the center must read back nonzero. If it's 0 the render never reached
+         memory (or didn't draw) and the whole test is meaningless.
+       - s2 MUST be 0: the fill wrote 0 everywhere, so the center must read 0.
+       Only if both hold does final-center 0-vs-nonzero mean anything. */
+    if(s1==0u){ trace_msg("COH VERDICT: INCONCLUSIVE (render/readback broken, s1=0)\n"); return 2; }
+    if(s2!=0u){ trace_msg("COH VERDICT: INCONCLUSIVE (fill/readback broken, s2!=0)\n"); return 2; }
     if(fin==0u){ trace_msg("COH VERDICT: PASS (RT reflects the GPU fill)\n"); return 0; }
     trace_msg("COH VERDICT: FAIL (fill not reflected)\n"); return 1;
 }
