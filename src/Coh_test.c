@@ -57,9 +57,21 @@ static const uint32_t vs_fulltri_binary[] __attribute__((aligned(256))) = {
     0xCAFE0E02, 0x00000000,
 };
 
+/* --- texture sampler PS: loads T#(desc[0..7]) + sampler(desc[8..11]) from the
+       user-data desc pointer (s0:1), samples M at a FIXED texel (uv=0.5,0.5),
+       exports it to MRT0. Assembled+verified with llvm-mc (gfx7/hawaii). --- */
+static const uint32_t ps_samp_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x00000000, 0xC0C40100, 0xC0820108,
+    0x7E0002F0, 0x7E0202F0, 0xBF8C007F, 0xF0800F00,
+    0x00220400, 0xBF8C0F70, 0xF800180F, 0x07060504,
+    0xBF810000, 0x5362724F, 0x00726468, 0x00002400,
+    0x00000000, 0xDEADBEEF, 0xCAFE00C7, 0x00000000,
+};
+
 static int   g_log_fd         = -1;
 static void *g_vs_fulltri_gpu = 0;
 static void *g_ps_grad_gpu    = 0;
+static void *g_ps_samp_gpu    = 0;
 
 #include "pm4.h"
 
@@ -110,6 +122,23 @@ static void *gpu_alloc(unsigned long size, unsigned long align) {
     if (sceKernelMapDirectMemory(&addr, size, PROT_CPU_RW | PROT_GPU_RW, 0, phys, align)) return 0;
     my_memset(addr, 0, size);
     return addr;
+}
+
+/* RGBA8 2D T# (data_format 10) for sampling M as a texture. */
+static void build_tsharp(uint32_t *t, void *tex, int w, int h) {
+    uint64_t a=(uint64_t)(uintptr_t)tex;
+    my_memset(t,0,32);
+    t[0]=(uint32_t)(a>>8); t[1]=(uint32_t)(a>>40)|(10u<<20);
+    t[2]=(uint32_t)(w-1)|((uint32_t)(h-1)<<14);
+    t[3]=4u|(5u<<3)|(6u<<6)|(7u<<9)|(8u<<20)|(9u<<28);
+    t[4]=(uint32_t)(w-1)<<13;
+}
+
+/* Bilinear sampler S#. */
+static void build_ssharp(uint32_t *s) {
+    my_memset(s,0,16);
+    s[1] = (0xF00u << 12);
+    s[2] = (1u << 20) | (1u << 22);
 }
 
 static uint32_t build_coh_render(struct PM4Builder *b, void *color, void *ps_gpu,
@@ -176,6 +205,61 @@ static uint32_t build_coh_fill(struct PM4Builder *b, void *dst, unsigned long by
     return b->off*4;
 }
 
+/* Sample M (via the desc table T#/sampler) into a horizontal band
+   [sx, sx+sw] x [0,H] of the display fb. Uses ps_samp (fixed-texel sample). */
+static uint32_t build_coh_sample(struct PM4Builder *b, void *fb, void *desc,
+                                 uint32_t sx, uint32_t sw,
+                                 volatile uint32_t *fence, uint32_t fv) {
+    pm4_init_default_hw_state(b);
+    pm4_context_control(b);
+    { uint64_t a=(uint64_t)(uintptr_t)g_vs_fulltri_gpu;
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),1u,0u};
+      pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
+    /* Scissor to the band; loadOp=LOAD keeps the other half from the prior pass. */
+    { uint32_t s[2]={(sx&0x7FFF)|(0u<<16),((sx+sw)&0x7FFF)|((DISPLAY_H&0x7FFF)<<16)};
+      pm4_set_context_regs(b,CTX_SCREEN_SCISSOR,s,2);
+      pm4_set_context_regs(b,CTX_GENERIC_SCISSOR,s,2);
+      pm4_set_context_regs(b,CTX_VIEWPORT_SCISSOR0,s,2);
+      s[0]=(1u<<31);
+      pm4_set_context_regs(b,CTX_WINDOW_SCISSOR,s,2); }
+    pm4_emit(b,pm4_type3(PM4_SET_CONTEXT_REG,7));
+    pm4_emit(b,CTX_VIEWPORT0);
+    pm4_emit_f(b,(float)DISPLAY_W*0.5f); pm4_emit_f(b,(float)DISPLAY_W*0.5f);
+    pm4_emit_f(b,(float)DISPLAY_H*-0.5f); pm4_emit_f(b,(float)DISPLAY_H*0.5f);
+    pm4_emit_f(b,1.0f); pm4_emit_f(b,0.0f);
+    pm4_set_context_reg(b,CTX_INDEX_OFFSET,0);
+    pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,0);
+    pm4_set_context_reg(b,CTX_DB_Z_INFO,0);
+    pm4_set_context_reg(b,CTX_DB_STENCIL_INFO,0);
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
+    pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0);
+    { uint32_t c=(uint32_t)((uint64_t)(uintptr_t)fb>>8);
+      uint32_t r[14]={c,(DISPLAY_W/8)-1,(DISPLAY_W*DISPLAY_H/64)-1,0,
+        0x09A8u,0,0,0,0,0,0,0,0,0};
+      pm4_set_context_regs(b,CTX_CB_COLOR0_BASE,r,14);
+      pm4_emit(b,0xC0001000u); pm4_emit(b,DISPLAY_W|(DISPLAY_H<<16)); }
+    pm4_set_context_reg(b,CTX_COLOR_TARGET_MASK,0xF);
+    pm4_set_context_reg(b,CTX_COLOR_SHADER_MASK,0xF);
+    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
+    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);
+    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x302);
+    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x302);
+    pm4_set_context_reg(b,CTX_NUM_INTERP,0);
+    /* desc pointer -> PS user_data s0:1 (full byte address for s_load base). */
+    { uint64_t d=(uint64_t)(uintptr_t)desc;
+      uint32_t ud[2]={(uint32_t)d,(uint32_t)(d>>32)};
+      pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
+    /* PS = sampler: RSRC1 16vgpr/16sgpr (0x43), RSRC2 USER_SGPR=2 (2<<1). */
+    { uint64_t a=(uint64_t)(uintptr_t)g_ps_samp_gpu;
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x43u,(2u<<1)};
+      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); }
+    pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
+    pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
+    pm4_draw_index_auto(b,3);
+    pm4_event_write_eop_flush(b,fence,fv);
+    return b->off*4;
+}
+
 static void coh_submit(uint32_t *dcb, uint32_t sz, volatile uint32_t *fence, uint32_t fv){
     const uint32_t *a[1]={dcb}; uint32_t s[1]={sz};
     sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
@@ -191,49 +275,50 @@ static void coh_log(const char *label, uint32_t v){
     o[n++]='\n'; trace_line(o,n);
 }
 
-/* Verdict code (also drives the on-screen color in main):
- *   0 PASS         center stayed 0 after the fill -> RT reflects the GPU write
- *   1 FAIL         center !=0 after the fill      -> write NOT reflected
- *   2 INCONCLUSIVE render/fill/readback broken (s1==0 or s2!=0) -> test invalid
- *   3 ALLOC        target allocation failed
- */
-static int run_coherence_test(uint32_t *dcb, volatile uint32_t *fence){
-    unsigned long bytes=(unsigned long)DISPLAY_W*DISPLAY_H*4;
-    void *M=gpu_alloc(bytes,0x100000);
+/* Two-pass GPU texture-sample coherence test. Writes the result INTO fb and
+   flips it; the SCREEN is the verdict:
+     LEFT half  = sample of M after fill A  (always color A)
+     RIGHT half = sample of the SAME texel after a non-render fill B
+        split  (left A, right B) -> GPU fetch saw the non-render write (coherent)
+        uniform(both A)          -> fetch returned a stale cached texel (not coherent)
+   Returns 3 on alloc failure, else 0. */
+static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
+                                     int video, void *fb){
+    unsigned long mbytes=(unsigned long)DISPLAY_W*DISPLAY_H*4;
+    void *M=gpu_alloc(mbytes,0x100000);
+    void *desc=gpu_alloc(64,256);
     struct PM4Builder pm4;
-    volatile uint32_t *bg=(volatile uint32_t*)M;
-    unsigned long ci=(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/2; /* center bg */
-    unsigned long co=(unsigned long)10*DISPLAY_W + 10;                     /* inside corner */
-    uint32_t s1, s2, fin;
+    const uint32_t A=0xFF0000FFu, B=0xFF00FF00u;   /* two clearly-different colors */
 
-    trace_msg("COH start\n");
-    if(!M){ trace_msg("COH alloc failed\n"); return 3; }
+    trace_msg("SAMP start\n");
+    if(!M||!desc){ trace_msg("SAMP alloc failed\n"); return 3; }
+    build_tsharp((uint32_t*)desc, M, DISPLAY_W, DISPLAY_H);
+    build_ssharp((uint32_t*)desc + 8);
 
-    /* Stage 1: establish nonzero — fulltri gradient over the whole target. */
+    /* 1: fill M = A (non-render write). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,DISPLAY_W,DISPLAY_H,fence,1),fence,1);
-    s1=bg[ci]; coh_log("COH s1 center=",s1);
-
-    /* Stage 2: NON-render GPU write — CP DMA fill the target memory with 0. */
+    coh_submit(dcb,build_coh_fill(&pm4,M,mbytes,A,fence,1),fence,1);
+    /* 2: sample M -> LEFT half (warms the texture cache with A). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    coh_submit(dcb,build_coh_fill(&pm4,M,bytes,0u,fence,2),fence,2);
-    s2=bg[ci]; coh_log("COH s2 after-fill=",s2);
-
-    /* Stage 3: re-render, drawing ONLY a 64x64 corner; center untouched. */
+    coh_submit(dcb,build_coh_sample(&pm4,fb,desc,0,DISPLAY_W/2,fence,2),fence,2);
+    /* 3: fill M = B (the non-render write under test). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    coh_submit(dcb,build_coh_render(&pm4,M,g_ps_grad_gpu,64,64,fence,3),fence,3);
-    fin=bg[ci]; coh_log("COH final center=",fin); coh_log("COH final corner=",bg[co]);
-
-    /* Two sanity gates before any verdict:
-       - s1 MUST be nonzero: stage 1 rendered a gradient over the whole target,
-         so the center must read back nonzero. If it's 0 the render never reached
-         memory (or didn't draw) and the whole test is meaningless.
-       - s2 MUST be 0: the fill wrote 0 everywhere, so the center must read 0.
-       Only if both hold does final-center 0-vs-nonzero mean anything. */
-    if(s1==0u){ trace_msg("COH VERDICT: INCONCLUSIVE (render/readback broken, s1=0)\n"); return 2; }
-    if(s2!=0u){ trace_msg("COH VERDICT: INCONCLUSIVE (fill/readback broken, s2!=0)\n"); return 2; }
-    if(fin==0u){ trace_msg("COH VERDICT: PASS (RT reflects the GPU fill)\n"); return 0; }
-    trace_msg("COH VERDICT: FAIL (fill not reflected)\n"); return 1;
+    coh_submit(dcb,build_coh_fill(&pm4,M,mbytes,B,fence,3),fence,3);
+    /* 4: sample the SAME texel -> RIGHT half; end with prepare_flip and flip. */
+    *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
+    build_coh_sample(&pm4,fb,desc,DISPLAY_W/2,DISPLAY_W/2,fence,4);
+    pm4_prepare_flip(&pm4);                             /* MUST be last 64 dwords */
+    {
+        const uint32_t *a[1]={dcb}; uint32_t s[1]={pm4.off*4};
+        sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
+        sceGnmSubmitDone();
+        for(int w=0; w<200000 && *fence!=4; w++) sceKernelUsleep(50);
+        sceKernelUsleep(2000);
+        sceVideoOutSubmitFlip(video,0,1,0);
+        sceKernelUsleep(16000);
+    }
+    trace_msg("SAMP done: LEFT=A RIGHT=B-if-coherent. split=coherent, uniform=stale\n");
+    return 0;
 }
 
 int main(void){
@@ -251,8 +336,10 @@ int main(void){
 
     void *vs=gpu_alloc(sizeof(vs_fulltri_binary),256);
     if(!vs) return 1; my_memcpy(vs,vs_fulltri_binary,sizeof(vs_fulltri_binary)); g_vs_fulltri_gpu=vs;
-    void *ps=gpu_alloc(sizeof(ps_grad_binary),256);
-    if(!ps) return 1; my_memcpy(ps,ps_grad_binary,sizeof(ps_grad_binary)); g_ps_grad_gpu=ps;
+    void *psg=gpu_alloc(sizeof(ps_grad_binary),256);
+    if(!psg) return 1; my_memcpy(psg,ps_grad_binary,sizeof(ps_grad_binary)); g_ps_grad_gpu=psg;
+    void *pss=gpu_alloc(sizeof(ps_samp_binary),256);
+    if(!pss) return 1; my_memcpy(pss,ps_samp_binary,sizeof(ps_samp_binary)); g_ps_samp_gpu=pss;
 
     uint32_t *dcb=(uint32_t*)gpu_alloc(DCB_SIZE,0x10000);
     volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc(0x1000,0x1000);
@@ -260,27 +347,9 @@ int main(void){
 
     trace_init();
 
-    /* 0 PASS=green  1 FAIL=red  2 INCONCLUSIVE=blue  3 ALLOC=magenta  (BGRA8) */
-    static const uint32_t coh_col[4]={0xFF00FF00u,0xFFFF0000u,0xFF0000FFu,0xFFFF00FFu};
-    struct PM4Builder pm4;
-    int rc=run_coherence_test(dcb, fence);
-
-    /* Paint the verdict into fb[0] and flip with the PROPER handshake: the DCB
-       MUST end with pm4_prepare_flip (last 64 dwords) or the display/buffer-label
-       state desyncs and corrupts other flip consumers (debug overlay, system UI).
-       Same submit sequence the cube app uses. */
-    *fence=0;
-    pm4_init(&pm4,dcb,DCB_SIZE/4);
-    build_coh_fill(&pm4,fb[0],fb_size,coh_col[rc],fence,9);   /* dma_fill + EOP */
-    pm4_prepare_flip(&pm4);                                    /* last 64 dwords */
-    {
-        const uint32_t *a[1]={dcb}; uint32_t s[1]={pm4.off*4};
-        sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
-        sceGnmSubmitDone();
-        for(int w=0; w<10000 && *fence!=9; w++) sceKernelUsleep(100);
-        sceVideoOutSubmitFlip(video,0,1,0);
-        sceKernelUsleep(16000);
-    }
+    /* Runs 4 passes into fb[0] and flips it. The SCREEN is the verdict:
+       split (left/right different) = coherent; uniform = stale texture fetch. */
+    run_sample_coherence_test(dcb, fence, video, fb[0]);
 
     for(;;) sceKernelUsleep(1000000);
     return 0;
