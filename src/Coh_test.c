@@ -339,6 +339,31 @@ static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
     return 0;
 }
 
+/* Draw smoketest: full-screen gradient via the cube's exact recipe (plain EOP +
+   prepare_flip + real flip). If the screen shows a gradient, graphics draws work
+   in this binary and the render pass commits on flip; if black, draws don't
+   execute here at all (deeper than the sampler). Verdict is the SCREEN + fb.smoke. */
+static void run_draw_smoketest(uint32_t *dcb, volatile uint32_t *fence,
+                               int video, void *fb, void *desc){
+    struct PM4Builder pm4;
+    volatile uint32_t *fp=(volatile uint32_t*)fb;
+    const unsigned long cC=(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/2;
+    *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
+    build_coh_sample(&pm4,fb,desc,0,DISPLAY_W,g_ps_grad_gpu,0x02u,fence,1);
+    pm4_prepare_flip(&pm4);                    /* commit render pass via flip handshake */
+    {
+        const uint32_t *a[1]={dcb}; uint32_t s[1]={pm4.off*4};
+        sceGnmSubmitCommandBuffers(1,(void**)a,s,0,0);
+        sceGnmSubmitDone();
+        for(int w=0; w<200000 && *fence!=1; w++) sceKernelUsleep(50);
+        sceKernelUsleep(2000);
+        coh_log("fb.smoke=", fp[cC]);          /* non-zero => draw executed to memory */
+        sceVideoOutSubmitFlip(video,0,1,0);
+    }
+    trace_msg("SMOKE done: gradient on screen => draws work; black => draws don't execute\n");
+    sceKernelUsleep(4000000);                  /* hold 4s so the screen is readable */
+}
+
 int main(void){
     int video = sceVideoOutOpen(0,0,0,0);
     if (video < 0) return 1;
@@ -364,6 +389,10 @@ int main(void){
     if(!dcb||!fence) return 1;
 
     trace_init();
+
+    /* First: does a plain graphics draw display at all in this binary? */
+    void *sdesc=gpu_alloc(64,256);
+    run_draw_smoketest(dcb, fence, video, fb[0], sdesc);
 
     /* Runs 4 passes into fb[0] and flips it. The SCREEN is the verdict:
        split (left/right different) = coherent; uniform = stale texture fetch. */
