@@ -295,15 +295,24 @@ static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
     build_tsharp((uint32_t*)desc, M, DISPLAY_W, DISPLAY_H);
     build_ssharp((uint32_t*)desc + 8);
 
+    volatile uint32_t *mp=(volatile uint32_t*)M;
+    volatile uint32_t *fp=(volatile uint32_t*)fb;
+    const unsigned long cM =(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/2;
+    const unsigned long cL =(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/4;
+    const unsigned long cR =(unsigned long)(DISPLAY_H/2)*DISPLAY_W + 3*(DISPLAY_W/4);
+
     /* 1: fill M = A (non-render write). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_fill(&pm4,M,mbytes,A,fence,1),fence,1);
+    coh_log("M.afterA=", mp[cM]);            /* expect A=0xFF0000FF: confirms fill works */
     /* 2: sample M -> LEFT half (warms the texture cache with A). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_sample(&pm4,fb,desc,0,DISPLAY_W/2,fence,2),fence,2);
+    coh_log("fb.L=", fp[cL]);                /* 0 -> sample/bind broken; A -> sampler works */
     /* 3: fill M = B (the non-render write under test). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_fill(&pm4,M,mbytes,B,fence,3),fence,3);
+    coh_log("M.afterB=", mp[cM]);            /* expect B=0xFF00FF00 */
     /* 4: sample the SAME texel -> RIGHT half; end with prepare_flip and flip. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     build_coh_sample(&pm4,fb,desc,DISPLAY_W/2,DISPLAY_W/2,fence,4);
@@ -314,10 +323,11 @@ static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
         sceGnmSubmitDone();
         for(int w=0; w<200000 && *fence!=4; w++) sceKernelUsleep(50);
         sceKernelUsleep(2000);
+        coh_log("fb.R=", fp[cR]);            /* B -> coherent (write reflected); A -> stale */
         sceVideoOutSubmitFlip(video,0,1,0);
         sceKernelUsleep(16000);
     }
-    trace_msg("SAMP done: LEFT=A RIGHT=B-if-coherent. split=coherent, uniform=stale\n");
+    trace_msg("SAMP done: read fb.L/fb.R from log. fb.L=0 means bind broke, not coherence.\n");
     return 0;
 }
 
