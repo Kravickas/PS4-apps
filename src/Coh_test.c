@@ -183,6 +183,20 @@ static uint32_t build_coh_render(struct PM4Builder *b, void *color, void *ps_gpu
     pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x302);
     pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x302);
     pm4_set_context_reg(b,CTX_NUM_INTERP,0);
+    /* Pipeline export/clip/raster formats — REQUIRED for a draw (see build_coh_sample). */
+    pm4_set_context_reg(b,CTX_SHADER_POS_FORMAT,4);
+    pm4_set_context_reg(b,CTX_Z_EXPORT_FORMAT,0);
+    pm4_set_context_reg(b,CTX_COLOR_EXPORT_FORMAT,9);
+    pm4_set_context_reg(b,CTX_COLOR_CONTROL,0x00CC0010u);
+    pm4_set_context_reg(b,0x203,0);
+    pm4_set_context_reg(b,CTX_CLIPPER_CONTROL,1u<<19);
+    pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
+    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
+    pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
+    pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
+    pm4_set_context_reg(b,CTX_AA_CONFIG,0);
+    pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
+    pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
     /* PS = gradient: RSRC1=(0<<6)|2, RSRC2=(2<<1). */
     { uint64_t a=(uint64_t)(uintptr_t)ps_gpu;
       uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(0u<<6)|2u,(2u<<1)};
@@ -246,6 +260,22 @@ static uint32_t build_coh_sample(struct PM4Builder *b, void *fb, void *desc,
     pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x302);
     pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x302);
     pm4_set_context_reg(b,CTX_NUM_INTERP,0);
+    /* Pipeline export/clip/raster formats — REQUIRED for a draw. Without POS_FORMAT
+       the VS exports no position (no rasterization); without COLOR_EXPORT_FORMAT the
+       PS color export is dropped (black). Matches build_dcb's pre-draw block. */
+    pm4_set_context_reg(b,CTX_SHADER_POS_FORMAT,4);
+    pm4_set_context_reg(b,CTX_Z_EXPORT_FORMAT,0);
+    pm4_set_context_reg(b,CTX_COLOR_EXPORT_FORMAT,9);
+    pm4_set_context_reg(b,CTX_COLOR_CONTROL,0x00CC0010u);
+    pm4_set_context_reg(b,0x203,0);
+    pm4_set_context_reg(b,CTX_CLIPPER_CONTROL,1u<<19);
+    pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
+    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
+    pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
+    pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
+    pm4_set_context_reg(b,CTX_AA_CONFIG,0);
+    pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
+    pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
     /* desc pointer -> PS user_data s0:1 (full byte address for s_load base). */
     { uint64_t d=(uint64_t)(uintptr_t)desc;
       uint32_t ud[2]={(uint32_t)d,(uint32_t)(d>>32)};
