@@ -209,6 +209,7 @@ static uint32_t build_coh_fill(struct PM4Builder *b, void *dst, unsigned long by
    [sx, sx+sw] x [0,H] of the display fb. Uses ps_samp (fixed-texel sample). */
 static uint32_t build_coh_sample(struct PM4Builder *b, void *fb, void *desc,
                                  uint32_t sx, uint32_t sw,
+                                 void *ps_prog, uint32_t rsrc1,
                                  volatile uint32_t *fence, uint32_t fv) {
     pm4_init_default_hw_state(b);
     pm4_context_control(b);
@@ -249,9 +250,9 @@ static uint32_t build_coh_sample(struct PM4Builder *b, void *fb, void *desc,
     { uint64_t d=(uint64_t)(uintptr_t)desc;
       uint32_t ud[2]={(uint32_t)d,(uint32_t)(d>>32)};
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
-    /* PS = sampler: RSRC1 16vgpr/16sgpr (0x43), RSRC2 USER_SGPR=2 (2<<1). */
-    { uint64_t a=(uint64_t)(uintptr_t)g_ps_samp_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x43u,(2u<<1)};
+    /* PS bind (parameterized): RSRC2 USER_SGPR=2 (2<<1) provides the desc pointer in s0:1. */
+    { uint64_t a=(uint64_t)(uintptr_t)ps_prog;
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),rsrc1,(2u<<1)};
       pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); }
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
@@ -301,13 +302,20 @@ static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
     const unsigned long cL =(unsigned long)(DISPLAY_H/2)*DISPLAY_W + DISPLAY_W/4;
     const unsigned long cR =(unsigned long)(DISPLAY_H/2)*DISPLAY_W + 3*(DISPLAY_W/4);
 
+    /* 0: DIAGNOSTIC — identical scissored draw path but gradient PS (no texture/desc).
+       Non-zero fb.grad => draw+scissor+CB+flush path works, so a zero fb.L isolates the
+       failure to the sampler/descriptor rather than the draw itself. */
+    *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
+    coh_submit(dcb,build_coh_sample(&pm4,fb,desc,0,DISPLAY_W/2,g_ps_grad_gpu,0x02u,fence,9),fence,9);
+    coh_log("fb.grad=", fp[cL]);             /* gradient pixel: proves the scissored draw path */
+
     /* 1: fill M = A (non-render write). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
     coh_submit(dcb,build_coh_fill(&pm4,M,mbytes,A,fence,1),fence,1);
     coh_log("M.afterA=", mp[cM]);            /* expect A=0xFF0000FF: confirms fill works */
     /* 2: sample M -> LEFT half (warms the texture cache with A). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    coh_submit(dcb,build_coh_sample(&pm4,fb,desc,0,DISPLAY_W/2,fence,2),fence,2);
+    coh_submit(dcb,build_coh_sample(&pm4,fb,desc,0,DISPLAY_W/2,g_ps_samp_gpu,0x43u,fence,2),fence,2);
     coh_log("fb.L=", fp[cL]);                /* 0 -> sample/bind broken; A -> sampler works */
     /* 3: fill M = B (the non-render write under test). */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
@@ -315,7 +323,7 @@ static int run_sample_coherence_test(uint32_t *dcb, volatile uint32_t *fence,
     coh_log("M.afterB=", mp[cM]);            /* expect B=0xFF00FF00 */
     /* 4: sample the SAME texel -> RIGHT half; end with prepare_flip and flip. */
     *fence=0; pm4_init(&pm4,dcb,DCB_SIZE/4);
-    build_coh_sample(&pm4,fb,desc,DISPLAY_W/2,DISPLAY_W/2,fence,4);
+    build_coh_sample(&pm4,fb,desc,DISPLAY_W/2,DISPLAY_W/2,g_ps_samp_gpu,0x43u,fence,4);
     pm4_prepare_flip(&pm4);                             /* MUST be last 64 dwords */
     {
         const uint32_t *a[1]={dcb}; uint32_t s[1]={pm4.off*4};
