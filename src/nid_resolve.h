@@ -68,6 +68,10 @@ extern int sceVideoOutDeleteFlipEvent(OrbisKernelEqueue, int);
 /* Buffer flip-done label base; label[i] is at base + i*8. */
 extern int sceVideoOutGetBufferLabelAddress(int, void**);
 
+/* Emits a 7-dword WAIT_REG_MEM(label[bufIdx] == 0) into the command buffer.
+   size_dw must be 7 or it returns -1 and emits nothing. */
+extern int sceGnmInsertWaitFlipDone(uint32_t*, uint32_t, int, int);
+
 /* Vblank event: the display-hardware vblank IRQ, delivered every 16.6ms
    independent of the VideoOut flip-worker thread. On a FAT console
    (sceKernelIsNeoMode()==0) the flip worker polls on a 500ms fallback, so

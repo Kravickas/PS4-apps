@@ -2881,9 +2881,19 @@ int main(void) {
         struct PM4Builder pm4; pm4_init(&pm4,dcb_mem[bi],DCB_SIZE/4);
 
         /* Label sampled before this frame's work. gnm's marker patch injects
-           WRITE_DATA(label[bi]=1); the display should clear it on flip. */
+           WRITE_DATA(label[bi]=1); the display clears it on flip completion
+           (confirmed on hw: labpre=0x0, labpost=0x1 every frame). */
         uint32_t lab_pre = label_ok ?
             ((volatile uint32_t*)flip_label_base)[bi*2] : 0xffffffffu;
+
+        /* GPU waits for buffer bi's previous flip before rendering into it.
+           A real game emits this every frame; we never have. Safe: the labels
+           are confirmed to return to 0, so the wait always retires. */
+        int wfd = -1;
+        if (label_ok && pm4.off + 7 <= pm4.cap) {
+            wfd = sceGnmInsertWaitFlipDone(pm4.buf + pm4.off, 7, video, bi);
+            if (wfd == 0) pm4.off += 7;
+        }
 
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
@@ -2976,6 +2986,7 @@ int main(void) {
             LP(" evc="); p+=lg_i64(L+p,g_event_count);
             LP(" fenceit="); p+=lg_i64(L+p,fence_iters);
             LP(" flipit="); p+=lg_i64(L+p,flip_iters);
+            LP(" wfd="); p+=lg_i64(L+p,wfd);
             LP(" labpre="); p+=lg_hex(L+p,(unsigned long long)lab_pre);
             LP(" labpost="); p+=lg_hex(L+p,(unsigned long long)(label_ok ?
                 ((volatile uint32_t*)flip_label_base)[bi*2] : 0xffffffffu));
