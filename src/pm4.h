@@ -296,18 +296,47 @@ static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
 }
 
 /* prepareFlip packet — the real PS4 flip handshake.
-   sceGnmSubmitAndFlipCommandBuffers -> PatchFlipRequest expects the DCB to END
-   with a 64-dword TYPE3 NOP whose header is 0xc03e1000 (pm4_type3(NOP,63)) and
-   whose first payload dword is the flip-type tag 0x68750777 (PrepareFlip).
-   The driver patches this packet in place so the GPU writes the VO buffer
-   label and performs the flip at end-of-pipe — the buffer-label handshake that
-   our old standalone sceVideoOutSubmitFlip skipped. This MUST be the last 64
-   dwords of the DCB (PatchFlipRequest reads dcb[size_dw - 0x40]). */
-#define PM4_PREPARE_FLIP_TAG 0x68750777u
+   sceGnmSubmitAndFlipCommandBuffers -> the marker-patch pass (gnm fn 0xcb0)
+   requires the DCB to END with a 64-dword TYPE3 NOP whose header is 0xc03e1000
+   (pm4_type3(NOP,63) — our pm4_type3 takes the payload count and subtracts 1,
+   so 63 yields 0xc03e1000) and whose first payload dword is a valid marker.
+   It reads dcb[size_dw - 0x40], so this MUST be the last 64 dwords of the DCB.
+
+   Block layout the patcher reads:
+     +0x00 header 0xc03e1000
+     +0x04 marker
+     +0x08 p0   +0x0c p1   +0x10 p2   +0x14 p3   +0x18 p4
+     +0xe8 is where it writes an EOP (dwords 58..63 — the block's tail)
+
+   EVERY valid marker (0x68750777/78/80/81) makes gnm call
+   sceVideoOutSubmitEopFlip and emit WRITE_DATA(vo_label[bufIdx] = 1). The tag
+   only selects the trailing packet:
+     0x68750777 -> NOP 0xc0391000                    (what we used before)
+     0x68750778 -> NOP 0xc0341000 + a 2nd WRITE_DATA (the game's own throttle)
+     0x68750780 -> EOP 0xc0044700, addr=0, DATA_SEL=0, INT_SEL=1  <-- IRQ only
+     0x68750781 -> EOP 0xc0044700, caller addr,  DATA_SEL=1, INT_SEL=2
+
+   We use 0x68750780: flip + label write + an interrupt-only EOP.
+   Why: on GFX7 (Liverpool is GFX7) amdgpu sizes its fence array as
+   num_hw_submission*2 = 256*2 = 512, and slots are only freed by
+   amdgpu_fence_process() running off the EOP interrupt
+   (gfx_v7_0_ring_emit_fence_gfx emits INT_SEL(int_sel ? 2 : 0)). Our measured
+   wall is exactly 512 submits with the GPU completing every one — the
+   signature of fences never being processed. Our own EOP is INT_SEL=0 and
+   fires no interrupt; this marker makes the driver's own EOP fire one.
+   p3 = EVENT_TYPE(4 = CACHE_FLUSH_AND_INV_TS), p4 = 0 cache-action bits
+   -> patched dword1 = 4 | (0<<12) | EVENT_INDEX(5)<<8 = 0x504, the same event
+   encoding our own EOP and the game's per-submit EOP both use. */
+#define PM4_PREPARE_FLIP_TAG 0x68750780u
 static inline void pm4_prepare_flip(struct PM4Builder* b) {
-    pm4_emit(b, pm4_type3(PM4_NOP, 63));   // 0xc03e1000
-    pm4_emit(b, PM4_PREPARE_FLIP_TAG);     // payload[0] = PrepareFlip
-    for (uint32_t i = 0; i < 62; i++) pm4_emit(b, 0);  // padding to 64 dwords total
+    pm4_emit(b, pm4_type3(PM4_NOP, 63));   // +0x00 = 0xc03e1000
+    pm4_emit(b, PM4_PREPARE_FLIP_TAG);     // +0x04 marker
+    pm4_emit(b, 0);                        // +0x08 p0
+    pm4_emit(b, 0);                        // +0x0c p1
+    pm4_emit(b, 0);                        // +0x10 p2
+    pm4_emit(b, 4);                        // +0x14 p3 = EVENT_TYPE
+    pm4_emit(b, 0);                        // +0x18 p4 = cache actions
+    for (uint32_t i = 0; i < 57; i++) pm4_emit(b, 0);  // 64 dwords total
 }
 
 /* PM4 DMA_DATA (opcode 0x50): fill GPU memory with a constant value.

@@ -576,6 +576,11 @@ static int g_log_fd = -1;
 static int32_t g_last_event = 0;   /* latest non-zero sceSystemServiceReceiveEvent type */
 static int g_event_count = 0;      /* count of non-zero system events received */
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
+
+/* Spin body for the teardown quiesce; the game uses 16 pauses per iteration. */
+static inline void cpu_pause16(void){
+    for (int i=0;i<16;i++) __asm__ __volatile__("pause" ::: "memory");
+}
 static unsigned long lg_len(const char *s){ unsigned long n=0; while(s[n]) n++; return n; }
 static int lg_u64(char *o, unsigned long long v){
     char t[24]; int i=0,j=0;
@@ -2949,14 +2954,13 @@ int main(void) {
         for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
         fv++;
 
-        /* Wait this frame's flip (the flip is in the DCB, not a CPU call). */
-        if (flip_ev_ok) {
-            for (; flip_iters<240; flip_iters++) {
-                struct kevent_t ev; int out=0;
-                if (sceKernelWaitEqueue(flip_eq,&ev,1,&out,0) != 0 || out<=0) break;
-                if ((int64_t)((uintptr_t)ev.data >> 16) >= (int64_t)frame) break;
-            }
-        }
+        /* NO flip-equeue wait. The game registers a flip event but never calls
+           sceKernelWaitEqueue (verified: 0 call sites in its eboot); it paces on
+           the GPU EOP label. Pacing here comes from InsertWaitFlipDone gating the
+           GPU on buffer bi's previous flip, so this frame's EOP cannot retire
+           until that flip completed - the fence wait above is the pace. Blocking
+           on the flip equeue is suspected of consuming the flip-knote wakeup the
+           sceVideoOut reaper needs, dropping it to its 500ms fallback. */
 
         g_submit_count++;
 
@@ -3000,15 +3004,23 @@ int main(void) {
         frame++;
     }
 
-    /* Clean shutdown: make the GPU idle and release video-out so the OS doesn't
-       block on teardown (~1 min timeout -> crash) when closing the app.
-       1. Ensure all submitted GPU work has retired (wait the last fence).
-       2. Wait for any pending flips to drain.
-       3. Unregister display buffers and close the video-out handle. */
-    sceGnmSubmitDone();
+    /* Clean shutdown, matching the game's teardown (eboot 0xcf65c):
+         SubmitDone -> pause-spin until AreSubmitsAllowed -> SubmitDone -> spin
+       AreSubmitsAllowed returns 1 once the driver's in-flight counter is 0, so
+       this is the driver-level quiesce. Bounded here so a wedged driver cannot
+       hang the exit; the game spins unbounded. */
     trace_msg("teardown: begin\n");
+    int td_q1=0, td_q2=0;
+    sceGnmSubmitDone();
+    for (; td_q1<2000000 && !sceGnmAreSubmitsAllowed(); td_q1++) cpu_pause16();
+    sceGnmSubmitDone();
+    for (; td_q2<2000000 && !sceGnmAreSubmitsAllowed(); td_q2++) cpu_pause16();
+
+    /* Our own EOP fence: the last submitted frame has actually retired. */
     int td_fence=0;
     for (; td_fence<1000000 && *fence < fv; td_fence++) sceKernelUsleep(10);
+
+    /* Let queued flips drain before pulling the buffers out from under them. */
     int td_flip=0; int td_pend=-1;
     { OrbisVideoOutFlipStatus fs;
       for (; td_flip<100000; td_flip++) {
@@ -3017,9 +3029,11 @@ int main(void) {
           if (fs.numFlipPending == 0) break;
           sceKernelUsleep(200);
       } }
-    { char L[160]; int p=0;
+    { char L[200]; int p=0;
       #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
-      LP("teardown: fencewait="); p+=lg_i64(L+p,td_fence);
+      LP("teardown: q1="); p+=lg_i64(L+p,td_q1);
+      LP(" q2="); p+=lg_i64(L+p,td_q2);
+      LP(" fencewait="); p+=lg_i64(L+p,td_fence);
       LP(" flipwait="); p+=lg_i64(L+p,td_flip);
       LP(" pend="); p+=lg_i64(L+p,td_pend);
       LP(" fence="); p+=lg_u64(L+p,(unsigned long long)*fence);

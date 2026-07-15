@@ -89,6 +89,10 @@ extern int sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void** dcb_addrs,
                                              int buf_idx, uint32_t flip_mode,
                                              int64_t flip_arg);
 extern int sceGnmSubmitDone(void);
+
+/* Returns 1 when the driver's in-flight counter is 0 (GPU quiesced).
+   The game spins on this after SubmitDone before tearing down. */
+extern int sceGnmAreSubmitsAllowed(void);
 extern int printf(const char*, ...);
 extern int scePadInit(void);
 extern int scePadOpen(int, int, int, void*);
