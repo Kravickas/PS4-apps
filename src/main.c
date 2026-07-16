@@ -2882,6 +2882,26 @@ int main(void) {
            and DEPTH_CLEAR=1.0f on the first draw — shadPS4 translates this to a Vulkan
            loadOp=Clear on the depth attachment. A CPU linear memset won't work because
            the depth buffer is GPU-tiled. */
+        /* One-shot idle-drain probe. The wall is a hard per-submission limit
+           (proven: halving IB packets per submit moved it 0 frames). Past it we
+           submit ~2/sec and each costs 500ms, so slots free at exactly the rate
+           we consume them - we have never stopped to see if idling recovers.
+           Stop submitting for 10s here and measure the submits right after.
+           Fast after the pause  => the array drains when idle; a burst harness
+                                    (<512 submits, pause, repeat) is viable.
+           Still 500ms           => the process gets 512 submits, total, ever. */
+        if (frame == 560) {
+            trace_msg("drain probe: idling 10s (no submits)\n");
+            uint64_t t0 = sceKernelGetProcessTime();
+            for (int i = 0; i < 100; i++) sceKernelUsleep(100000);
+            uint64_t t1 = sceKernelGetProcessTime();
+            { char L[128]; int p=0;
+              #define LPD(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
+              LPD("drain probe: idled "); p+=lg_i64(L+p,(long long)(t1-t0));
+              LPD(" us, resuming\n"); L[p]=0; trace_msg(L);
+              #undef LPD }
+        }
+
         uint64_t t_pre_build = sceKernelGetProcessTime();
         struct PM4Builder pm4; pm4_init(&pm4,dcb_mem[bi],DCB_SIZE/4);
 
@@ -2958,7 +2978,8 @@ int main(void) {
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
            clock). If the stall onset correlates with subc -> ring-fill/count
            (fixable). If with ptms only -> pure time-based kernel IRQ death. */
-        if (frame < 30 || (frame % 10) == 0 || (frame >= 450 && frame <= 520)) {
+        if (frame < 30 || (frame % 10) == 0 || (frame >= 450 && frame <= 520)
+            || (frame >= 550 && frame <= 600)) {
             uint64_t now = sceKernelGetProcessTime();
             static uint64_t prev_t = 0;
             uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
