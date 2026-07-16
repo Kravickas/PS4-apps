@@ -2900,25 +2900,17 @@ int main(void) {
             if (wfd == 0) pm4.off += 7;
         }
 
-        uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
-                              vb_v,bg_v,0,floor_v,
-                              vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
-                              fb[bi],depth,0,fence,fv);
-
-        /* shadow_depth clear moved to GPU-side DMA_DATA at start of shadow DCB
-           (pm4_dma_fill). CPU memset was bypassing shadPS4's Vulkan image cache —
-           stale cached pixels from previous frames leaked into the main pass
-           sample, producing ghost silhouettes. */
-
-        /* Build shadow DCB. Shadow VS uses its OWN V# pointing at shadow_vb which
-           contains [light_MVP @ 0][pad][verts copy @ 0x50 = 80]. No MVP swap needed.
-           For huge meshes we skip shadow (shadow_vb alloc fails/skipped). */
+        /* Shadow pass, built into the SAME command buffer, ahead of the main
+           pass. gnm 0x8b0 emits ONE 16-byte IB packet per command buffer
+           (0xc0023f00), so 2 buffers cost 2 IB packets per submit; merging
+           halves that. Semantically identical: the CP already runs a submit's
+           buffers back-to-back, and each builder emits its own hw state.
+           DIAGNOSTIC: if the wall is ring SPACE it should move ~512 -> ~1024
+           submits; if it is a per-submission fence array it stays at 512. */
         uint32_t shadow_sz = 0;
 #if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
         if (shadow_depth && g_shadow_ready) {
-            struct PM4Builder shadow_pm4;
-            pm4_init(&shadow_pm4, shadow_dcb_mem[bi], DCB_SIZE/4);
-            shadow_sz = build_shadow_dcb(&shadow_pm4,
+            shadow_sz = build_shadow_dcb(&pm4,
                                          vs_shadow, ps_shadow_gpu, ps_shadow_clear_gpu,
                                          shadow_vb_v, shadow_floor_v, bg_v, desc,
                                          g_shadow_verts, FLOOR_VERTS,
@@ -2927,20 +2919,19 @@ int main(void) {
         }
 #endif
 
-        /* Submit + flip via the PS4 handshake. The DCB's last 64 dwords are the
-           pm4_prepare_flip marker block (0xc03e1000 + tag 0x68750777); gnm's
-           patcher rewrites it in place: sceVideoOutSubmitEopFlip + WRITE_DATA
-           (label[bi]=1). Plain sceVideoOutSubmitFlip bypasses all of that. */
+        uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
+                              vb_v,bg_v,0,floor_v,
+                              vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
+                              fb[bi],depth,0,fence,fv);
+
+        /* Submit + flip via the PS4 handshake. ONE command buffer (shadow pass
+           merged in above) = one IB packet per submit. The DCB's last 64 dwords
+           are the pm4_prepare_flip marker block (0xc03e1000 + tag 0x68750780);
+           gnm's patcher rewrites it in place into WRITE_DATA(label[bi]=1) + NOP
+           + an interrupt EOP, and calls sceVideoOutSubmitEopFlip. */
         int saf_ret; uint64_t t_saf; uint64_t t_submit;
         int fence_iters = 0; int flip_iters = 0;
-        if (shadow_sz > 0) {
-            const uint32_t *a[2] = { shadow_dcb_mem[bi], dcb_mem[bi] };
-            uint32_t s[2] = { shadow_sz, sz };
-            saf_ret = sceGnmSubmitAndFlipCommandBuffers(2, (void**)a, s, 0, 0,
-                                                        video, bi, 1, (int64_t)frame);
-            t_saf = sceKernelGetProcessTime();
-            sceGnmSubmitDone();
-        } else {
+        {
             const uint32_t *a[1] = { dcb_mem[bi] };
             uint32_t s[1] = { sz };
             saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
