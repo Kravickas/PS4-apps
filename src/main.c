@@ -2899,7 +2899,8 @@ int main(void) {
               #define LPD(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
               LPD("drain probe: idled "); p+=lg_i64(L+p,(long long)(t1-t0));
               LPD(" us, resuming\n"); L[p]=0; trace_msg(L);
-              #undef LPD }
+              #undef LPD
+            }
         }
 
         uint64_t t_pre_build = sceKernelGetProcessTime();
