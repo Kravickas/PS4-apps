@@ -576,6 +576,8 @@ static int g_log_fd = -1;
 static int32_t g_last_event = 0;   /* latest non-zero sceSystemServiceReceiveEvent type */
 static int g_event_count = 0;      /* count of non-zero system events received */
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
+static int g_slow_submits = 0;     /* consecutive submits over 100ms = the wall */
+static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
 
 /* Spin body for the teardown quiesce; the game uses 16 pauses per iteration. */
 static inline void cpu_pause16(void){
@@ -2882,16 +2884,19 @@ int main(void) {
            and DEPTH_CLEAR=1.0f on the first draw — shadPS4 translates this to a Vulkan
            loadOp=Clear on the depth attachment. A CPU linear memset won't work because
            the depth buffer is GPU-tiled. */
-        /* One-shot idle-drain probe. The wall is a hard per-submission limit
-           (proven: halving IB packets per submit moved it 0 frames). Past it we
-           submit ~2/sec and each costs 500ms, so slots free at exactly the rate
-           we consume them - we have never stopped to see if idling recovers.
-           Stop submitting for 10s here and measure the submits right after.
-           Fast after the pause  => the array drains when idle; a burst harness
-                                    (<512 submits, pause, repeat) is viable.
-           Still 500ms           => the process gets 512 submits, total, ever. */
-        if (frame == 560) {
-            trace_msg("drain probe: idling 10s (no submits)\n");
+        /* One-shot idle-drain probe, triggered BY THE STALL, not a frame count.
+           The wall is a hard per-submission limit (proven: halving IB packets
+           per submit moved it 0 frames). Past it we submit ~2/sec and each costs
+           500ms, so slots free at exactly the rate we consume them - we have
+           never stopped to see if idling recovers.
+           Fires 5 slow submits after the onset (~2.5s), stops submitting for
+           10s, then resumes.
+           Fast after the pause => the array drains when idle; a burst harness
+                                   (<512 submits, pause, repeat) is viable.
+           Still 500ms          => the process gets 512 submits, total, ever. */
+        if (g_slow_submits >= 5 && !g_drain_probed) {
+            g_drain_probed = 1;
+            trace_msg("drain probe: stall detected, idling 10s (no submits)\n");
             uint64_t t0 = sceKernelGetProcessTime();
             for (int i = 0; i < 100; i++) sceKernelUsleep(100000);
             uint64_t t1 = sceKernelGetProcessTime();
@@ -2962,6 +2967,11 @@ int main(void) {
         }
         t_submit = sceKernelGetProcessTime();
 
+        /* Wall detector: a healthy submit is 30-60us; past the wall it is ~500ms.
+           Five in a row means we are reliably stalled, which arms the probe. */
+        if ((long long)(t_saf - t_pre_build) > 100000) g_slow_submits++;
+        else g_slow_submits = 0;
+
         /* EOP fence: GPU done with this buffer before we reuse it. */
         for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
         fv++;
@@ -2979,8 +2989,7 @@ int main(void) {
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
            clock). If the stall onset correlates with subc -> ring-fill/count
            (fixable). If with ptms only -> pure time-based kernel IRQ death. */
-        if (frame < 30 || (frame % 10) == 0 || (frame >= 450 && frame <= 520)
-            || (frame >= 550 && frame <= 600)) {
+        if (frame < 30 || (frame % 10) == 0 || (frame >= 450 && frame <= 620)) {
             uint64_t now = sceKernelGetProcessTime();
             static uint64_t prev_t = 0;
             uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
