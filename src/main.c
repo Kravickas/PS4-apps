@@ -22,7 +22,7 @@
 //   6. Result goes to the framebuffer → screen
 //
 // FILE LOADING:
-//   On startup, scans /data/CUBETST00/ for:
+//   On startup, scans /data/ShadCube4/ for:
 //     - Any .obj file → parsed as 3D model (Blender export)
 //     - Any .bmp file → loaded as texture
 //   Falls back to built-in spinning cube + logo texture if nothing found.
@@ -578,6 +578,7 @@ static int g_event_count = 0;      /* count of non-zero system events received *
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
 static int g_slow_submits = 0;     /* consecutive submits over 100ms = the wall */
 static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
+static int g_paced_left = 0;       /* paced-probe frames remaining (600ms cadence) */
 
 /* Spin body for the teardown quiesce; the game uses 16 pauses per iteration. */
 static inline void cpu_pause16(void){
@@ -605,8 +606,8 @@ static int lg_hex(char *o, unsigned long long v){
 /* trace_init: open the log once (WRONLY|CREAT|TRUNC = 0x601), trying several
    paths. Keeps the fd open for the whole run. */
 static void trace_init(void){
-    const char *paths[] = { "/data/trace.log", "/data/CUBETST00/trace.log",
-                            "trace.log", "/mnt/sandbox/BREW00001/data/trace.log", 0 };
+    const char *paths[] = { "/data/trace.log", "/data/ShadCube4/trace.log",
+                            "trace.log", "/mnt/sandbox/SHAD00004/data/trace.log", 0 };
     for (int i=0; paths[i]; i++){
         int fd = sceKernelOpen(paths[i], 0x601, 0x1FF);
         if (fd >= 0){ g_log_fd = fd; return; }
@@ -1909,6 +1910,7 @@ static void loading_progress(int pass, const char *msg, void *ud) {
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
+    g_submit_count++;   /* loading submits count toward any kernel-side budget */
     sceGnmSubmitDone();
     /* Bounded wait (was infinite). If the GPU faults the fence never signals;
        cap the wait so we still reach the main render loop instead of hanging
@@ -1985,7 +1987,7 @@ int main(void) {
     void *tex = 0; int tex_w = LOGO_WIDTH, tex_h = LOGO_HEIGHT;
     {
         BmpTexture bmp;
-        const char *bmp_paths[] = { "/data/CUBETST00/texture.bmp", "/data/CUBETST00/model.bmp", 0 };
+        const char *bmp_paths[] = { "/data/ShadCube4/texture.bmp", "/data/ShadCube4/model.bmp", 0 };
         for (int bi = 0; bmp_paths[bi]; bi++) {
             if (bmp_load(bmp_paths[bi], gpu_alloc, &bmp) == 0) {
                 tex = bmp.pixels; tex_w = bmp.width; tex_h = bmp.height;
@@ -2008,7 +2010,7 @@ int main(void) {
     int floor_tex_w = 1, floor_tex_h = 1;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/CUBETST00/floor_albedo.bmp", gpu_alloc, &bmp) == 0) {
+        if (bmp_load("/data/ShadCube4/floor_albedo.bmp", gpu_alloc, &bmp) == 0) {
             floor_albedo_tex = bmp.pixels;
             floor_tex_w = bmp.width; floor_tex_h = bmp.height;
         }
@@ -2033,7 +2035,7 @@ int main(void) {
     int floor_nrm_w = 1, floor_nrm_h = 1;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/CUBETST00/floor_normal.bmp", gpu_alloc, &bmp) == 0) {
+        if (bmp_load("/data/ShadCube4/floor_normal.bmp", gpu_alloc, &bmp) == 0) {
             floor_normal_tex = bmp.pixels;
             floor_nrm_w = bmp.width; floor_nrm_h = bmp.height;
         }
@@ -2054,7 +2056,7 @@ int main(void) {
     int floor_disp_w = 0, floor_disp_h = 0;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/CUBETST00/floor_displacement.bmp", gpu_alloc, &bmp) == 0) {
+        if (bmp_load("/data/ShadCube4/floor_displacement.bmp", gpu_alloc, &bmp) == 0) {
             floor_disp_tex = bmp.pixels;
             floor_disp_w = bmp.width; floor_disp_h = bmp.height;
             /* Auto-stretch the displacement range to span [0,255]. Many
@@ -2274,12 +2276,12 @@ int main(void) {
     /* --- Load 3D model using obj_loader.h --- */
     {
         static const char *obj_paths[] = {
-            "/data/CUBETST00/model.obj",
-            "/data/CUBETST00/mesh.obj",
-            "/data/CUBETST00/object.obj",
-            "/data/CUBETST00/scene.obj",
-            "/data/CUBETST00/bugatti.obj",
-            "/data/CUBETST00/car.obj",
+            "/data/ShadCube4/model.obj",
+            "/data/ShadCube4/mesh.obj",
+            "/data/ShadCube4/object.obj",
+            "/data/ShadCube4/scene.obj",
+            "/data/ShadCube4/bugatti.obj",
+            "/data/ShadCube4/car.obj",
             0
         };
         struct LoadCtx load_ctx;
@@ -2435,6 +2437,36 @@ int main(void) {
 
     uint32_t frame=0,fv=1;
     int running = 1;
+
+    /* Tell the system we have finished loading, so it tears down its splash
+       screen. Until this is called the system keeps the splash up and keeps
+       compositing it over us. Every real title calls it exactly once -
+       confirmed in a God of War trace ("sceSystemServiceHideSplashScreen:
+       called"). We never have.
+       Why this is the prime suspect: the wall is at a fixed PROCESS TIME, not
+       a submit count. Frame 0 runs at ptms=2183 and the first 500ms submit
+       lands at ptms=11110, no matter how many frames fit between. That is the
+       signature of a startup obligation timing out, not a GPU budget.
+       And the count model is dead regardless: God of War issues ~18 GFX submits
+       per frame (~535/sec) and runs for hours, so no 512-submit budget exists. */
+    int splash_ret = sceSystemServiceHideSplashScreen();
+    { char L[96]; int p=0;
+      const char *m = "HideSplashScreen ret=";
+      while (*m) L[p++] = *m++;
+      p += lg_i64(L+p, (long long)splash_ret);
+      L[p++]='\n'; L[p]=0;
+      trace_msg(L);
+    }
+
+    /* MEASURE the pre-loop submit count - never assume it. */
+    { char L[96]; int p=0;
+      const char *m = "submits before main loop: ";
+      while (*m) L[p++] = *m++;
+      p += lg_i64(L+p, (long long)g_submit_count);
+      L[p++]='\n'; L[p]=0;
+      trace_msg(L);
+    }
+
     /* Event buffer for sceSystemServiceReceiveEvent. SDK struct is large; this
        is a safe over-allocation. We only read the first int32 (eventType). */
     static unsigned char sysevent[8192];
@@ -2906,6 +2938,20 @@ int main(void) {
               LPD(" us, resuming\n"); L[p]=0; trace_msg(L);
               #undef LPD
             }
+            /* 10s idle bought exactly ONE fast submit - that only fits a minimum
+               ~500ms interval between submits (a draining array or refilling
+               bucket would have bought ~20). If so, pacing ABOVE the interval
+               makes every submit instant. Confirm from a second direction. */
+            g_paced_left = 12;
+            trace_msg("paced probe: 12 frames at 600ms cadence\n");
+        }
+
+        /* Paced probe: sleep past the suspected ~500ms minimum interval before
+           each submit. All-fast => minimum-interval model confirmed exactly. */
+        if (g_paced_left > 0) {
+            g_paced_left--;
+            sceKernelUsleep(600000);
+            if (g_paced_left == 0) trace_msg("paced probe: done\n");
         }
 
         uint64_t t_pre_build = sceKernelGetProcessTime();

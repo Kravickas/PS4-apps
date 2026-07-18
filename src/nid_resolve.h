@@ -54,6 +54,11 @@ extern int sceVideoOutClose(int);
    The event struct is large (8192-byte SDK layout); we only read eventType,
    the first int32. ReceiveEvent returns 0 when an event was dequeued. */
 extern int sceSystemServiceReceiveEvent(void* event);
+
+/* Tells the system the app has finished loading, so it tears down the system
+   splash screen. Every real title calls this once; we never did. Until it is
+   called the system keeps compositing its own splash over us. */
+extern int sceSystemServiceHideSplashScreen(void);
 /* Event-driven flip pacing: register a flip event queue at startup and block on
    it each frame until the flip completes (canonical PS4 vsync pacing). */
 typedef uint64_t OrbisKernelEqueue;
