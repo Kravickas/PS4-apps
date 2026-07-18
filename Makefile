@@ -4,10 +4,10 @@
 # ============================================================================
 
 # ---- Package identity (fixed) ----
-TITLE       := Homebrew Template
+TITLE       := ShadCube4
 VERSION     := 01.00
-TITLE_ID    := BREW00001
-CONTENT_ID  := IV0000-BREW00001_00-HOMEBREW00000000
+TITLE_ID    := SHAD00004
+CONTENT_ID  := IV0000-SHAD00004_00-SHADCUBE40000000
 
 EXTRAFLAGS  :=
 
@@ -66,7 +66,7 @@ $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 
 eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3800000000000011
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@
