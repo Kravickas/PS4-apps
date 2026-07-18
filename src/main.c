@@ -3000,16 +3000,19 @@ int main(void) {
            thread. If the 500ms wall was the marker/EOP flip ack never arriving,
            this path removes it. submit= and flip= are timed separately so the
            trace shows exactly which call (if any) still blocks. */
-        int saf_ret; uint64_t t_saf; uint64_t t_submit;
+        int saf_ret; uint64_t t_saf; uint64_t t_submit; uint64_t t_ioctl0;
         int fence_iters = 0; int flip_iters = 0;
         {
             const uint32_t *a[1] = { dcb_mem[bi] };
             uint32_t s[1] = { sz };
+            t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
             saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
             t_saf = sceKernelGetProcessTime();
             sceGnmSubmitDone();
         }
         t_submit = sceKernelGetProcessTime();
+        long long d_ioctl = (long long)(t_saf - t_ioctl0);   /* JUST the kernel submit */
+        long long d_build = (long long)(t_ioctl0 - t_pre_build); /* JUST build_dcb (CPU) */
 
         /* EOP fence: GPU done rendering fb[bi] before we flip it. */
         for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
@@ -3052,6 +3055,8 @@ int main(void) {
             LP(" evt="); p+=lg_i64(L+p,d_evt);
             LP(" pad="); p+=lg_i64(L+p,d_pad);
             LP(" submit="); p+=lg_i64(L+p,d_saft);
+            LP(" build="); p+=lg_i64(L+p,d_build);
+            LP(" ioctl="); p+=lg_i64(L+p,d_ioctl);
             LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
