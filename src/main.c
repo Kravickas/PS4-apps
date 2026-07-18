@@ -240,7 +240,10 @@ static uint32_t* pm4_eop(uint32_t* p, volatile uint32_t* fence_addr, uint32_t fe
 #define CHAIN_N 20
 #define FENCE_DONE 0x00C0FFEE
 
-enum { R_FENCE = 0, R_MARK0 = 1, R_SLOTS = CHAIN_N + 8 };
+/* R_FENCE, then N marker slots, then N-1 poison slots (one per non-last buffer,
+ * written AFTER that buffer's chain IB — reachable only if the CP wrongly
+ * continues parsing the buffer after the chain). */
+enum { R_FENCE = 0, R_MARK0 = 1, R_POISON0 = R_MARK0 + CHAIN_N, R_SLOTS = R_POISON0 + CHAIN_N };
 
 static volatile uint32_t* g_res;
 static uint32_t* g_bufs[CHAIN_N];
@@ -272,17 +275,23 @@ static void test_deep_chain(void) {
         uint32_t* b = g_bufs[i];
         uint32_t* p = b;
         p = pm4_write_dword(p, &g_res[R_MARK0 + i], 0xC0DE0000u | (uint32_t)i);
-        if (i == CHAIN_N - 1)
+        if (i == CHAIN_N - 1) {
             p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE); /* final buffer ends the submission */
-        else
+        } else {
             p = pm4_indirect_buffer(p, g_bufs[i + 1], g_buf_dw[i + 1], /*chain=*/1, /*valid=*/1,
                                     /*vmid=*/0);
+            /* Poison write AFTER the chain IB. On a stackless jump the CP transfers
+             * at the IB and never reaches this. Only a CP (or emulator) that
+             * returns and keeps parsing the buffer executes it. */
+            p = pm4_write_dword(p, &g_res[R_POISON0 + i], 0xDEAD0000u | (uint32_t)i);
+        }
         g_buf_dw[i] = (uint32_t)(p - b);
     }
 
     /* Dump the first two and the last buffer so a wrong encoding is visible. */
-    log_line("  buf[0] (%u dw): %08x %08x %08x %08x %08x %08x", g_buf_dw[0], g_bufs[0][0],
-             g_bufs[0][1], g_bufs[0][2], g_bufs[0][3], g_bufs[0][4], g_bufs[0][5]);
+    log_line("  buf[0] (%u dw): %08x %08x %08x %08x %08x %08x %08x %08x %08x", g_buf_dw[0],
+             g_bufs[0][0], g_bufs[0][1], g_bufs[0][2], g_bufs[0][3], g_bufs[0][4], g_bufs[0][5],
+             g_bufs[0][9], g_bufs[0][10], g_bufs[0][13]);
     log_line("  buf[%u] last (%u dw): %08x %08x %08x %08x %08x %08x", (uint32_t)(CHAIN_N - 1),
              g_buf_dw[CHAIN_N - 1], g_bufs[CHAIN_N - 1][0], g_bufs[CHAIN_N - 1][1],
              g_bufs[CHAIN_N - 1][2], g_bufs[CHAIN_N - 1][3], g_bufs[CHAIN_N - 1][4],
@@ -300,18 +309,30 @@ static void test_deep_chain(void) {
             first_missing = i;
     }
 
-    log_line("  fence=%08x (want %08x) markers_written=%u/%u first_missing=%u", g_res[R_FENCE],
-             (uint32_t)FENCE_DONE, written, (uint32_t)CHAIN_N, first_missing);
+    uint32_t poison = 0;
+    for (uint32_t i = 0; i < CHAIN_N - 1; i++) {
+        if (g_res[R_POISON0 + i] == (0xDEAD0000u | i))
+            poison++;
+    }
+
+    log_line("  fence=%08x (want %08x) markers=%u/%u first_missing=%u poison=%u/%u", g_res[R_FENCE],
+             (uint32_t)FENCE_DONE, written, (uint32_t)CHAIN_N, first_missing, poison,
+             (uint32_t)(CHAIN_N - 1));
 
     if (timed_out) {
         log_line("  RESULT: TIMEOUT after %u markers — chain did not complete", written);
         return;
     }
-    if (written == CHAIN_N)
-        log_line("  RESULT: all %u executed -> chain=1 is a stackless JUMP (matches hardware)",
+    if (written != CHAIN_N) {
+        log_line("  RESULT: chain broke at depth %u -> not a stackless jump", first_missing);
+        return;
+    }
+    if (poison == 0)
+        log_line("  RESULT: all %u ran, 0 poison -> chain=1 is a stackless JUMP (no return)",
                  (uint32_t)CHAIN_N);
     else
-        log_line("  RESULT: chain broke at depth %u -> not a stackless jump", first_missing);
+        log_line("  RESULT: all %u ran, %u poison -> CP RETURNED and kept parsing after the chain",
+                 (uint32_t)CHAIN_N, poison);
 }
 
 /* ---- entry --------------------------------------------------------------- */
