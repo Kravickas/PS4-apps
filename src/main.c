@@ -123,7 +123,7 @@
         requires CB_COLOR_ATTRIB additions and matching T# tile_mode. */
 #define SHADOW_W        4096
 #define SHADOW_H        4096
-#define NUM_FRAMES      2
+#define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
 #define BG_VERTS        6
 #define CUBE_VERTS      36
@@ -985,7 +985,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     void *vb_base, uint32_t *desc, int model_verts, unsigned long vb_total,
     uint32_t *ib_ptr, int num_indices, int is_indexed,
     void *color, void *depth, void *shadow_depth,
-    volatile uint32_t *fence, uint32_t fv) {
+    volatile uint32_t *fence, uint32_t fv, int no_flip) {
 
     /* Default hardware-state init (sceGnmDrawInitDefaultHardwareState equivalent).
        Required on real PS4 — without it context registers are undefined and the
@@ -1231,7 +1231,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Bisect: stop after BG/sky draw. If the sky gradient renders, the
        render-target setup + VS/PS pipeline work; problem is in a later draw. */
     pm4_event_write_eop(b,fence,fv);
-    pm4_prepare_flip(b);   /* must be the LAST 64 dwords (flip handshake) */
+    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
     return b->off*4;
 #endif
 
@@ -1263,7 +1263,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
 #if defined(DRAW_STOP) && DRAW_STOP <= 2
     /* Bisect: stop after floor draw (BG + floor, no cube). */
     pm4_event_write_eop(b,fence,fv);
-    pm4_prepare_flip(b);   /* last 64 dwords (flip handshake) */
+    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
     return b->off*4;
 #endif
 
@@ -1292,7 +1292,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     }
 
     pm4_event_write_eop(b,fence,fv);
-    pm4_prepare_flip(b);   /* last 64 dwords (flip handshake) */
+    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
     return b->off*4;
 }
 
@@ -1906,7 +1906,7 @@ static void loading_progress(int pass, const char *msg, void *ud) {
     uint32_t sz = build_dcb(&pm4, c->vs, c->ps_blue, c->ps_dark, 0, 0,
                             c->vb_v, c->bg_v, 0, 0,
                             c->vb, c->desc, 6, VERT_BUF_SIZE, 0, 0, 0,
-                            bi ? c->fb1 : c->fb0, c->depth, 0, c->fence, fv);
+                            bi ? c->fb1 : c->fb0, c->depth, 0, c->fence, fv, 0);
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
@@ -2963,14 +2963,10 @@ int main(void) {
         uint32_t lab_pre = label_ok ?
             ((volatile uint32_t*)flip_label_base)[bi*2] : 0xffffffffu;
 
-        /* GPU waits for buffer bi's previous flip before rendering into it.
-           A real game emits this every frame; we never have. Safe: the labels
-           are confirmed to return to 0, so the wait always retires. */
+        /* InsertWaitFlipDone is part of the marker/label protocol, which the
+           CPU-flip path below does not use. The EOP fence wait + flip-event
+           pace handle buffer-release ordering instead. Disabled for this test. */
         int wfd = -1;
-        if (label_ok && pm4.off + 7 <= pm4.cap) {
-            wfd = sceGnmInsertWaitFlipDone(pm4.buf + pm4.off, 7, video, bi);
-            if (wfd == 0) pm4.off += 7;
-        }
 
         /* Shadow pass, built into the SAME command buffer, ahead of the main
            pass. gnm 0x8b0 emits ONE 16-byte IB packet per command buffer
@@ -2994,43 +2990,48 @@ int main(void) {
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
-                              fb[bi],depth,0,fence,fv);
+                              fb[bi],depth,0,fence,fv,1 /* no_flip: CPU flip below */);
 
-        /* Submit + flip via the PS4 handshake. ONE command buffer (shadow pass
-           merged in above) = one IB packet per submit. The DCB's last 64 dwords
-           are the pm4_prepare_flip marker block (0xc03e1000 + tag 0x68750780);
-           gnm's patcher rewrites it in place into WRITE_DATA(label[bi]=1) + NOP
-           + an interrupt EOP, and calls sceVideoOutSubmitEopFlip. */
+        /* CPU-flip path (is_eop=FALSE). Submit the DCB with NO flip marker via
+           plain sceGnmSubmitCommandBuffers, wait the EOP fence so the GPU has
+           finished rendering into fb[bi], then queue the flip from the CPU with
+           sceVideoOutSubmitFlip. This does NOT depend on the marker EOP GfxFlip
+           IRQ firing - the flip is queued by the CPU call and run by the GPU
+           thread. If the 500ms wall was the marker/EOP flip ack never arriving,
+           this path removes it. submit= and flip= are timed separately so the
+           trace shows exactly which call (if any) still blocks. */
         int saf_ret; uint64_t t_saf; uint64_t t_submit;
         int fence_iters = 0; int flip_iters = 0;
         {
             const uint32_t *a[1] = { dcb_mem[bi] };
             uint32_t s[1] = { sz };
-            saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
-                                                        video, bi, 1, (int64_t)frame);
+            saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
             t_saf = sceKernelGetProcessTime();
             sceGnmSubmitDone();
         }
         t_submit = sceKernelGetProcessTime();
 
-        /* Wall detector: a healthy submit is 30-60us; past the wall it is ~500ms.
-           Five in a row means we are reliably stalled, which arms the probe. */
-        if ((long long)(t_saf - t_pre_build) > 100000) g_slow_submits++;
-        else g_slow_submits = 0;
-
-        /* EOP fence: GPU done with this buffer before we reuse it. */
+        /* EOP fence: GPU done rendering fb[bi] before we flip it. */
         for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
         fv++;
 
-        /* NO flip-equeue wait. The game registers a flip event but never calls
-           sceKernelWaitEqueue (verified: 0 call sites in its eboot); it paces on
-           the GPU EOP label. Pacing here comes from InsertWaitFlipDone gating the
-           GPU on buffer bi's previous flip, so this frame's EOP cannot retire
-           until that flip completed - the fence wait above is the pace. Blocking
-           on the flip equeue is suspected of consuming the flip-knote wakeup the
-           sceVideoOut reaper needs, dropping it to its 500ms fallback. */
+        /* CPU flip (is_eop=FALSE). flipMode=1, flipArg=frame. */
+        uint64_t t_flip0 = sceKernelGetProcessTime();
+        int flip_ret = sceVideoOutSubmitFlip(video, bi, 1, (int64_t)frame);
+        uint64_t t_flip1 = sceKernelGetProcessTime();
+        long long d_flip = (long long)(t_flip1 - t_flip0);
 
+        /* Wall detector: healthy submit is 30-60us; past the wall ~500ms. */
+        if ((long long)(t_saf - t_pre_build) > 100000 || d_flip > 100000) g_slow_submits++;
+        else g_slow_submits = 0;
         g_submit_count++;
+
+        /* Pace on the flip event (the CPU flip does not block on vblank). */
+        if (flip_ev_ok) {
+            struct kevent_t ev; int out=0;
+            sceKernelWaitEqueue(flip_eq, &ev, 1, &out, 0);
+            flip_iters = out;
+        }
 
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
            clock). If the stall onset correlates with subc -> ring-fill/count
@@ -3051,6 +3052,7 @@ int main(void) {
             LP(" evt="); p+=lg_i64(L+p,d_evt);
             LP(" pad="); p+=lg_i64(L+p,d_pad);
             LP(" submit="); p+=lg_i64(L+p,d_saft);
+            LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
