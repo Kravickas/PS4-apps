@@ -31,9 +31,8 @@ extern int32_t sceGnmSubmitDone(void);
 
 /* verified constants */
 #define PROT_CPU_RW 0x03
-#define PROT_GPU_RW 0x30 /* GPU_READ 0x10 | GPU_WRITE 0x20 */
-#define MEM_WB_ONION 0x0 /* CPU+GPU coherent — required for CPU readback */
-#define MEM_WC_GARLIC 0x3
+#define PROT_GPU_RW 0x30   /* GPU_READ 0x10 | GPU_WRITE 0x20 */
+#define MEM_TYPE_FLEX 0x03 /* memoryType arg, matches proven-working ShadCube4 */
 
 #define O_WRONLY 0x0001
 #define O_CREAT 0x0200
@@ -138,16 +137,48 @@ static void log_progress(const char* stage, int idx) {
 }
 
 /* ---- GPU memory allocation ----------------------------------------------- */
-static void* gpu_alloc(uint64_t size, uint64_t align) {
-    size = (size + 0x3FFF) & ~0x3FFFull; /* 16 KiB page round-up */
+/* One direct-memory block, carved into sub-allocations. A single Allocate+Map
+ * pair instead of 17 — fewer failure modes, one contiguous GPU-visible region. */
+static uint8_t* g_pool = NULL;
+static uint64_t g_pool_off = 0;
+static uint64_t g_pool_size = 0;
+
+static int gpu_pool_init(uint64_t total) {
+    const uint64_t page = 0x4000; /* 16 KiB PS4 direct-memory page/alignment unit */
+    total = (total + (page - 1)) & ~(page - 1);
     off_t phys = 0;
-    if (sceKernelAllocateDirectMemory(0, 0x100000000ull, size, align < 0x4000 ? 0x4000 : align,
-                                      MEM_WB_ONION, &phys) != 0)
-        return NULL;
+    /* Args match the proven-working ShadCube4 allocator: search the full 24 GiB
+     * direct-memory range and request memory type 0x03 (write-combining). */
+    int32_t r = sceKernelAllocateDirectMemory(0, 0x600000000ull, total, page, MEM_TYPE_FLEX, &phys);
+    if (r != 0) {
+        log_line("  pool: AllocateDirectMemory failed rc=0x%x size=0x%x", (uint32_t)r,
+                 (uint32_t)total);
+        return 0;
+    }
     void* addr = NULL;
-    if (sceKernelMapDirectMemory(&addr, size, PROT_CPU_RW | PROT_GPU_RW, 0, phys, align) != 0)
+    r = sceKernelMapDirectMemory(&addr, total, PROT_CPU_RW | PROT_GPU_RW, 0, phys, page);
+    if (r != 0) {
+        log_line("  pool: MapDirectMemory failed rc=0x%x phys_lo=0x%x phys_hi=0x%x", (uint32_t)r,
+                 (uint32_t)(uint64_t)phys, (uint32_t)((uint64_t)phys >> 32));
+        return 0;
+    }
+    g_pool = (uint8_t*)addr;
+    g_pool_off = 0;
+    g_pool_size = total;
+    log_line("  pool: mapped 0x%x bytes at %x (phys_lo 0x%x)", (uint32_t)total,
+             (uint32_t)(uintptr_t)addr, (uint32_t)(uint64_t)phys);
+    return 1;
+}
+
+static void* gpu_alloc(uint64_t size, uint64_t align) {
+    if (align < 4)
+        align = 4;
+    g_pool_off = (g_pool_off + (align - 1)) & ~(align - 1);
+    if (!g_pool || g_pool_off + size > g_pool_size)
         return NULL;
-    return addr;
+    void* p = g_pool + g_pool_off;
+    g_pool_off += size;
+    return p;
 }
 
 /* ---- PM4 ----------------------------------------------------------------- */
@@ -389,6 +420,15 @@ int main(void) {
     log_open();
     log_line("=== IB chain tests: submitted DCB executes as IB1 (verified by disasm) ===");
 
+    /* 1 result block + 16 command buffers, each 16 KiB-carved; one page each is
+     * plenty (largest test is 19 dwords). Pad generously. */
+    if (!gpu_pool_init(64 * 1024 + 16 * 4 * 1024)) {
+        log_line("FATAL: gpu pool init failed");
+        if (g_fd >= 0)
+            sceKernelClose(g_fd);
+        return 1;
+    }
+
     g_res = (volatile uint32_t*)gpu_alloc(R_SLOTS * 4, 256);
     int alloc_ok = (g_res != NULL);
     for (int i = 0; i < 16; i++) {
@@ -397,7 +437,7 @@ int main(void) {
             alloc_ok = 0;
     }
     if (!alloc_ok) {
-        log_line("FATAL: gpu_alloc failed");
+        log_line("FATAL: gpu_alloc carve failed");
         if (g_fd >= 0)
             sceKernelClose(g_fd);
         return 1;
