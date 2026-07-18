@@ -187,6 +187,7 @@ static void* gpu_alloc(uint64_t size, uint64_t align) {
 #define IT_NOP 0x10
 #define IT_WRITE_DATA 0x37
 #define IT_INDIRECT_BUFFER 0x3F
+#define IT_EVENT_WRITE_EOP 0x47
 
 static uint32_t* pm4_write_dword(uint32_t* p, volatile uint32_t* dst, uint32_t val) {
     const uint64_t a = (uint64_t)(uintptr_t)dst;
@@ -208,231 +209,127 @@ static uint32_t* pm4_indirect_buffer(uint32_t* p, const uint32_t* target, uint32
     return p;
 }
 
-/* ---- result block -------------------------------------------------------- */
-enum {
-    R_A_MARKER = 0,
-    R_B_MARKER = 1,
-    R_A_TRAILING = 2,
-    R_DONE_B = 3,
-    R_DONE_A = 4,
-    R_CHAIN0 = 5,
-    R_SLOTS = 32
-};
+/* EVENT_WRITE_EOP: 6 dwords total. Encoding proven in ShadCube4.
+ * CACHE_FLUSH_TS(event 0x04), event_index=5; data_sel=1 (Data32), int_sel=0
+ * (CPU-polled fence, no IRQ). Writes fence_value to fence_addr, ends submission.
+ */
+static uint32_t* pm4_eop(uint32_t* p, volatile uint32_t* fence_addr, uint32_t fence_value) {
+    const uint64_t a = (uint64_t)(uintptr_t)fence_addr;
+    *p++ = PM4_TYPE3(IT_EVENT_WRITE_EOP, 6);
+    *p++ = 0x0504u;
+    *p++ = (uint32_t)(a & 0xFFFFFFFFu);
+    *p++ = (uint32_t)(a >> 32) | 0x20000000u;
+    *p++ = fence_value;
+    *p++ = 0;
+    return p;
+}
+
+/* ---- result block --------------------------------------------------------
+ * A deep chain of N buffers, each writing its index, the last ending in EOP.
+ * This is a VALID, always-terminating command stream — exactly how a game
+ * builds a chained submission. It cannot hang on correct hardware.
+ *
+ * On a CP where chain=1 is a stackless JUMP (the real Liverpool behaviour), all
+ * N buffers execute and all N markers are written, regardless of depth — this
+ * is what RDR2 does at depth 65. If chain=1 were a call/IB2, the CP (which has
+ * no IB3) could not descend past depth 2 and the chain would break early, so
+ * only the first few markers would be written.
+ *
+ * The result is a single integer: how many of the N markers were written.
+ */
+#define CHAIN_N 20
+#define FENCE_DONE 0x00C0FFEE
+
+enum { R_FENCE = 0, R_MARK0 = 1, R_SLOTS = CHAIN_N + 8 };
 
 static volatile uint32_t* g_res;
-static uint32_t* g_bufs[16];
-static uint32_t g_buf_dw[16];
+static uint32_t* g_bufs[CHAIN_N];
+static uint32_t g_buf_dw[CHAIN_N];
 
-static void res_clear(void) {
-    for (int i = 0; i < R_SLOTS; i++)
-        g_res[i] = 0;
-}
-static void dump_buf(const char* name, const uint32_t* b, uint32_t dw) {
-    log_line("  %s (%u dw):", name, dw);
-    for (uint32_t i = 0; i < dw; i += 4)
-        log_line("    +%02u: %08x %08x %08x %08x", i, b[i], (i + 1 < dw) ? b[i + 1] : 0,
-                 (i + 2 < dw) ? b[i + 2] : 0, (i + 3 < dw) ? b[i + 3] : 0);
-}
-static int submit_and_wait(uint32_t* dcb, uint32_t dcb_dw, volatile uint32_t* done_flag) {
+static int submit_and_wait(uint32_t* dcb, uint32_t dcb_dw, volatile uint32_t* fence,
+                           uint32_t want) {
     void* a[1] = {dcb};
     uint32_t s[1] = {dcb_dw * 4};
     sceGnmSubmitCommandBuffers(1, a, s, NULL, NULL);
     sceGnmSubmitDone();
-    for (int w = 0; w < 100000; w++) {
-        if (*done_flag)
-            break;
+    for (int w = 0; w < 200000; w++) { /* ~2 s */
+        if (*fence == want)
+            return 0;
         sceKernelUsleep(10);
     }
-    if (!*done_flag)
-        return 1;
-    sceKernelUsleep(50000);
-    return 0;
-}
-static void report(const char* name) {
-    log_line("  slots: A=%08x B=%08x TRAILING=%08x done_b=%u done_a=%u", g_res[R_A_MARKER],
-             g_res[R_B_MARKER], g_res[R_A_TRAILING], g_res[R_DONE_B], g_res[R_DONE_A]);
-    if (g_res[R_A_TRAILING] == 0 && g_res[R_DONE_A] == 0)
-        log_line("  VERDICT %s: CP did NOT return -> chain is a JUMP", name);
-    else if (g_res[R_A_TRAILING] == 0xDEAD0001)
-        log_line("  VERDICT %s: CP DID return -> chain behaves as a CALL", name);
-    else
-        log_line("  VERDICT %s: INDETERMINATE", name);
+    return 1; /* timeout */
 }
 
-/* ---- tests --------------------------------------------------------------- */
-static void test1_chain_no_return(void) {
-    log_line("TEST 1: chain=1 does not return (IB1 -> IB1)");
-    res_clear();
-    uint32_t *B = g_bufs[1], *p = B;
-    p = pm4_write_dword(p, &g_res[R_B_MARKER], 0xBBBBBBBB);
-    p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
-    g_buf_dw[1] = (uint32_t)(p - B);
+/* ---- the test ------------------------------------------------------------ */
+static void test_deep_chain(void) {
+    log_line("TEST: %u-deep chain=1, last buffer EOPs (simulates a game chain)", (uint32_t)CHAIN_N);
 
-    uint32_t* A = g_bufs[0];
-    p = A;
-    p = pm4_write_dword(p, &g_res[R_A_MARKER], 0xAAAAAAAA);
-    p = pm4_indirect_buffer(p, B, g_buf_dw[1], 1, 1, 0);
-    p = pm4_write_dword(p, &g_res[R_A_TRAILING], 0xDEAD0001); /* unreachable if jump */
-    p = pm4_write_dword(p, &g_res[R_DONE_A], 1);
-    g_buf_dw[0] = (uint32_t)(p - A);
+    for (int i = 0; i < R_SLOTS; i++)
+        g_res[i] = 0;
 
-    dump_buf("A", A, g_buf_dw[0]);
-    dump_buf("B", B, g_buf_dw[1]);
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_B]))
-        log_line("  TIMEOUT - CP did not reach B");
-    else
-        report("1");
-}
-
-static void test2_chain0_returns(void) {
-    log_line("TEST 2: chain=0 launches IB2 and returns");
-    res_clear();
-    uint32_t *B = g_bufs[1], *p = B;
-    p = pm4_write_dword(p, &g_res[R_B_MARKER], 0xBBBBBBBB);
-    p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
-    g_buf_dw[1] = (uint32_t)(p - B);
-
-    uint32_t* A = g_bufs[0];
-    p = A;
-    p = pm4_write_dword(p, &g_res[R_A_MARKER], 0xAAAAAAAA);
-    p = pm4_indirect_buffer(p, B, g_buf_dw[1], 0, 1, 0);
-    p = pm4_write_dword(p, &g_res[R_A_TRAILING], 0xDEAD0001); /* reachable: IB2 returns */
-    p = pm4_write_dword(p, &g_res[R_DONE_A], 1);
-    g_buf_dw[0] = (uint32_t)(p - A);
-
-    /* On the CALL path done_a is the last write, so poll it directly instead of
-     * relying on the post-wait sleep. */
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_A]))
-        log_line("  TIMEOUT - IB2 did not return (unexpected for chain=0)");
-    else
-        report("2");
-}
-
-static void test3_deep_chain(void) {
-    log_line("TEST 3: 10-deep chain (chain=1 each)");
-    res_clear();
-    const int N = 10;
-    for (int i = N - 1; i >= 0; i--) {
-        uint32_t *b = g_bufs[i], *p = b;
-        p = pm4_write_dword(p, &g_res[R_CHAIN0 + i], 0xC0DE0000u | (uint32_t)i);
-        if (i == N - 1)
-            p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
+    /* Build last -> first so each buffer knows its successor's address+size. */
+    for (int i = CHAIN_N - 1; i >= 0; i--) {
+        uint32_t* b = g_bufs[i];
+        uint32_t* p = b;
+        p = pm4_write_dword(p, &g_res[R_MARK0 + i], 0xC0DE0000u | (uint32_t)i);
+        if (i == CHAIN_N - 1)
+            p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE); /* final buffer ends the submission */
         else
-            p = pm4_indirect_buffer(p, g_bufs[i + 1], g_buf_dw[i + 1], 1, 1, 0);
+            p = pm4_indirect_buffer(p, g_bufs[i + 1], g_buf_dw[i + 1], /*chain=*/1, /*valid=*/1,
+                                    /*vmid=*/0);
         g_buf_dw[i] = (uint32_t)(p - b);
     }
-    if (submit_and_wait(g_bufs[0], g_buf_dw[0], &g_res[R_DONE_B])) {
-        log_line("  TIMEOUT - deep chain hung");
+
+    /* Dump the first two and the last buffer so a wrong encoding is visible. */
+    log_line("  buf[0] (%u dw): %08x %08x %08x %08x %08x %08x", g_buf_dw[0], g_bufs[0][0],
+             g_bufs[0][1], g_bufs[0][2], g_bufs[0][3], g_bufs[0][4], g_bufs[0][5]);
+    log_line("  buf[%u] last (%u dw): %08x %08x %08x %08x %08x %08x", (uint32_t)(CHAIN_N - 1),
+             g_buf_dw[CHAIN_N - 1], g_bufs[CHAIN_N - 1][0], g_bufs[CHAIN_N - 1][1],
+             g_bufs[CHAIN_N - 1][2], g_bufs[CHAIN_N - 1][3], g_bufs[CHAIN_N - 1][4],
+             g_bufs[CHAIN_N - 1][5]);
+
+    int timed_out = submit_and_wait(g_bufs[0], g_buf_dw[0], &g_res[R_FENCE], FENCE_DONE);
+
+    uint32_t written = 0;
+    uint32_t first_missing = CHAIN_N;
+    for (uint32_t i = 0; i < CHAIN_N; i++) {
+        uint32_t want = 0xC0DE0000u | i;
+        if (g_res[R_MARK0 + i] == want)
+            written++;
+        else if (first_missing == CHAIN_N)
+            first_missing = i;
+    }
+
+    log_line("  fence=%08x (want %08x) markers_written=%u/%u first_missing=%u", g_res[R_FENCE],
+             (uint32_t)FENCE_DONE, written, (uint32_t)CHAIN_N, first_missing);
+
+    if (timed_out) {
+        log_line("  RESULT: TIMEOUT after %u markers — chain did not complete", written);
         return;
     }
-    int ok = 1;
-    for (int i = 0; i < N; i++) {
-        uint32_t want = 0xC0DE0000u | (uint32_t)i;
-        log_line("  depth %2u: %08x %s", (uint32_t)i, g_res[R_CHAIN0 + i],
-                 g_res[R_CHAIN0 + i] == want ? "ok" : "MISSING");
-        if (g_res[R_CHAIN0 + i] != want)
-            ok = 0;
-    }
-    log_line("  VERDICT 3: %s",
-             ok ? "all 10 executed -> stackless JUMP" : "chain broke before depth 10");
-}
-
-static void test4_trailing_bytes(uint32_t filler, const char* what) {
-    log_line("TEST: chain=1 followed by %s", what);
-    res_clear();
-    uint32_t *B = g_bufs[1], *p = B;
-    p = pm4_write_dword(p, &g_res[R_B_MARKER], 0xBBBBBBBB);
-    p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
-    g_buf_dw[1] = (uint32_t)(p - B);
-
-    uint32_t* A = g_bufs[0];
-    p = A;
-    p = pm4_write_dword(p, &g_res[R_A_MARKER], 0xAAAAAAAA);
-    p = pm4_indirect_buffer(p, B, g_buf_dw[1], 1, 1, 0);
-    for (int i = 0; i < 8; i++)
-        *p++ = filler;
-    g_buf_dw[0] = (uint32_t)(p - A);
-
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_B]))
-        log_line("  TIMEOUT / fault - CP parsed the trailing %s", what);
+    if (written == CHAIN_N)
+        log_line("  RESULT: all %u executed -> chain=1 is a stackless JUMP (matches hardware)",
+                 (uint32_t)CHAIN_N);
     else
-        log_line("  OK - B ran (B=%08x), trailing %s never parsed", g_res[R_B_MARKER], what);
-}
-
-/* bad paths — may hang; progress is flushed before each */
-static void test7_valid_zero(void) {
-    log_line("TEST 7 [BAD PATH]: IB valid=0");
-    res_clear();
-    uint32_t *B = g_bufs[1], *p = B;
-    p = pm4_write_dword(p, &g_res[R_B_MARKER], 0xBBBBBBBB);
-    p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
-    g_buf_dw[1] = (uint32_t)(p - B);
-    uint32_t* A = g_bufs[0];
-    p = A;
-    p = pm4_indirect_buffer(p, B, g_buf_dw[1], 1, 0, 0);
-    g_buf_dw[0] = (uint32_t)(p - A);
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_B]))
-        log_line("  RESULT: valid=0 -> IB NOT executed (or hung)");
-    else
-        log_line("  RESULT: valid=0 -> executed anyway (B=%08x)", g_res[R_B_MARKER]);
-}
-static void test8_size_zero(void) {
-    log_line("TEST 8 [BAD PATH]: IB ib_size=0");
-    res_clear();
-    uint32_t *A = g_bufs[0], *p = A;
-    p = pm4_indirect_buffer(p, g_bufs[1], 0, 1, 1, 0);
-    p = pm4_write_dword(p, &g_res[R_A_TRAILING], 0xDEAD0008);
-    p = pm4_write_dword(p, &g_res[R_DONE_A], 1);
-    g_buf_dw[0] = (uint32_t)(p - A);
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_A]))
-        log_line("  RESULT: ib_size=0 -> hung or stalled");
-    else
-        log_line("  RESULT: ib_size=0 -> survived, trailing=%08x", g_res[R_A_TRAILING]);
-}
-__attribute__((unused)) static void test9_ib3_hang(void) {
-    log_line("TEST 9 [DESTRUCTIVE]: IB3 attempt - expected HANG");
-    res_clear();
-    uint32_t *C = g_bufs[2], *p = C;
-    p = pm4_write_dword(p, &g_res[R_B_MARKER], 0xCCCCCCCC);
-    p = pm4_write_dword(p, &g_res[R_DONE_B], 1);
-    g_buf_dw[2] = (uint32_t)(p - C);
-    uint32_t* B = g_bufs[1];
-    p = B;
-    p = pm4_indirect_buffer(p, C, g_buf_dw[2], 0, 1, 0);
-    g_buf_dw[1] = (uint32_t)(p - B);
-    uint32_t* A = g_bufs[0];
-    p = A;
-    p = pm4_indirect_buffer(p, B, g_buf_dw[1], 0, 1, 0);
-    g_buf_dw[0] = (uint32_t)(p - A);
-    if (submit_and_wait(A, g_buf_dw[0], &g_res[R_DONE_B]))
-        log_line("  RESULT: HUNG as documented - CP has no IB3");
-    else
-        log_line("  RESULT: IB3 executed (C=%08x) - CP DOES support IB3", g_res[R_B_MARKER]);
+        log_line("  RESULT: chain broke at depth %u -> not a stackless jump", first_missing);
 }
 
 /* ---- entry --------------------------------------------------------------- */
-/* Set to 1 only for the destructive IB3 run (expect to reboot the console). */
-#ifndef RUN_DESTRUCTIVE
-#define RUN_DESTRUCTIVE 0
-#endif
-
 int main(void) {
     log_open();
-    log_line("=== IB chain tests: submitted DCB executes as IB1 (verified by disasm) ===");
+    log_line("=== IB deep-chain test: valid always-terminating stream (DCB is IB1) ===");
 
-    /* 1 result block + 16 command buffers, each 16 KiB-carved; one page each is
-     * plenty (largest test is 19 dwords). Pad generously. */
-    if (!gpu_pool_init(64 * 1024 + 16 * 4 * 1024)) {
+    /* One pooled block; result slots + CHAIN_N command buffers carved from it. */
+    if (!gpu_pool_init(64 * 1024 + CHAIN_N * 4 * 1024)) {
         log_line("FATAL: gpu pool init failed");
         if (g_fd >= 0)
             sceKernelClose(g_fd);
         return 1;
     }
-
     g_res = (volatile uint32_t*)gpu_alloc(R_SLOTS * 4, 256);
     int alloc_ok = (g_res != NULL);
-    for (int i = 0; i < 16; i++) {
-        g_bufs[i] = (uint32_t*)gpu_alloc(256 * 4, 256);
+    for (int i = 0; i < CHAIN_N; i++) {
+        g_bufs[i] = (uint32_t*)gpu_alloc(64 * 4, 256);
         if (!g_bufs[i])
             alloc_ok = 0;
     }
@@ -443,28 +340,9 @@ int main(void) {
         return 1;
     }
 
-    log_progress("start", 1);
-    test1_chain_no_return();
-    log_progress("start", 2);
-    test2_chain0_returns();
-    log_progress("start", 3);
-    test3_deep_chain();
-    log_progress("start", 4);
-    test4_trailing_bytes(0x00000000u, "zero padding");
-    log_progress("start", 5);
-    test4_trailing_bytes(0xDEADBEEFu, "garbage");
+    test_deep_chain();
 
-    log_progress("start", 7);
-    test7_valid_zero();
-    log_progress("start", 8);
-    test8_size_zero();
-
-#if RUN_DESTRUCTIVE
-    log_progress("start", 9);
-    test9_ib3_hang();
-#endif
-
-    log_line("=== all tests done ===");
+    log_line("=== done ===");
     if (g_fd >= 0)
         sceKernelClose(g_fd);
     return 0;
