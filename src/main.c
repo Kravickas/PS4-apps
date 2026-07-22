@@ -209,10 +209,7 @@ static uint32_t* pm4_indirect_buffer(uint32_t* p, const uint32_t* target, uint32
     return p;
 }
 
-/* EVENT_WRITE_EOP: 6 dwords total. Encoding proven in ShadCube4.
- * CACHE_FLUSH_TS(event 0x04), event_index=5; data_sel=1 (Data32), int_sel=0
- * (CPU-polled fence, no IRQ). Writes fence_value to fence_addr, ends submission.
- */
+/* EVENT_WRITE_EOP: 6 dwords. Proven encoding from ShadCube4. */
 static uint32_t* pm4_eop(uint32_t* p, volatile uint32_t* fence_addr, uint32_t fence_value) {
     const uint64_t a = (uint64_t)(uintptr_t)fence_addr;
     *p++ = PM4_TYPE3(IT_EVENT_WRITE_EOP, 6);
@@ -224,33 +221,29 @@ static uint32_t* pm4_eop(uint32_t* p, volatile uint32_t* fence_addr, uint32_t fe
     return p;
 }
 
-/* ---- result block --------------------------------------------------------
- * A deep chain of N buffers, each writing its index, the last ending in EOP.
- * This is a VALID, always-terminating command stream — exactly how a game
- * builds a chained submission. It cannot hang on correct hardware.
+/* ---- probe ----------------------------------------------------------------
+ * ONE question, measured on hardware: does a packet placed AFTER a chain=1 IB
+ * hang the CP, or does the CP jump (skipping it) and complete?
  *
- * On a CP where chain=1 is a stackless JUMP (the real Liverpool behaviour), all
- * N buffers execute and all N markers are written, regardless of depth — this
- * is what RDR2 does at depth 65. If chain=1 were a call/IB2, the CP (which has
- * no IB3) could not descend past depth 2 and the chain would break early, so
- * only the first few markers would be written.
- *
- * The result is a single integer: how many of the N markers were written.
+ * Each of the 3 sub-tests is run as its OWN submission, with a PROGRESS marker
+ * flushed to disk before it. If a sub-test hangs, the last PROGRESS line names
+ * it. Result slots are read after each completes.
  */
-#define CHAIN_N 20
 #define FENCE_DONE 0x00C0FFEE
 
-/* R_FENCE, then N marker slots, then N-1 poison slots (one per non-last buffer,
- * written AFTER that buffer's chain IB — reachable only if the CP wrongly
- * continues parsing the buffer after the chain). */
-enum { R_FENCE = 0, R_MARK0 = 1, R_POISON0 = R_MARK0 + CHAIN_N, R_SLOTS = R_POISON0 + CHAIN_N };
+enum {
+    R_FENCE = 0,
+    R_A_MARK = 1,
+    R_B_MARK = 2,
+    R_A_POISON = 3, /* packet placed AFTER the chain=1 IB in A */
+    R_SLOTS = 8
+};
 
 static volatile uint32_t* g_res;
-static uint32_t* g_bufs[CHAIN_N];
-static uint32_t g_buf_dw[CHAIN_N];
+static uint32_t* g_A;
+static uint32_t* g_B;
 
-static int submit_and_wait(uint32_t* dcb, uint32_t dcb_dw, volatile uint32_t* fence,
-                           uint32_t want) {
+static int submit_and_wait(uint32_t* dcb, uint32_t dcb_dw, volatile uint32_t* fence, uint32_t want) {
     void* a[1] = {dcb};
     uint32_t s[1] = {dcb_dw * 4};
     sceGnmSubmitCommandBuffers(1, a, s, NULL, NULL);
@@ -260,110 +253,123 @@ static int submit_and_wait(uint32_t* dcb, uint32_t dcb_dw, volatile uint32_t* fe
             return 0;
         sceKernelUsleep(10);
     }
-    return 1; /* timeout */
+    return 1;
 }
 
-/* ---- the test ------------------------------------------------------------ */
-static void test_deep_chain(void) {
-    log_line("TEST: %u-deep chain=1, last buffer EOPs (simulates a game chain)", (uint32_t)CHAIN_N);
-
+static void clear_slots(void) {
     for (int i = 0; i < R_SLOTS; i++)
         g_res[i] = 0;
-
-    /* Build last -> first so each buffer knows its successor's address+size. */
-    for (int i = CHAIN_N - 1; i >= 0; i--) {
-        uint32_t* b = g_bufs[i];
-        uint32_t* p = b;
-        p = pm4_write_dword(p, &g_res[R_MARK0 + i], 0xC0DE0000u | (uint32_t)i);
-        if (i == CHAIN_N - 1) {
-            p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE); /* final buffer ends the submission */
-        } else {
-            p = pm4_indirect_buffer(p, g_bufs[i + 1], g_buf_dw[i + 1], /*chain=*/1, /*valid=*/1,
-                                    /*vmid=*/0);
-            /* Poison write AFTER the chain IB. On a stackless jump the CP transfers
-             * at the IB and never reaches this. Only a CP (or emulator) that
-             * returns and keeps parsing the buffer executes it. */
-            p = pm4_write_dword(p, &g_res[R_POISON0 + i], 0xDEAD0000u | (uint32_t)i);
-        }
-        g_buf_dw[i] = (uint32_t)(p - b);
-    }
-
-    /* Dump the first two and the last buffer so a wrong encoding is visible. */
-    log_line("  buf[0] (%u dw): %08x %08x %08x %08x %08x %08x %08x %08x %08x", g_buf_dw[0],
-             g_bufs[0][0], g_bufs[0][1], g_bufs[0][2], g_bufs[0][3], g_bufs[0][4], g_bufs[0][5],
-             g_bufs[0][9], g_bufs[0][10], g_bufs[0][13]);
-    log_line("  buf[%u] last (%u dw): %08x %08x %08x %08x %08x %08x", (uint32_t)(CHAIN_N - 1),
-             g_buf_dw[CHAIN_N - 1], g_bufs[CHAIN_N - 1][0], g_bufs[CHAIN_N - 1][1],
-             g_bufs[CHAIN_N - 1][2], g_bufs[CHAIN_N - 1][3], g_bufs[CHAIN_N - 1][4],
-             g_bufs[CHAIN_N - 1][5]);
-
-    int timed_out = submit_and_wait(g_bufs[0], g_buf_dw[0], &g_res[R_FENCE], FENCE_DONE);
-
-    uint32_t written = 0;
-    uint32_t first_missing = CHAIN_N;
-    for (uint32_t i = 0; i < CHAIN_N; i++) {
-        uint32_t want = 0xC0DE0000u | i;
-        if (g_res[R_MARK0 + i] == want)
-            written++;
-        else if (first_missing == CHAIN_N)
-            first_missing = i;
-    }
-
-    uint32_t poison = 0;
-    for (uint32_t i = 0; i < CHAIN_N - 1; i++) {
-        if (g_res[R_POISON0 + i] == (0xDEAD0000u | i))
-            poison++;
-    }
-
-    log_line("  fence=%08x (want %08x) markers=%u/%u first_missing=%u poison=%u/%u", g_res[R_FENCE],
-             (uint32_t)FENCE_DONE, written, (uint32_t)CHAIN_N, first_missing, poison,
-             (uint32_t)(CHAIN_N - 1));
-
-    if (timed_out) {
-        log_line("  RESULT: TIMEOUT after %u markers — chain did not complete", written);
-        return;
-    }
-    if (written != CHAIN_N) {
-        log_line("  RESULT: chain broke at depth %u -> not a stackless jump", first_missing);
-        return;
-    }
-    if (poison == 0)
-        log_line("  RESULT: all %u ran, 0 poison -> chain=1 is a stackless JUMP (no return)",
-                 (uint32_t)CHAIN_N);
-    else
-        log_line("  RESULT: all %u ran, %u poison -> CP RETURNED and kept parsing after the chain",
-                 (uint32_t)CHAIN_N, poison);
 }
 
-/* ---- entry --------------------------------------------------------------- */
+/* Case 1 (control): chain=1 IB is the LAST packet in A. B EOPs.
+ * This is the proven-good shape. Expect: complete, A+B markers set. */
+static void probe1_chain_last(void) {
+    log_line("PROBE 1: chain=1 IB is last packet in A (control, should pass)");
+    clear_slots();
+    uint32_t* p = g_B;
+    p = pm4_write_dword(p, &g_res[R_B_MARK], 0xBBBBBBBB);
+    p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE);
+    uint32_t b_dw = (uint32_t)(p - g_B);
+
+    p = g_A;
+    p = pm4_write_dword(p, &g_res[R_A_MARK], 0xAAAAAAAA);
+    p = pm4_indirect_buffer(p, g_B, b_dw, /*chain=*/1, /*valid=*/1, /*vmid=*/0);
+    uint32_t a_dw = (uint32_t)(p - g_A);
+
+    int to = submit_and_wait(g_A, a_dw, &g_res[R_FENCE], FENCE_DONE);
+    log_line("  A=%08x B=%08x fence=%08x %s", g_res[R_A_MARK], g_res[R_B_MARK], g_res[R_FENCE],
+             to ? "TIMEOUT" : "complete");
+}
+
+/* Case 2 (the question): a WRITE_DATA is placed AFTER the chain=1 IB in A.
+ * B EOPs. If chain=1 is a clean jump, A_POISON is skipped and it completes.
+ * If a trailing packet hangs the CP, this times out. */
+static void probe2_packet_after_chain(void) {
+    log_line("PROBE 2: WRITE_DATA placed AFTER the chain=1 IB in A (the question)");
+    clear_slots();
+    uint32_t* p = g_B;
+    p = pm4_write_dword(p, &g_res[R_B_MARK], 0xBBBBBBBB);
+    p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE);
+    uint32_t b_dw = (uint32_t)(p - g_B);
+
+    p = g_A;
+    p = pm4_write_dword(p, &g_res[R_A_MARK], 0xAAAAAAAA);
+    p = pm4_indirect_buffer(p, g_B, b_dw, /*chain=*/1, /*valid=*/1, /*vmid=*/0);
+    p = pm4_write_dword(p, &g_res[R_A_POISON], 0xDEAD0001); /* AFTER the chain IB */
+    uint32_t a_dw = (uint32_t)(p - g_A);
+
+    int to = submit_and_wait(g_A, a_dw, &g_res[R_FENCE], FENCE_DONE);
+    log_line("  A=%08x B=%08x A_POISON=%08x fence=%08x %s", g_res[R_A_MARK], g_res[R_B_MARK],
+             g_res[R_A_POISON], g_res[R_FENCE], to ? "TIMEOUT(hung)" : "complete");
+    if (!to) {
+        if (g_res[R_A_POISON] == 0)
+            log_line("  => trailing packet SKIPPED (chain=1 is a clean jump). poison test viable.");
+        else
+            log_line("  => trailing packet EXECUTED (CP returned). unexpected on hardware.");
+    } else {
+        log_line("  => a packet after a chain=1 IB HANGS the CP. poison test not viable on HW.");
+    }
+}
+
+/* Case 3: chain=0 (IB2 call) with a packet after it in A. B ends (no EOP);
+ * A provides the EOP after the call returns. This is the NORMAL call shape and
+ * should always complete with A_POISON written (the call returns). Confirms the
+ * probe harness itself and that chain=0 returns. */
+static void probe3_chain0_returns(void) {
+    log_line("PROBE 3: chain=0 IB2 call, packet after it, A EOPs (call must return)");
+    clear_slots();
+    uint32_t* p = g_B;
+    p = pm4_write_dword(p, &g_res[R_B_MARK], 0xBBBBBBBB);
+    uint32_t b_dw = (uint32_t)(p - g_B); /* B has NO terminator; relies on IB2 return */
+
+    p = g_A;
+    p = pm4_write_dword(p, &g_res[R_A_MARK], 0xAAAAAAAA);
+    p = pm4_indirect_buffer(p, g_B, b_dw, /*chain=*/0, /*valid=*/1, /*vmid=*/0);
+    p = pm4_write_dword(p, &g_res[R_A_POISON], 0xDEAD0003); /* after the call, should run */
+    p = pm4_eop(p, &g_res[R_FENCE], FENCE_DONE);
+    uint32_t a_dw = (uint32_t)(p - g_A);
+
+    int to = submit_and_wait(g_A, a_dw, &g_res[R_FENCE], FENCE_DONE);
+    log_line("  A=%08x B=%08x A_POISON=%08x fence=%08x %s", g_res[R_A_MARK], g_res[R_B_MARK],
+             g_res[R_A_POISON], g_res[R_FENCE], to ? "TIMEOUT(hung)" : "complete");
+}
+
+static void flush_progress(int idx) {
+    log_line("PROGRESS about to run probe %u", (uint32_t)idx);
+    if (g_fd >= 0) {
+        sceKernelClose(g_fd);
+        g_fd = sceKernelOpen("/data/ibchain_log.txt", O_WRONLY | O_CREAT | O_APPEND, 0777);
+    }
+}
+
 int main(void) {
     log_open();
-    log_line("=== IB deep-chain test: valid always-terminating stream (DCB is IB1) ===");
+    log_line("=== IB chain PROBE: does a packet after a chain=1 IB hang the CP? ===");
 
-    /* One pooled block; result slots + CHAIN_N command buffers carved from it. */
-    if (!gpu_pool_init(64 * 1024 + CHAIN_N * 4 * 1024)) {
+    if (!gpu_pool_init(64 * 1024)) {
         log_line("FATAL: gpu pool init failed");
         if (g_fd >= 0)
             sceKernelClose(g_fd);
         return 1;
     }
     g_res = (volatile uint32_t*)gpu_alloc(R_SLOTS * 4, 256);
-    int alloc_ok = (g_res != NULL);
-    for (int i = 0; i < CHAIN_N; i++) {
-        g_bufs[i] = (uint32_t*)gpu_alloc(64 * 4, 256);
-        if (!g_bufs[i])
-            alloc_ok = 0;
-    }
-    if (!alloc_ok) {
-        log_line("FATAL: gpu_alloc carve failed");
+    g_A = (uint32_t*)gpu_alloc(64 * 4, 256);
+    g_B = (uint32_t*)gpu_alloc(64 * 4, 256);
+    if (!g_res || !g_A || !g_B) {
+        log_line("FATAL: gpu_alloc failed");
         if (g_fd >= 0)
             sceKernelClose(g_fd);
         return 1;
     }
 
-    test_deep_chain();
+    flush_progress(1);
+    probe1_chain_last();
+    flush_progress(2);
+    probe2_packet_after_chain();
+    flush_progress(3);
+    probe3_chain0_returns();
 
-    log_line("=== done ===");
+    log_line("=== probe done ===");
     if (g_fd >= 0)
         sceKernelClose(g_fd);
     return 0;
