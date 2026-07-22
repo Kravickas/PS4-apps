@@ -63,3 +63,4 @@ jobs:
             *.pkg
             eboot.bin
           if-no-files-found: warn
+          retention-days: 30
