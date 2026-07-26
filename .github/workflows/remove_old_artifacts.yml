@@ -13,4 +13,4 @@ jobs:
     steps:
       - uses: c-hive/gha-remove-artifacts@v1
         with:
-          age: '30 days'
+          age: '14 days'
