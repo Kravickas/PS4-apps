@@ -284,7 +284,7 @@ static inline void pm4_event_write_eop(struct PM4Builder* b,
     pm4_emit(b, pm4_type3(PM4_EVENT_WRITE_EOP, 5));
     pm4_emit(b, 0x0504u);                              // CACHE_FLUSH_TS(4), event_index=5
     pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFFu));        // address_lo
-    pm4_emit(b, (uint32_t)(addr >> 32) | 0x20000000u);  // addr_hi | data_sel=1(Data32) | int_sel=0: CPU-polled fence, no per-frame EOP IRQ (we pace on vblank)
+    pm4_emit(b, (uint32_t)(addr >> 32) | 0x22000000u);  // addr_hi | data_sel=1(Data32) | int_sel=2: fence write + EOP interrupt on write-confirm (amdgpu GFX7 fence form)
     pm4_emit(b, fence_value);                           // data_lo
     pm4_emit(b, 0);                                     // data_hi
 }
