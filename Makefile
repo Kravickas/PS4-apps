@@ -8,7 +8,6 @@ TITLE       := Homebrew Template
 VERSION     := 01.00
 TITLE_ID    := BREW00001
 CONTENT_ID  := IV0000-BREW00001_00-HOMEBREW00000000
-
 EXTRAFLAGS  :=
 
 # ---- Toolchain / paths (don't usually need to touch) ----
@@ -21,6 +20,7 @@ CORE_LIBS   := -lc -lkernel -lc++ -lSceLibcInternal
 ALL_STUBS   := $(sort $(patsubst $(TOOLCHAIN)/lib/lib%.so,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.so)) \
                       $(patsubst $(TOOLCHAIN)/lib/lib%.a,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.a)))
 EXTRA_LIBS  := $(filter-out $(CORE_LIBS),$(ALL_STUBS))
+
 SRCDIR      := src
 INTDIR      := build
 PROJ        := homebrew
@@ -39,6 +39,12 @@ SFILES      := $(wildcard $(SRCDIR)/*.s)
 OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
                $(patsubst $(SRCDIR)/%.cpp,$(INTDIR)/%.o,$(CPPFILES)) \
                $(patsubst $(SRCDIR)/%.s,$(INTDIR)/%.o,$(SFILES))
+
+# Fail immediately with a clear reason instead of letting an empty OBJS reach the
+# linker, where it surfaces as "cannot open output file build/homebrew.elf".
+ifeq ($(strip $(OBJS)),)
+$(error No sources found in $(SRCDIR)/ — expected .c, .cpp or .s (check the file extension))
+endif
 
 # ---- Bundled .prx/.sprx modules (drop libc.prx / libSceFios2.prx here to ship them) ----
 LIBMODULES  := $(wildcard sce_module/*)
@@ -64,7 +70,7 @@ $(INTDIR)/%.o: $(SRCDIR)/%.cpp | $(INTDIR)
 $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-eboot.bin: $(OBJS)
+eboot.bin: $(OBJS) | $(INTDIR)
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
 	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3800000000000011
 
