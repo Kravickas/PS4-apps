@@ -125,6 +125,9 @@
 #define SHADOW_H        4096
 #define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
+/* NOP padding added to each frame DCB, in dwords. 0 = off.
+   Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */
+#define DCB_PAD_DWORDS  6144
 #define BG_VERTS        6
 #define CUBE_VERTS      36
 #define FLOOR_VERTS     24576 /* 64×64 grid of quads, 2 tris each = 8192 tris = 24576 verts */
@@ -145,7 +148,12 @@
 #define LIGHT_MVP_OFF   (VERT_BUF_SIZE + 256)  /* light-space MVP for shadow pass */
 #define PROT_CPU_RW     0x03
 #define PROT_GPU_RW     0x30          /* GPU_READ 0x10 | GPU_WRITE 0x20 (per OpenOrbis orbis/_types/kernel.h) */
-#define MEM_TYPE_FLEX   0x03
+/* PS4 direct memory types.
+   ONION  = WB, CPU<->GPU coherent (command buffers, fences)
+   GARLIC = WC, high GPU bandwidth, not CPU-coherent (render targets, textures) */
+#define MEM_TYPE_ONION  0x00
+#define MEM_TYPE_GARLIC 0x03
+#define MEM_TYPE_FLEX   MEM_TYPE_GARLIC   /* legacy name, kept for existing uses */
 
 // === VS: GPU-side MVP + dynamic lighting from sun buffer ===
 // s[0:3]=V# verts. v0=vertex_id
@@ -581,6 +589,26 @@ static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
 static int g_paced_left = 0;       /* paced-probe frames remaining (600ms cadence) */
 
 /* Spin body for the teardown quiesce; the game uses 16 pauses per iteration. */
+/* Read gnm's in-flight submit counter.
+   sceGnmAreSubmitsAllowed() only reports (count == 0). The raw count tells us
+   whether the driver's outstanding-work count climbs to a ceiling and sticks -
+   which is what a submit stall at a fixed count would look like.
+   gnm's sceGnmAreSubmitsAllowed starts with:
+       48 8d 05 <disp32>   lea rax,[rip+disp]   ; &ptr_to_counter
+       48 8b 08            mov rcx,[rax]
+   so we parse disp32 out of the function's own bytes instead of hardcoding an
+   offset. If the signature does not match, return -1 rather than dereference
+   anything. counter = **(uint32_t**)(fn + 7 + disp). */
+static int gnm_inflight_count(void) {
+    const unsigned char *f = (const unsigned char *)&sceGnmAreSubmitsAllowed;
+    if (f[0] != 0x48 || f[1] != 0x8d || f[2] != 0x05) return -1;
+    int32_t disp;
+    __builtin_memcpy(&disp, f + 3, 4);
+    uint32_t **pp = (uint32_t **)(void *)(f + 7 + (long)disp);
+    if (!pp || !*pp) return -1;
+    return (int)**pp;
+}
+
 static inline void cpu_pause16(void){
     for (int i=0;i<16;i++) __asm__ __volatile__("pause" ::: "memory");
 }
@@ -621,14 +649,27 @@ static void trace_line(const char *buf, unsigned long n){
 }
 /* trace_msg: write a plain string + fsync. */
 static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
-static void *gpu_alloc(unsigned long size, unsigned long align) {
+/* Allocate GPU-visible memory of an explicit PS4 direct-memory type.
+     MEM_TYPE_ONION  (0) WB, CPU<->GPU coherent  - command buffers, fences,
+                         anything the CP reads or the CPU polls.
+     MEM_TYPE_GARLIC (3) WC, high GPU bandwidth, NOT CPU-coherent - render
+                         targets, textures, vertex data.
+   God of War allocates 467 ONION vs 163 GARLIC; we had been putting
+   EVERYTHING in GARLIC, including the DCBs the command processor reads and
+   the EOP fence the CPU polls. CPU write-combine stores into a buffer the CP
+   reads, with no sceGnmFlushGarlic, is not a guaranteed-visible arrangement. */
+static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtype) {
     long phys = 0; void *addr = 0;
     size = (size + 0x3FFF) & ~0x3FFFUL;
     if (align < 0x4000) align = 0x4000;
-    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, MEM_TYPE_FLEX, &phys)) return 0;
+    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, memtype, &phys)) return 0;
     if (sceKernelMapDirectMemory(&addr, size, PROT_CPU_RW | PROT_GPU_RW, 0, phys, align)) return 0;
     my_memset(addr, 0, size);
     return addr;
+}
+
+static void *gpu_alloc(unsigned long size, unsigned long align) {
+    return gpu_alloc_typed(size, align, MEM_TYPE_GARLIC);
 }
 
 static float my_sin(float x) {
@@ -2249,12 +2290,15 @@ int main(void) {
 
     uint32_t *dcb_mem[NUM_FRAMES];
     uint32_t *shadow_dcb_mem[NUM_FRAMES];
+    /* Command buffers in ONION: the CP reads them and we rewrite them by CPU
+       every frame, so they need coherency, not write-combine bandwidth. */
     for (int i=0;i<NUM_FRAMES;i++) {
-        dcb_mem[i]=(uint32_t*)gpu_alloc(DCB_SIZE,0x10000);
-        shadow_dcb_mem[i]=(uint32_t*)gpu_alloc(DCB_SIZE,0x10000);
+        dcb_mem[i]=(uint32_t*)gpu_alloc_typed(DCB_SIZE,0x10000,MEM_TYPE_ONION);
+        shadow_dcb_mem[i]=(uint32_t*)gpu_alloc_typed(DCB_SIZE,0x10000,MEM_TYPE_ONION);
     }
-    volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc(0x1000,0x1000);
-    volatile uint32_t *shadow_fence=(volatile uint32_t*)gpu_alloc(0x1000,0x1000);
+    /* Fences in ONION: the GPU writes them and the CPU polls them. */
+    volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
+    volatile uint32_t *shadow_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
     *fence=0;
     *shadow_fence=0;
 
@@ -2975,6 +3019,25 @@ int main(void) {
            buffers back-to-back, and each builder emits its own hw state.
            DIAGNOSTIC: if the wall is ring SPACE it should move ~512 -> ~1024
            submits; if it is a per-submission fence array it stays at 512. */
+        /* DCB SIZE EXPERIMENT: pad with TYPE3 NOPs to inflate the command
+           buffer without changing what it renders (the CP skips NOP packets).
+           Every earlier test held DCB size constant - merging the shadow pass
+           changed the IB DESCRIPTOR count but not the total bytes - so the
+           "fixed byte budget" hypothesis has never been tested.
+             wall moves to ~1/4 the frames -> the limit is BYTES submitted
+             wall stays at ~512 frames     -> the limit is the SUBMIT COUNT
+           One TYPE3 NOP carries up to 0x3fff payload dwords; emit the header
+           then skip its payload, which stays uninitialised but is never read. */
+        {
+            uint32_t pad_dw = DCB_PAD_DWORDS;
+            while (pad_dw > 2 && pm4.off + pad_dw <= pm4.cap) {
+                uint32_t chunk = pad_dw > 0x3000 ? 0x3000 : pad_dw;
+                pm4_emit(&pm4, pm4_type3(PM4_NOP, chunk - 1)); /* hdr + (chunk-1) payload */
+                pm4.off += (chunk - 1);
+                pad_dw -= chunk;
+            }
+        }
+
         uint32_t shadow_sz = 0;
 #if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
         if (shadow_depth && g_shadow_ready) {
@@ -3002,17 +3065,38 @@ int main(void) {
            trace shows exactly which call (if any) still blocks. */
         int saf_ret; uint64_t t_saf; uint64_t t_submit; uint64_t t_ioctl0;
         int fence_iters = 0; int flip_iters = 0;
+        int asb, asa, asd;   /* AreSubmitsAllowed: before / after submit / after done */
+        int ifb, ifa, ifd;   /* raw gnm in-flight submit count at the same points */
+        int drn = 0;         /* drain-spin iterations needed to reach submits-allowed */
+        uint64_t t_done0;
         {
             const uint32_t *a[1] = { dcb_mem[bi] };
             uint32_t s[1] = { sz };
+            asb = sceGnmAreSubmitsAllowed();        /* driver in-flight counter == 0 ? */
+            ifb = gnm_inflight_count();             /* raw in-flight count before */
             t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
             saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
             t_saf = sceKernelGetProcessTime();
+            asa = sceGnmAreSubmitsAllowed();
+            ifa = gnm_inflight_count();             /* raw in-flight count after submit */
+            t_done0 = sceKernelGetProcessTime();
             sceGnmSubmitDone();
+            /* Per-frame drain attempt. Every gnm submit path does
+                   if (*counter != 0) -> ioctl 0xc0048117
+               and sceGnmSubmitDone is the exported call that triggers it.
+               The game runs exactly this spin at teardown; we have never run it
+               per frame. If the wall is the kernel's in-flight counter failing
+               to fall, driving the drain should lower it. Bounded so a stuck
+               counter cannot hang the frame. */
+            for (drn = 0; drn < 64 && !sceGnmAreSubmitsAllowed(); drn++)
+                sceGnmSubmitDone();
+            asd = sceGnmAreSubmitsAllowed();
+            ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
         t_submit = sceKernelGetProcessTime();
         long long d_ioctl = (long long)(t_saf - t_ioctl0);   /* JUST the kernel submit */
         long long d_build = (long long)(t_ioctl0 - t_pre_build); /* JUST build_dcb (CPU) */
+        long long d_done  = (long long)(t_submit - t_done0);  /* JUST sceGnmSubmitDone */
 
         /* EOP fence: GPU done rendering fb[bi] before we flip it. */
         for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
@@ -3046,9 +3130,8 @@ int main(void) {
             long long d_evt   = (long long)(t_evt    - t_loop0);
             long long d_pad   = (long long)(t_pad    - t_evt);
             long long d_saft  = (long long)(t_saf    - t_pre_build);
-            long long d_done  = (long long)(t_submit - t_saf);
             long long d_wait  = (long long)(now      - t_submit);
-            char L[448]; int p=0;
+            char L[640]; int p=0;
             #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
             LP("f="); p+=lg_i64(L+p,(long long)frame);
             LP(" dt="); p+=lg_i64(L+p,(long long)dt);
@@ -3056,7 +3139,16 @@ int main(void) {
             LP(" pad="); p+=lg_i64(L+p,d_pad);
             LP(" submit="); p+=lg_i64(L+p,d_saft);
             LP(" build="); p+=lg_i64(L+p,d_build);
+            LP(" dcbsz="); p+=lg_i64(L+p,(long long)sz);
             LP(" ioctl="); p+=lg_i64(L+p,d_ioctl);
+            LP(" sret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)saf_ret);
+            LP(" asb="); p+=lg_i64(L+p,asb);
+            LP(" asa="); p+=lg_i64(L+p,asa);
+            LP(" asd="); p+=lg_i64(L+p,asd);
+            LP(" ifb="); p+=lg_i64(L+p,ifb);
+            LP(" ifa="); p+=lg_i64(L+p,ifa);
+            LP(" ifd="); p+=lg_i64(L+p,ifd);
+            LP(" drn="); p+=lg_i64(L+p,drn);
             LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
