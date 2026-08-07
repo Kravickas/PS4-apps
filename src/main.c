@@ -3135,11 +3135,18 @@ int main(void) {
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
             t_done0 = sceKernelGetProcessTime();
             sceGnmSubmitDone();
-            /* No drain spin. Measured: ifb and ifa are ALWAYS 0, so the driver's
-               in-flight counter never tracks our graphics submits - it is not
-               the resource. And 64 SubmitDone calls cost ~2.9ms/frame, which
-               dropped us to 12fps and stopped the run one submit short of the
-               wall. Sampling the counter is free; spinning on it is not. */
+            /* Drain spin, ONCE PER BATCH. Every gnm submit path does
+                   if (*counter != 0) -> ioctl 0xc0048117
+               and sceGnmSubmitDone is the exported call that triggers it.
+               Measured: every fast frame has asb=1/ifb=0, but the WALL frame
+               has asb=0/ifb=1 - work outstanding and submits not allowed. The
+               one build that ever beat the wall (41.2s, 4x past the ~11s mark
+               where every other build stalls) was the one running this spin.
+               I removed it earlier by judging that run on submit count instead
+               of time, which was the wrong yardstick.
+               Per BATCH this costs ~2.9ms per 266ms (~1%), not per frame. */
+            for (drn = 0; drn < 64 && !sceGnmAreSubmitsAllowed(); drn++)
+                sceGnmSubmitDone();
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
