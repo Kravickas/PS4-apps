@@ -127,7 +127,8 @@
 #define DCB_SIZE        0x20000
 /* NOP padding added to each frame DCB, in dwords. 0 = off.
    Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */
-#define DCB_PAD_DWORDS  6144
+#define DCB_PAD_DWORDS  0      /* padding test ANSWERED: 20.3x bytes did not
+                                  move the wall -> it is not a byte budget */
 #define BG_VERTS        6
 #define CUBE_VERTS      36
 #define FLOOR_VERTS     24576 /* 64×64 grid of quads, 2 tris each = 8192 tris = 24576 verts */
@@ -3081,15 +3082,11 @@ int main(void) {
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
             t_done0 = sceKernelGetProcessTime();
             sceGnmSubmitDone();
-            /* Per-frame drain attempt. Every gnm submit path does
-                   if (*counter != 0) -> ioctl 0xc0048117
-               and sceGnmSubmitDone is the exported call that triggers it.
-               The game runs exactly this spin at teardown; we have never run it
-               per frame. If the wall is the kernel's in-flight counter failing
-               to fall, driving the drain should lower it. Bounded so a stuck
-               counter cannot hang the frame. */
-            for (drn = 0; drn < 64 && !sceGnmAreSubmitsAllowed(); drn++)
-                sceGnmSubmitDone();
+            /* No drain spin. Measured: ifb and ifa are ALWAYS 0, so the driver's
+               in-flight counter never tracks our graphics submits - it is not
+               the resource. And 64 SubmitDone calls cost ~2.9ms/frame, which
+               dropped us to 12fps and stopped the run one submit short of the
+               wall. Sampling the counter is free; spinning on it is not. */
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
