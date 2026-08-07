@@ -3122,6 +3122,7 @@ int main(void) {
         int asb, asa, asd;   /* AreSubmitsAllowed: before / after submit / after done */
         int ifb, ifa, ifd;   /* raw gnm in-flight submit count at the same points */
         int drn = 0;         /* drain-spin iterations needed to reach submits-allowed */
+        int sdret = 0, sdret2 = 0;  /* sceGnmSubmitDone return: 0 ok, 0x80d110ff fail */
         uint64_t t_done0;
         {
             const uint32_t *a[1] = { dcb_mem[dcb_slot] };
@@ -3134,7 +3135,10 @@ int main(void) {
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
             t_done0 = sceKernelGetProcessTime();
-            sceGnmSubmitDone();
+            /* SubmitDone returns 0 only when its ioctl 0xc0048116 returns 1;
+               otherwise 0x80d110ff. We have discarded this code all along, so a
+               persistent failure here would have been invisible. */
+            sdret = sceGnmSubmitDone();
             /* Drain spin, ONCE PER BATCH. Every gnm submit path does
                    if (*counter != 0) -> ioctl 0xc0048117
                and sceGnmSubmitDone is the exported call that triggers it.
@@ -3144,9 +3148,13 @@ int main(void) {
                where every other build stalls) was the one running this spin.
                I removed it earlier by judging that run on submit count instead
                of time, which was the wrong yardstick.
-               Per BATCH this costs ~2.9ms per 266ms (~1%), not per frame. */
+               Per BATCH this costs ~2.9ms per 266ms (~1%), not per frame.
+               NOTE: each SubmitDone also rings the doorbell, whose ring wraps
+               at 64 entries, so the 64 cap is exactly one full wrap - sdret2
+               tells us whether those later calls are still succeeding. */
+            sdret2 = sdret;
             for (drn = 0; drn < 64 && !sceGnmAreSubmitsAllowed(); drn++)
-                sceGnmSubmitDone();
+                sdret2 = sceGnmSubmitDone();
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
@@ -3211,6 +3219,8 @@ int main(void) {
             LP(" ifa="); p+=lg_i64(L+p,ifa);
             LP(" ifd="); p+=lg_i64(L+p,ifd);
             LP(" drn="); p+=lg_i64(L+p,drn);
+            LP(" sdret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)sdret);
+            LP(" sdret2="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)sdret2);
             LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
