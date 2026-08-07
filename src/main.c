@@ -123,7 +123,18 @@
         requires CB_COLOR_ATTRIB additions and matching T# tile_mode. */
 #define SHADOW_W        4096
 #define SHADOW_H        4096
-#define NUM_FRAMES      3
+/* BATCHING: the submit quota is per IOCTL CALL (proven on hw: 2 command
+   buffers per call walled at the same CALL count, not half). BATCH_FRAMES
+   frames go into ONE command buffer and cost ONE unit of quota.
+     K=1  -> 513 frames free (8.6s), then 2fps      lag 16.6ms
+     K=16 -> 8208 frames free (137s), then 31fps    lag 266ms
+     K=32 -> 16416 frames free (274s), then 63fps   lag 531ms
+   Frames-per-submit IS input latency: the whole batch is recorded before it is
+   submitted. Set BATCH_FRAMES to 1 to restore exact per-frame behaviour.
+   NUM_FRAMES must be >= BATCH_FRAMES so no framebuffer is reused inside one
+   batch (the GPU runs the whole batch before the CPU flips any of it). */
+#define BATCH_FRAMES    16
+#define NUM_FRAMES      16
 #define DCB_SIZE        0x20000
 /* NOP padding added to each frame DCB, in dwords. 0 = off.
    Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */
@@ -147,6 +158,11 @@
 #define FLOOR_DATA_OFF  (FLOOR_MVP_OFF + 80)
 #define VERT_BUF_SIZE   (FLOOR_DATA_OFF + FLOOR_VERTS * VERT_STRIDE)
 #define LIGHT_MVP_OFF   (VERT_BUF_SIZE + 256)  /* light-space MVP for shadow pass */
+/* One contiguous range covering EVERY per-frame CPU write into vb:
+   BG_SUN, MVP, SUN_DIR, the rotated cube vertices and the floor MVP mirror.
+   The light-space MVP lives outside it and is staged separately. */
+#define BATCH_VB_RANGE  (FLOOR_MVP_OFF + 64 - BG_SUN_OFF)
+#define BATCH_STAGE_SZ  (BATCH_VB_RANGE + 64)
 #define PROT_CPU_RW     0x03
 #define PROT_GPU_RW     0x30          /* GPU_READ 0x10 | GPU_WRITE 0x20 (per OpenOrbis orbis/_types/kernel.h) */
 /* PS4 direct memory types.
@@ -2482,6 +2498,18 @@ int main(void) {
 
     uint32_t frame=0,fv=1;
     int running = 1;
+    /* Batch state: sub-frames accumulate into one command buffer (pm4), which
+       is submitted once every BATCH_FRAMES. dcb_slot alternates so the GPU is
+       never reading the buffer we are refilling. */
+    struct PM4Builder pm4;
+    int batch_pos = 0;
+    uint32_t batch_frame0 = 0;
+    int dcb_slot = 0;
+    /* Per-sub-frame staging of everything the CPU rewrites in vb each frame,
+       copied back by DMA at GPU execution time. */
+    void *batch_stage = gpu_alloc_typed(BATCH_STAGE_SZ * BATCH_FRAMES + 0x1000,
+                                        0x4000, MEM_TYPE_ONION);
+    if (!batch_stage) return 1;
 
     /* Tell the system we have finished loading, so it tears down its splash
        screen. Until this is called the system keeps the splash up and keeps
@@ -3000,7 +3028,15 @@ int main(void) {
         }
 
         uint64_t t_pre_build = sceKernelGetProcessTime();
-        struct PM4Builder pm4; pm4_init(&pm4,dcb_mem[bi],DCB_SIZE/4);
+        /* BATCHING: the submit quota is per IOCTL CALL, not per command buffer
+           or per frame (proven: 2 command buffers per call walled at the same
+           CALL count, not half). So we accumulate BATCH_FRAMES frames into ONE
+           command buffer and submit once. Only init the builder at the start of
+           a batch; sub-frames append to it. */
+        if (batch_pos == 0) {
+            pm4_init(&pm4, dcb_mem[dcb_slot], DCB_SIZE/4);
+            batch_frame0 = frame;
+        }
 
         /* Label sampled before this frame's work. gnm's marker patch injects
            WRITE_DATA(label[bi]=1); the display clears it on flip completion
@@ -3039,6 +3075,20 @@ int main(void) {
             }
         }
 
+        /* Stage this sub-frame's data, then emit GPU-side copies that restore
+           it at execution time. The CPU holds only ONE version of the shared
+           vertex buffer, so sub-frame k+1's animation would otherwise clobber
+           sub-frame k's. vb+64 .. vb+2240 is one contiguous range covering
+           every per-frame CPU write (BG_SUN, MVP, SUN_DIR, the rotated cube
+           vertices, the floor MVP mirror); the light-space MVP sits outside it. */
+        {
+            unsigned char *stg = (unsigned char*)batch_stage + batch_pos * BATCH_STAGE_SZ;
+            my_memcpy(stg,               (char*)vb + BG_SUN_OFF, BATCH_VB_RANGE);
+            my_memcpy(stg + BATCH_VB_RANGE, (char*)vb + LIGHT_MVP_OFF, 64);
+            pm4_dma_copy(&pm4, (char*)vb + BG_SUN_OFF,    stg,               BATCH_VB_RANGE);
+            pm4_dma_copy(&pm4, (char*)vb + LIGHT_MVP_OFF, stg + BATCH_VB_RANGE, 64);
+        }
+
         uint32_t shadow_sz = 0;
 #if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
         if (shadow_depth && g_shadow_ready) {
@@ -3054,7 +3104,10 @@ int main(void) {
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
-                              fb[bi],depth,0,fence,fv,1 /* no_flip: CPU flip below */);
+                              fb[bi],depth,0,fence,fv+batch_pos,1 /* no_flip: CPU flip below */);
+        batch_pos++;
+        if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
+        batch_pos = 0;
 
         /* CPU-flip path (is_eop=FALSE). Submit the DCB with NO flip marker via
            plain sceGnmSubmitCommandBuffers, wait the EOP fence so the GPU has
@@ -3071,7 +3124,7 @@ int main(void) {
         int drn = 0;         /* drain-spin iterations needed to reach submits-allowed */
         uint64_t t_done0;
         {
-            const uint32_t *a[1] = { dcb_mem[bi] };
+            const uint32_t *a[1] = { dcb_mem[dcb_slot] };
             uint32_t s[1] = { sz };
             asb = sceGnmAreSubmitsAllowed();        /* driver in-flight counter == 0 ? */
             ifb = gnm_inflight_count();             /* raw in-flight count before */
@@ -3095,27 +3148,32 @@ int main(void) {
         long long d_build = (long long)(t_ioctl0 - t_pre_build); /* JUST build_dcb (CPU) */
         long long d_done  = (long long)(t_submit - t_done0);  /* JUST sceGnmSubmitDone */
 
-        /* EOP fence: GPU done rendering fb[bi] before we flip it. */
-        for (;fence_iters<1000000 && *fence<fv;fence_iters++) sceKernelUsleep(10);
-        fv++;
-
-        /* CPU flip (is_eop=FALSE). flipMode=1, flipArg=frame. */
+        /* Flip out the whole batch. The GPU renders all BATCH_FRAMES frames
+           back-to-back; each ends with its own EOP fence value (fv+k), so the
+           CPU can wait for frame k individually, flip it, and pace on vblank.
+           The display rate is unchanged - we just spent ONE submit for K
+           frames instead of K submits. */
         uint64_t t_flip0 = sceKernelGetProcessTime();
-        int flip_ret = sceVideoOutSubmitFlip(video, bi, 1, (int64_t)frame);
+        int flip_ret = 0;
+        for (int k = 0; k < BATCH_FRAMES; k++) {
+            for (;fence_iters<1000000 && *fence < fv+k;fence_iters++) sceKernelUsleep(10);
+            flip_ret = sceVideoOutSubmitFlip(video, (batch_frame0 + k) % NUM_FRAMES, 1,
+                                             (int64_t)(batch_frame0 + k));
+            if (flip_ev_ok) {
+                struct kevent_t ev; int out=0;
+                sceKernelWaitEqueue(flip_eq, &ev, 1, &out, 0);
+                flip_iters = out;
+            }
+        }
+        fv += BATCH_FRAMES;
+        dcb_slot = (dcb_slot + 1) % NUM_FRAMES;
         uint64_t t_flip1 = sceKernelGetProcessTime();
         long long d_flip = (long long)(t_flip1 - t_flip0);
 
         /* Wall detector: healthy submit is 30-60us; past the wall ~500ms. */
-        if ((long long)(t_saf - t_pre_build) > 100000 || d_flip > 100000) g_slow_submits++;
+        if ((long long)(t_saf - t_pre_build) > 100000) g_slow_submits++;
         else g_slow_submits = 0;
         g_submit_count++;
-
-        /* Pace on the flip event (the CPU flip does not block on vblank). */
-        if (flip_ev_ok) {
-            struct kevent_t ev; int out=0;
-            sceKernelWaitEqueue(flip_eq, &ev, 1, &out, 0);
-            flip_iters = out;
-        }
 
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
            clock). If the stall onset correlates with subc -> ring-fill/count

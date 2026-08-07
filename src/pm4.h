@@ -365,6 +365,34 @@ static inline void pm4_dma_fill(struct PM4Builder* b, void* dst,
     pm4_emit(b, (uint32_t)(daddr >> 32));               /* dst_addr_hi */
     pm4_emit(b, num_bytes & 0x1FFFFFu);                 /* command.num_bytes */
 }
+/* DMA_DATA memory -> memory copy. Same packet as pm4_dma_fill, which is proven
+   in this codebase; the only difference is src_sel = Memory(0) instead of
+   Data(2), so dwords 2-3 carry a source ADDRESS rather than a fill value.
+   Needed for batching several frames into one submit: each sub-frame's MVP,
+   floor MVP mirror and rotated cube vertices have to be copied into the shared
+   vertex buffer at GPU execution time, since the CPU can only stage one
+   version per submit.
+
+   Encoding verified against the PM4DmaData layout:
+     src_sel bits 29-30 (Memory=0, Gds=1, Data=2, MemoryUsingL2=3)
+     dst_sel bits 20-21 (Memory=0, Gds=1, MemoryUsingL2=3)
+     cp_sync bit 31, num_bytes = command & 0x1fffff
+   CP_SYNC IS REQUIRED HERE: with it clear the command processor does not wait
+   for the DMA engine and carries on issuing packets, so the shadow pass and
+   draws that immediately follow could read the OLD contents. */
+static inline void pm4_dma_copy(struct PM4Builder* b, void* dst, const void* src,
+                                uint32_t num_bytes) {
+    uint64_t daddr = (uint64_t)(uintptr_t)dst;
+    uint64_t saddr = (uint64_t)(uintptr_t)src;
+    pm4_emit(b, pm4_type3(0x50, 6));
+    pm4_emit(b, (1u << 31) | (0u << 29) | (0u << 20));  /* cp_sync=1, src_sel=Memory, dst_sel=Memory */
+    pm4_emit(b, (uint32_t)(saddr & 0xFFFFFFFFu));       /* src_addr_lo */
+    pm4_emit(b, (uint32_t)(saddr >> 32));               /* src_addr_hi */
+    pm4_emit(b, (uint32_t)(daddr & 0xFFFFFFFFu));       /* dst_addr_lo */
+    pm4_emit(b, (uint32_t)(daddr >> 32));               /* dst_addr_hi */
+    pm4_emit(b, num_bytes & 0x1FFFFFu);                 /* command.num_bytes */
+}
+
 #define CTX_POLYGON_CONTROL         0x205  // PA_SU_SC_MODE_CNTL
 
 /* IT_INDEX_TYPE (opcode 0x2A): set index buffer format */
