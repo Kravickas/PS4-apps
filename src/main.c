@@ -626,6 +626,47 @@ static int gnm_inflight_count(void) {
     return (int)**pp;
 }
 
+/* gnm exports an unnamed set/clear/get triple for a boolean DRIVER MODE that
+   reaches the kernel only via ioctl 0xc004811d, which sceGnmSubmitDone pushes
+   when the dirty flag is set:
+       if (dirty[0x1007d]) { sub_0x6200(id, mode[0x1007c]); dirty = 0; }
+   Our mode flag defaults to 0 and is never marked dirty, so this process has
+   NEVER issued that ioctl. The three functions sit at fixed offsets from the
+   exported sceGnmAreSubmitsAllowed and all take no arguments (verified by
+   disassembly):
+       +0x40  set mode = 1, mark dirty
+       +0x90  set mode = 0, mark dirty
+       +0xe0  read mode
+   Both the anchor's own prologue (lea rax,[rip+..] = 48 8d 05) and the
+   target's (push rbp; mov rbp,rsp = 55 48 89 e5) are checked first, so on a
+   firmware with a different layout this becomes a no-op instead of a wild
+   jump. SPECULATIVE: what the mode means is unknown - the NIDs matched none of
+   1600+ candidate names - but it is the one driver state we can reach and have
+   never set. */
+static const unsigned char *gnm_mode_fn(int off) {
+    const unsigned char *anchor = (const unsigned char *)&sceGnmAreSubmitsAllowed;
+    if (anchor[0] != 0x48 || anchor[1] != 0x8d || anchor[2] != 0x05) return 0;
+    const unsigned char *fn = anchor + off;
+    if (fn[0] != 0x55 || fn[1] != 0x48 || fn[2] != 0x89 || fn[3] != 0xe5) return 0;
+    return fn;
+}
+static int gnm_set_mode(int on) {
+    /* The driver's own mode setter dereferences the in-flight counter pointer
+       with NO null check, so calling it before gnm's lazy init would fault.
+       gnm_inflight_count() validates that entire pointer chain, so use it as
+       the readiness test. -2 = driver not ready yet, caller may retry. */
+    if (gnm_inflight_count() < 0) return -2;
+    const unsigned char *fn = gnm_mode_fn(on ? 0x40 : 0x90);
+    if (!fn) return -1;
+    ((void (*)(void))(void *)fn)();
+    return 0;
+}
+static int gnm_get_mode(void) {
+    const unsigned char *fn = gnm_mode_fn(0xe0);
+    if (!fn) return -1;
+    return ((int (*)(void))(void *)fn)();
+}
+
 static inline void cpu_pause16(void){
     for (int i=0;i<16;i++) __asm__ __volatile__("pause" ::: "memory");
 }
@@ -1998,6 +2039,20 @@ int main(void) {
     sceVideoOutSetBufferAttribute(buf_attr,0x80000000,1,0,DISPLAY_W,DISPLAY_H,DISPLAY_W);
     sceVideoOutRegisterBuffers(video,0,fb,NUM_FRAMES,buf_attr);
 
+    /* Enable WAIT-FREE SUBMIT as early as the driver allows.
+       libSceGnmDriver.prx exports seven library namespaces; one of them is
+       libSceGnmWaitFreeSubmit, and it contains exactly two functions:
+           +0x40 from sceGnmAreSubmitsAllowed : mode = 1 (enable)
+           +0x90                              : mode = 0 (disable)
+       They set a flag the driver pushes to the kernel via ioctl 0xc004811d on
+       the NEXT sceGnmSubmitDone. This process had never issued that ioctl.
+       Placed here because the loading screen submits and calls SubmitDone
+       before the main loop, so enabling here gets it flushed early; the old
+       placement was after the loading screen and missed those submits. */
+    int mode_set = gnm_set_mode(1);
+    int mode_set_early = mode_set;      /* -2 = driver not ready yet, will retry */
+    int mode_now = gnm_get_mode();
+
     /* Flip event queue for event-driven vsync pacing. The driver posts a flip
        event (data >> 16 == flip_arg) when each flip completes at vblank; we
        block on this queue each frame instead of polling. flip rate 0 = 60Hz. */
@@ -2522,6 +2577,26 @@ int main(void) {
        signature of a startup obligation timing out, not a GPU budget.
        And the count model is dead regardless: God of War issues ~18 GFX submits
        per frame (~535/sec) and runs for hours, so no 512-submit budget exists. */
+    /* Set gnm's unnamed driver mode before rendering starts. It reaches the
+       kernel only through ioctl 0xc004811d at the next SubmitDone, and this
+       process has never issued that ioctl. Speculative but cheap and safe
+       (byte-validated; a layout mismatch makes it a no-op). */
+    /* Retry if the driver was not ready at the earlier attempt. */
+    if (mode_set != 0) { mode_set = gnm_set_mode(1); mode_now = gnm_get_mode(); }
+    { char L[96]; int p=0;
+      const char *m = "gnm waitfree early=";
+      while (*m) L[p++] = *m++;
+      p += lg_i64(L+p, (long long)mode_set_early);
+      const char *m1 = " set=";
+      while (*m1) L[p++] = *m1++;
+      p += lg_i64(L+p, (long long)mode_set);
+      const char *m2 = " now=";
+      while (*m2) L[p++] = *m2++;
+      p += lg_i64(L+p, (long long)mode_now);
+      L[p++]='\n'; L[p]=0;
+      trace_msg(L);
+    }
+
     int splash_ret = sceSystemServiceHideSplashScreen();
     { char L[96]; int p=0;
       const char *m = "HideSplashScreen ret=";
@@ -3135,26 +3210,15 @@ int main(void) {
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
             t_done0 = sceKernelGetProcessTime();
-            /* SubmitDone returns 0 only when its ioctl 0xc0048116 returns 1;
-               otherwise 0x80d110ff. We have discarded this code all along, so a
-               persistent failure here would have been invisible. */
+            /* ONE SubmitDone, no spin. Measured: drn hit its 64 cap on EVERY
+               frame, so sceGnmAreSubmitsAllowed never returns 1 and the spin
+               never converged - SubmitDone cannot drive the counter to 0. And
+               past the wall each SubmitDone blocks 512003us, so 64 of them cost
+               32.77 SECONDS. sdret/sdret2 were 0x0 throughout, so SubmitDone
+               always SUCCEEDS; it is blocking, not failing. */
             sdret = sceGnmSubmitDone();
-            /* Drain spin, ONCE PER BATCH. Every gnm submit path does
-                   if (*counter != 0) -> ioctl 0xc0048117
-               and sceGnmSubmitDone is the exported call that triggers it.
-               Measured: every fast frame has asb=1/ifb=0, but the WALL frame
-               has asb=0/ifb=1 - work outstanding and submits not allowed. The
-               one build that ever beat the wall (41.2s, 4x past the ~11s mark
-               where every other build stalls) was the one running this spin.
-               I removed it earlier by judging that run on submit count instead
-               of time, which was the wrong yardstick.
-               Per BATCH this costs ~2.9ms per 266ms (~1%), not per frame.
-               NOTE: each SubmitDone also rings the doorbell, whose ring wraps
-               at 64 entries, so the 64 cap is exactly one full wrap - sdret2
-               tells us whether those later calls are still succeeding. */
             sdret2 = sdret;
-            for (drn = 0; drn < 64 && !sceGnmAreSubmitsAllowed(); drn++)
-                sdret2 = sceGnmSubmitDone();
+            drn = 0;
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
