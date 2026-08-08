@@ -3257,7 +3257,13 @@ int main(void) {
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
            clock). If the stall onset correlates with subc -> ring-fill/count
            (fixable). If with ptms only -> pure time-based kernel IRQ death. */
-        if (frame < 30 || (frame % 10) == 0 || (frame >= 450 && frame <= 620)) {
+        /* Trace EVERY batch. With BATCH_FRAMES=16 this point is reached only
+           ~3.75 times a second, so full coverage is cheap - and a long run is
+           exactly what is needed to confirm the wait-free-submit result holds
+           well past the ~11s mark where every earlier build stalled. The old
+           windowed condition was written for per-frame submission and went
+           quiet after frame 620. */
+        if (1) {
             uint64_t now = sceKernelGetProcessTime();
             static uint64_t prev_t = 0;
             uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
