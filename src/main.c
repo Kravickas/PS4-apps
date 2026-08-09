@@ -603,12 +603,13 @@ static int g_event_count = 0;      /* count of non-zero system events received *
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
 static int g_batch = 0;      /* completed batches, for crash localisation */
 static int g_slow_tail = 0;  /* frames still to log at full rate after a stall */
+static int g_evt_timeouts = 0;  /* flip-event waits that expired instead of firing */
 static void trace_msg(const char *s);
 static int lg_i64(char *o, long long v);
 /* Write a phase marker, but only for the batches around the observed crash
    (it dies during batch 34), so this costs nothing for the whole run before. */
 static void phase(const char *tag){
-    if (g_batch < 500 || g_batch > 700) return;
+    if (g_batch < 520 || g_batch > 620) return;
     char L[64]; int p=0;
     const char *m="PH "; while(*m) L[p++]=*m++;
     p+=lg_i64(L+p,(long long)g_batch);
@@ -3258,20 +3259,30 @@ int main(void) {
         uint64_t t_flip0 = sceKernelGetProcessTime();
         int flip_ret = 0;
         for (int k = 0; k < BATCH_FRAMES; k++) {
-            if (g_batch >= 30 && g_batch <= 40 && k == 0) phase("flip-k0");
             /* Reset the budget PER sub-frame. fence_iters was shared across
                all 16 waits, so once it reached the cap the later frames would
                be flipped without ever confirming the GPU had finished
                rendering them. */
             fence_iters = 0;
             for (;fence_iters<200000 && *fence < fv+k;fence_iters++) sceKernelUsleep(10);
+            phase("fence-ok");
             flip_ret = sceVideoOutSubmitFlip(video, (batch_frame0 + k) % NUM_FRAMES, 1,
                                              (int64_t)(batch_frame0 + k));
+            phase("flip-done");
             if (flip_ev_ok) {
+                /* BOUNDED. This was called with a NULL timeout pointer, i.e.
+                   block forever, and it is the only unbounded wait between
+                   "pre-flips" and "batch-end" - which is exactly where the app
+                   stops. If the flip event ever fails to arrive, the frame
+                   loop freezes here and the app looks hung. 100ms lets us
+                   survive a missing event and count it instead. */
                 struct kevent_t ev; int out=0;
-                sceKernelWaitEqueue(flip_eq, &ev, 1, &out, 0);
+                unsigned int tmo = 100000;
+                int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
+                if (wr != 0 || out <= 0) g_evt_timeouts++;
                 flip_iters = out;
             }
+            phase("evt-done");
         }
         fv += BATCH_FRAMES;
         dcb_slot = (dcb_slot + 1) % NUM_FRAMES;
@@ -3333,6 +3344,8 @@ int main(void) {
             LP(" sdret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)sdret);
             LP(" sdret2="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)sdret2);
             LP(" flip="); p+=lg_i64(L+p,d_flip);
+            LP(" fret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)flip_ret);
+            LP(" evto="); p+=lg_i64(L+p,g_evt_timeouts);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
