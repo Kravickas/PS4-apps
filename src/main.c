@@ -602,12 +602,13 @@ static int32_t g_last_event = 0;   /* latest non-zero sceSystemServiceReceiveEve
 static int g_event_count = 0;      /* count of non-zero system events received */
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
 static int g_batch = 0;      /* completed batches, for crash localisation */
+static int g_slow_tail = 0;  /* frames still to log at full rate after a stall */
 static void trace_msg(const char *s);
 static int lg_i64(char *o, long long v);
 /* Write a phase marker, but only for the batches around the observed crash
    (it dies during batch 34), so this costs nothing for the whole run before. */
 static void phase(const char *tag){
-    if (g_batch < 30 || g_batch > 40) return;
+    if (g_batch < 500 || g_batch > 700) return;
     char L[64]; int p=0;
     const char *m="PH "; while(*m) L[p++]=*m++;
     p+=lg_i64(L+p,(long long)g_batch);
@@ -3293,13 +3294,20 @@ int main(void) {
            well past the ~11s mark where every earlier build stalled. The old
            windowed condition was written for per-frame submission and went
            quiet after frame 620. */
-        /* Keep the trace rate at ~3.75 lines/sec whatever BATCH_FRAMES is.
-           At K=1 this point is reached 60x a second, and trace_line fsyncs
-           every write - logging each frame would itself distort the timing. */
-        if ((frame % 16) == 0) {
-            uint64_t now = sceKernelGetProcessTime();
-            static uint64_t prev_t = 0;
-            uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
+        /* ADAPTIVE trace rate.
+           Sampling every 16th frame is fine at 60fps (one line per 266ms), but
+           if the app chokes to ~2fps then 16 frames takes EIGHT SECONDS and the
+           log goes silent exactly when something interesting is happening. That
+           blind spot made a choke look indistinguishable from a crash.
+           So: sample every 16th frame while fast, but log EVERY frame as soon
+           as one takes longer than 30ms, and keep logging for 200 frames after
+           things recover so the entry and exit of a choke are both captured. */
+        uint64_t now = sceKernelGetProcessTime();
+        static uint64_t prev_t = 0;
+        uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
+        if (dt > 30000) g_slow_tail = 200;
+        else if (g_slow_tail > 0) g_slow_tail--;
+        if ((frame % 16) == 0 || g_slow_tail > 0) {
             long long d_evt   = (long long)(t_evt    - t_loop0);
             long long d_pad   = (long long)(t_pad    - t_evt);
             long long d_saft  = (long long)(t_saf    - t_pre_build);
