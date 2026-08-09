@@ -133,6 +133,14 @@
    submitted. Set BATCH_FRAMES to 1 to restore exact per-frame behaviour.
    NUM_FRAMES must be >= BATCH_FRAMES so no framebuffer is reused inside one
    batch (the GPU runs the whole batch before the CPU flips any of it). */
+/* HALF_RATE: run the frame loop at 30fps instead of 60 by consuming a second
+   flip event each frame. Every run so far has been at 60fps, which makes
+   "stalls after ~541 FRAMES" and "stalls after ~11 SECONDS" indistinguishable.
+   At 30fps they separate:
+       count-based -> ~541 frames = ~18 seconds
+       time-based  -> ~11 seconds = ~330 frames
+   Set to 0 to restore 60fps. */
+#define HALF_RATE       1
 #define BATCH_FRAMES    1
 #define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
@@ -604,12 +612,15 @@ static int g_submit_count = 0;     /* total GPU command-buffer submits */
 static int g_batch = 0;      /* completed batches, for crash localisation */
 static int g_slow_tail = 0;  /* frames still to log at full rate after a stall */
 static int g_evt_timeouts = 0;  /* flip-event waits that expired instead of firing */
+static int g_fence_timeouts = 0;    /* EOP fence waits that expired */
+static unsigned int g_fence_stuck_at = 0;  /* fence value when it stopped */
+static unsigned int g_fence_wanted = 0;    /* value we were waiting for */
 static void trace_msg(const char *s);
 static int lg_i64(char *o, long long v);
 /* Write a phase marker, but only for the batches around the observed crash
    (it dies during batch 34), so this costs nothing for the whole run before. */
 static void phase(const char *tag){
-    if (g_batch < 520 || g_batch > 620) return;
+    if (g_batch < 300 || g_batch > 620) return;
     char L[64]; int p=0;
     const char *m="PH "; while(*m) L[p++]=*m++;
     p+=lg_i64(L+p,(long long)g_batch);
@@ -3263,8 +3274,22 @@ int main(void) {
                all 16 waits, so once it reached the cap the later frames would
                be flipped without ever confirming the GPU had finished
                rendering them. */
+            /* BOUNDED AT ~200ms, and it does NOT abort the frame.
+               The old cap was 200000 x usleep(10); if the real sleep
+               granularity is ~100us that is twenty seconds of apparent freeze.
+               Measured: the fence normally signals in 1-2 iterations, then at
+               frame ~541 it stops entirely - the GPU stops completing work.
+               Timing out here and carrying on lets us see whether the GPU ever
+               recovers, and what value the fence is stuck at, instead of
+               hanging the loop. */
             fence_iters = 0;
-            for (;fence_iters<200000 && *fence < fv+k;fence_iters++) sceKernelUsleep(10);
+            for (;fence_iters<2000 && *fence < fv+k;fence_iters++) sceKernelUsleep(100);
+            if (*fence < fv+k) {
+                g_fence_timeouts++;
+                g_fence_stuck_at = *fence;
+                g_fence_wanted   = fv+k;
+                phase("FENCE-TIMEOUT");
+            }
             phase("fence-ok");
             flip_ret = sceVideoOutSubmitFlip(video, (batch_frame0 + k) % NUM_FRAMES, 1,
                                              (int64_t)(batch_frame0 + k));
@@ -3282,6 +3307,13 @@ int main(void) {
                 if (wr != 0 || out <= 0) g_evt_timeouts++;
                 flip_iters = out;
             }
+#if HALF_RATE
+            if (flip_ev_ok) {
+                struct kevent_t ev2; int out2=0;
+                unsigned int tmo2 = 100000;
+                sceKernelWaitEqueue(flip_eq, &ev2, 1, &out2, &tmo2);
+            }
+#endif
             phase("evt-done");
         }
         fv += BATCH_FRAMES;
@@ -3316,14 +3348,14 @@ int main(void) {
         uint64_t now = sceKernelGetProcessTime();
         static uint64_t prev_t = 0;
         uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
-        if (dt > 30000) g_slow_tail = 200;
+        if (dt > 30000 || g_fence_timeouts > 0) g_slow_tail = 400;
         else if (g_slow_tail > 0) g_slow_tail--;
         if ((frame % 16) == 0 || g_slow_tail > 0) {
             long long d_evt   = (long long)(t_evt    - t_loop0);
             long long d_pad   = (long long)(t_pad    - t_evt);
             long long d_saft  = (long long)(t_saf    - t_pre_build);
             long long d_wait  = (long long)(now      - t_submit);
-            char L[640]; int p=0;
+            char L[896]; int p=0;
             #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
             LP("f="); p+=lg_i64(L+p,(long long)frame);
             LP(" dt="); p+=lg_i64(L+p,(long long)dt);
@@ -3346,6 +3378,9 @@ int main(void) {
             LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" fret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)flip_ret);
             LP(" evto="); p+=lg_i64(L+p,g_evt_timeouts);
+            LP(" fnto="); p+=lg_i64(L+p,g_fence_timeouts);
+            LP(" fstuck="); p+=lg_i64(L+p,(long long)g_fence_stuck_at);
+            LP(" fwant="); p+=lg_i64(L+p,(long long)g_fence_wanted);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
