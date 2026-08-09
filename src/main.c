@@ -140,7 +140,7 @@
        count-based -> ~541 frames = ~18 seconds
        time-based  -> ~11 seconds = ~330 frames
    Set to 0 to restore 60fps. */
-#define HALF_RATE       1
+#define HALF_RATE       0
 #define BATCH_FRAMES    1
 #define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
@@ -1356,8 +1356,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
 #if defined(DRAW_STOP) && DRAW_STOP <= 1
     /* Bisect: stop after BG/sky draw. If the sky gradient renders, the
        render-target setup + VS/PS pipeline work; problem is in a later draw. */
-    pm4_event_write_eop(b,fence,fv);
-    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
+    /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
+         flip     -> marker block carrying the fence addr+value, NO EOP.
+                     gnm's patcher emits WRITE_DATA(label=1) + WRITE_DATA(fence)
+                     and registers the flip, all inside this submit.
+         no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
+       Emitting both, or emitting an EOP and then flipping separately from the
+       CPU, is neither path. */
+    if (no_flip) pm4_event_write_eop(b,fence,fv);
+    else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
 #endif
 
@@ -1388,8 +1395,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
 
 #if defined(DRAW_STOP) && DRAW_STOP <= 2
     /* Bisect: stop after floor draw (BG + floor, no cube). */
-    pm4_event_write_eop(b,fence,fv);
-    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
+    /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
+         flip     -> marker block carrying the fence addr+value, NO EOP.
+                     gnm's patcher emits WRITE_DATA(label=1) + WRITE_DATA(fence)
+                     and registers the flip, all inside this submit.
+         no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
+       Emitting both, or emitting an EOP and then flipping separately from the
+       CPU, is neither path. */
+    if (no_flip) pm4_event_write_eop(b,fence,fv);
+    else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
 #endif
 
@@ -1417,8 +1431,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_draw_index_auto(b, model_verts);
     }
 
-    pm4_event_write_eop(b,fence,fv);
-    if (!no_flip) pm4_prepare_flip(b);   /* last 64 dwords (flip handshake), skipped for CPU-flip test */
+    /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
+         flip     -> marker block carrying the fence addr+value, NO EOP.
+                     gnm's patcher emits WRITE_DATA(label=1) + WRITE_DATA(fence)
+                     and registers the flip, all inside this submit.
+         no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
+       Emitting both, or emitting an EOP and then flipping separately from the
+       CPU, is neither path. */
+    if (no_flip) pm4_event_write_eop(b,fence,fv);
+    else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
 }
 
@@ -3212,7 +3233,7 @@ int main(void) {
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
-                              fb[bi],depth,0,fence,fv+batch_pos,1 /* no_flip: CPU flip below */);
+                              fb[bi],depth,0,fence,fv+batch_pos,0 /* flip via marker, the game's path */);
         batch_pos++;
         if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
         batch_pos = 0;
@@ -3239,7 +3260,11 @@ int main(void) {
             ifb = gnm_inflight_count();             /* raw in-flight count before */
             phase("pre-submit");
             t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
-            saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
+            /* The game's flip path: ONE call that submits and registers the
+               flip, with the marker block at the DCB tail carrying our fence.
+               eboot 0x94edf0 passes (1, &dcb, &size, 0, 0, flipMode, ...). */
+            saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
+                                                        video, bi, 1, (int64_t)frame);
             t_saf = sceKernelGetProcessTime();
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
@@ -3291,8 +3316,9 @@ int main(void) {
                 phase("FENCE-TIMEOUT");
             }
             phase("fence-ok");
-            flip_ret = sceVideoOutSubmitFlip(video, (batch_frame0 + k) % NUM_FRAMES, 1,
-                                             (int64_t)(batch_frame0 + k));
+            /* No CPU flip. sceGnmSubmitAndFlipCommandBuffers already registered
+               it via the marker, so calling sceVideoOutSubmitFlip here would
+               queue a SECOND flip for the same frame. */
             phase("flip-done");
             if (flip_ev_ok) {
                 /* BOUNDED. This was called with a NULL timeout pointer, i.e.
