@@ -133,8 +133,8 @@
    submitted. Set BATCH_FRAMES to 1 to restore exact per-frame behaviour.
    NUM_FRAMES must be >= BATCH_FRAMES so no framebuffer is reused inside one
    batch (the GPU runs the whole batch before the CPU flips any of it). */
-#define BATCH_FRAMES    16
-#define NUM_FRAMES      16
+#define BATCH_FRAMES    1
+#define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
 /* NOP padding added to each frame DCB, in dwords. 0 = off.
    Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */
@@ -601,6 +601,20 @@ static int g_log_fd = -1;
 static int32_t g_last_event = 0;   /* latest non-zero sceSystemServiceReceiveEvent type */
 static int g_event_count = 0;      /* count of non-zero system events received */
 static int g_submit_count = 0;     /* total GPU command-buffer submits */
+static int g_batch = 0;      /* completed batches, for crash localisation */
+static void trace_msg(const char *s);
+static int lg_i64(char *o, long long v);
+/* Write a phase marker, but only for the batches around the observed crash
+   (it dies during batch 34), so this costs nothing for the whole run before. */
+static void phase(const char *tag){
+    if (g_batch < 30 || g_batch > 40) return;
+    char L[64]; int p=0;
+    const char *m="PH "; while(*m) L[p++]=*m++;
+    p+=lg_i64(L+p,(long long)g_batch);
+    L[p++]=' ';
+    while(*tag) L[p++]=*tag++;
+    L[p++]='\n'; L[p]=0; trace_msg(L);
+}
 static int g_slow_submits = 0;     /* consecutive submits over 100ms = the wall */
 static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
 static int g_paced_left = 0;       /* paced-probe frames remaining (600ms cadence) */
@@ -2518,6 +2532,7 @@ int main(void) {
         printf("scePadOpen failed: 0x%x, userId=%d\n", pad_handle, userId);
     }
     struct OrbisPadData pad;
+    int pad_ok = 0;          /* only trust pad.buttons after a successful read */
     my_memset(&pad, 0, sizeof(pad));
     pad.lx = 128;
     pad.ly = 128;
@@ -2553,6 +2568,7 @@ int main(void) {
 
     uint32_t frame=0,fv=1;
     int running = 1;
+    int quit_reason = 0;   /* 0=still running, 1=system quit event, 2=pad combo */
     /* Batch state: sub-frames accumulate into one command buffer (pm4), which
        is submitted once every BATCH_FRAMES. dcb_slot alternates so the GPU is
        never reading the buffer we are refilling. */
@@ -2630,20 +2646,20 @@ int main(void) {
         int32_t et_now = 0;
         if (sceSystemServiceReceiveEvent(sysevent) == 0) {
             et_now = *(int32_t*)sysevent;
-            if (et_now == 0x10000000) { running = 0; }
+            if (et_now == 0x10000000) { running = 0; quit_reason = 1; }
             if (et_now != 0) { g_last_event = et_now; g_event_count++; }
         }
         uint64_t t_evt = sceKernelGetProcessTime();
 
         // Read gamepad
         if (pad_handle >= 0)
-            scePadRead(pad_handle, &pad, 1);
+            pad_ok = (scePadRead(pad_handle, &pad, 1) >= 0);
         uint64_t t_pad = sceKernelGetProcessTime();
 
         /* Manual quit fallback: hold all four triggers (L1+R1+L2+R2) together.
            Guarantees a clean exit + teardown regardless of the system-event
            path, so the app never hangs the OS on close. */
-        if ((pad.buttons & 0x0F00) == 0x0F00) { running = 0; }
+        if (pad_ok && (pad.buttons & 0x0F00) == 0x0F00) { running = 0; quit_reason = 2; }
 
         // Button edge detection (pressed this frame, not last)
         uint32_t pressed = pad.buttons & ~prev_buttons;
@@ -3109,6 +3125,7 @@ int main(void) {
            command buffer and submit once. Only init the builder at the start of
            a batch; sub-frames append to it. */
         if (batch_pos == 0) {
+            phase("batch-start");
             pm4_init(&pm4, dcb_mem[dcb_slot], DCB_SIZE/4);
             batch_frame0 = frame;
         }
@@ -3156,6 +3173,7 @@ int main(void) {
            sub-frame k's. vb+64 .. vb+2240 is one contiguous range covering
            every per-frame CPU write (BG_SUN, MVP, SUN_DIR, the rotated cube
            vertices, the floor MVP mirror); the light-space MVP sits outside it. */
+#if BATCH_FRAMES > 1
         {
             unsigned char *stg = (unsigned char*)batch_stage + batch_pos * BATCH_STAGE_SZ;
             my_memcpy(stg,               (char*)vb + BG_SUN_OFF, BATCH_VB_RANGE);
@@ -3163,6 +3181,8 @@ int main(void) {
             pm4_dma_copy(&pm4, (char*)vb + BG_SUN_OFF,    stg,               BATCH_VB_RANGE);
             pm4_dma_copy(&pm4, (char*)vb + LIGHT_MVP_OFF, stg + BATCH_VB_RANGE, 64);
         }
+#endif  /* with BATCH_FRAMES==1 the CPU's own write to vb is the one the GPU
+           reads, so no staging or GPU-side restore is needed at all */
 
         uint32_t shadow_sz = 0;
 #if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
@@ -3204,6 +3224,7 @@ int main(void) {
             uint32_t s[1] = { sz };
             asb = sceGnmAreSubmitsAllowed();        /* driver in-flight counter == 0 ? */
             ifb = gnm_inflight_count();             /* raw in-flight count before */
+            phase("pre-submit");
             t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
             saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
             t_saf = sceKernelGetProcessTime();
@@ -3232,10 +3253,17 @@ int main(void) {
            CPU can wait for frame k individually, flip it, and pace on vblank.
            The display rate is unchanged - we just spent ONE submit for K
            frames instead of K submits. */
+        phase("pre-flips");
         uint64_t t_flip0 = sceKernelGetProcessTime();
         int flip_ret = 0;
         for (int k = 0; k < BATCH_FRAMES; k++) {
-            for (;fence_iters<1000000 && *fence < fv+k;fence_iters++) sceKernelUsleep(10);
+            if (g_batch >= 30 && g_batch <= 40 && k == 0) phase("flip-k0");
+            /* Reset the budget PER sub-frame. fence_iters was shared across
+               all 16 waits, so once it reached the cap the later frames would
+               be flipped without ever confirming the GPU had finished
+               rendering them. */
+            fence_iters = 0;
+            for (;fence_iters<200000 && *fence < fv+k;fence_iters++) sceKernelUsleep(10);
             flip_ret = sceVideoOutSubmitFlip(video, (batch_frame0 + k) % NUM_FRAMES, 1,
                                              (int64_t)(batch_frame0 + k));
             if (flip_ev_ok) {
@@ -3246,6 +3274,8 @@ int main(void) {
         }
         fv += BATCH_FRAMES;
         dcb_slot = (dcb_slot + 1) % NUM_FRAMES;
+        g_batch++;
+        phase("batch-end");
         uint64_t t_flip1 = sceKernelGetProcessTime();
         long long d_flip = (long long)(t_flip1 - t_flip0);
 
@@ -3263,7 +3293,10 @@ int main(void) {
            well past the ~11s mark where every earlier build stalled. The old
            windowed condition was written for per-frame submission and went
            quiet after frame 620. */
-        if (1) {
+        /* Keep the trace rate at ~3.75 lines/sec whatever BATCH_FRAMES is.
+           At K=1 this point is reached 60x a second, and trace_line fsyncs
+           every write - logging each frame would itself distort the timing. */
+        if ((frame % 16) == 0) {
             uint64_t now = sceKernelGetProcessTime();
             static uint64_t prev_t = 0;
             uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
@@ -3318,6 +3351,17 @@ int main(void) {
        AreSubmitsAllowed returns 1 once the driver's in-flight counter is 0, so
        this is the driver-level quiesce. Bounded here so a wedged driver cannot
        hang the exit; the game spins unbounded. */
+    { char L[128]; int p=0;
+      const char *m = "loop exit: reason=";
+      while (*m) L[p++] = *m++;
+      p += lg_i64(L+p,(long long)quit_reason);
+      const char *m2 = " lastev=";
+      while (*m2) L[p++] = *m2++;
+      p += lg_hex(L+p,(unsigned long long)(unsigned int)g_last_event);
+      const char *m3 = " frame=";
+      while (*m3) L[p++] = *m3++;
+      p += lg_i64(L+p,(long long)frame);
+      L[p++]='\n'; L[p]=0; trace_msg(L); }
     trace_msg("teardown: begin\n");
     int td_q1=0, td_q2=0;
     sceGnmSubmitDone();
