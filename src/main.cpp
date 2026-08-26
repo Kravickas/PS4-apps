@@ -1254,9 +1254,11 @@ static int submit_eop_flip(int buf_idx, int64_t flip_arg) {
     for (int i = 0; i < 62; i++) cb.emit(0);
     uint32_t* dp[1] = { dcb };
     uint32_t  ds[1] = { cb.sizeBytes() };
-    return sceGnmSubmitAndFlipCommandBuffers(1, dp, ds, nullptr, nullptr,
-                                             (uint32_t)g_screen.handle,
-                                             (uint32_t)buf_idx, 1u, flip_arg);
+    int rc = sceGnmSubmitAndFlipCommandBuffers(1, dp, ds, nullptr, nullptr,
+                                               (uint32_t)g_screen.handle,
+                                               (uint32_t)buf_idx, 1u, flip_arg);
+    if (rc == 0) sceGnmSubmitDone();
+    return rc;
 }
 
 // The displayed buffer holds its label at 1 until another flip replaces it, so
