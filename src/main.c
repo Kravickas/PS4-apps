@@ -247,7 +247,26 @@
    the display does post events) but we never BLOCK on it. Registering the
    event stays - the game does that much. Set to 0 to restore the old blocking
    wait. */
-#define PACE_ON_FENCE_ONLY 1
+/* 0 - BLOCK ON THE FLIP EVENT. Reverted, and the trace says why:
+   with this at 1 the frame loop FREE-RAN at 1240-1468 fps (dt=806us, 681us),
+   filled the 16-deep flip queue within 16 frames, and every submit after that
+   returned 0x80d11081 with the fence stuck.
+
+   My reasoning for setting it to 1 was that the game never calls
+   sceKernelWaitEqueue - it paces on a bare fence spin. True, but incomplete in
+   the way that mattered: THE GAME'S FRAME IS GPU-BOUND. 16.8 submits of real
+   work, ~16.6ms of GPU time, so its fence genuinely takes a frame to arrive
+   and fence pacing holds it at 60fps for free.
+
+   OUR frame is sub-millisecond - one pass, a cube and a floor. Our fence
+   arrives in microseconds, so fence pacing paces us at 1400fps, and every one
+   of those frames registers a flip the display can only retire at 60Hz.
+   Copying the reference's pacing without its workload is no pacing at all.
+
+   The blocking wait is what holds us to vsync. (The 477ms hardware-status
+   probe had been standing in for it by accident, which is why the problem only
+   appeared once that was removed.) */
+#define PACE_ON_FENCE_ONLY 0
 
 /* Back to 1. The submit-count discriminator would confound this run with the
    pacing change - one variable at a time. Set to 2 for that test afterwards. */

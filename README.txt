@@ -1,54 +1,54 @@
 ============================================================
-*** THE 2 FPS WAS MY OWN DIAGNOSTIC PROBE ***
+*** NO PACING AT ALL - PACE_ON_FENCE_ONLY WAS WRONG, REVERTED ***
 ============================================================
-The three split timers found it immediately:
+    f=17   dt=806 us    -> 1240 FPS
+    f=18   dt=681 us    -> 1468 FPS
+    f=16   dt=947150  fenceit=250  saf=0x80d11081  fence=16 fv=18
+    f=948  dt=524994  cplag=198  fence=751 STUCK  fv=950
 
-    f=0    dt=0       wA=1  wB=21     wC=478008
-    f=184  dt=479331  wA=1  wB=27     wC=478569
-    f=350  dt=625359  wA=1  wB=13429  wC=565164
+  With the 477ms probe gone the loop FREE-RUNS at over 1000 fps. Nothing paces
+  it. Within 16 frames the flip queue is full - the 16-pending limit confirmed
+  earlier from shadPS4 - and every submit after that returns 0x80d11081 with
+  the fence stuck. By the end the fence is frozen at 751 while fv climbs to
+  950 and cplag is ~198: the GPU is buried under flips it can never retire.
 
-  wC is the region from the end of the flip loop to the end of the frame, and
-  it contains exactly ONE statement:
+  So "thousands of fps then 1.something" is one failure, not two: free-run,
+  flood the queue, stall.
 
-      if (g_trace_this_frame) g_hw_ok = sceGnmDebugHardwareStatus(0);
+WHY MY CHANGE WAS WRONG - and the reasoning error is worth naming
+  I removed the blocking sceKernelWaitEqueue because the reference never calls
+  it; it paces on a bare fence spin. That is true, and it was incomplete in the
+  one way that mattered:
 
-  That is ioctl 0xc0088111 - the probe I added several rounds ago as "the only
-  live GPU-health query on retail", sampled "only on frames we log - it is a
-  diagnostic, not something to pay for 60 times a second."
+      THE GAME'S FRAME IS GPU-BOUND. 16.8 submits of real work, ~16.6ms of GPU
+      time. Its fence genuinely takes a frame to arrive, so fence pacing holds
+      it at 60fps for free.
 
-  IT BLOCKS FOR 477 MILLISECONDS PER CALL.
+      OUR FRAME IS SUB-MILLISECOND. One pass, a cube and a floor. Our fence
+      arrives in microseconds, so fence pacing paces us at 1400fps - and every
+      one of those frames registers a flip the display can only retire at 60Hz.
 
-  And it fed itself:
-      frame 0 is logged (0 % 16 == 0)   ->  probe runs   ->  478ms frame
-      dt > 30000  ->  g_slow_tail = 200 ->  EVERY frame is logged
-      every frame logged                ->  probe every frame  ->  2fps forever
+  Copying the reference's pacing WITHOUT its workload is no pacing at all. I
+  matched a mechanism and ignored the load it was carrying.
 
-  I had the clue and misread it. Two rounds ago I wrote "frames were already
-  478ms before adaptive logging engaged, so the trace write is innocent." The
-  trace WRITE was innocent. What I had bolted onto the trace CONDITION was not.
-  I cleared the wrong suspect and moved on.
+  And the reason this only surfaced now: the 477ms hardware-status probe had
+  been standing in for the pacing by accident. Removing it exposed that we had
+  none.
 
-FIXED
-    HW_STATUS_POLL 0 (new, default off) - the periodic sample is gone. Even
-    once per 1024 frames is a visible half-second hitch.
-    The sample that matters is UNTOUCHED: hwstall=, taken at the FIRST fence
-    timeout. It fires once per stall, which is exactly when 477ms is free.
-    The startup baseline stays - once, before the loop.
+FIXED: PACE_ON_FENCE_ONLY 0. The blocking flip-event wait is back, so the frame
+is held to one flip per vblank instead of sixteen in flight. What limits us now:
+    the blocking WaitEqueue on the flip event   one per vblank
+    the fence wait                              instant for our workload
+    flipMode 1 = VSYNC on the flip itself
 
-WHAT THE TRACE ALSO SHOWS, now that it is readable
-    up to frame ~184:  cplag=0, fenceit=0   the CP in perfect lockstep
-    by frame 350:      cplag=60, fenceit=2, wB=13429
-
-  So the frame-547 wedge really is fixed - the CP kept pace for 184 frames with
-  the whole frame being my probe. But something still degrades by 350. At 2fps
-  driven by a blocking ioctl that could easily be a consequence rather than a
-  cause, so the next run measures it without the probe in the way.
+  Protective paths unchanged: fence timeouts > 3 switch to no-flip submits so
+  the queue can drain, the event timeout can fire again, and gpu_dead still
+  makes teardown skip every GPU wait.
 
   make
 
-  Expect a large speed change. Then read cplag - if it stays 0 or 1 the pipeline
-  is healthy; if it climbs again, that is the real remaining problem and wB/wC
-  will say where.
+  Expect ~60fps. Watch cplag (should sit at 0 or 1), saf (should never be
+  0x80d11081), and whether it still closes cleanly.
 
 ============================================================
 *** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***
