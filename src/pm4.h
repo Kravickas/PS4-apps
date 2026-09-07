@@ -294,6 +294,36 @@ extern int sceGnmDrawInitDefaultHardwareState350(uint32_t *cmd, uint32_t sizeInD
 
    Falls back to nothing if the call fails - a zero return means the driver
    refused (size < 0x100 dwords), which the caller can see as a short DCB. */
+/* The leading tag NOP the game puts at the START of every command buffer.
+   From its submit dispatcher (eboot 0x94edf0):
+       align  = ((cur + 0xf) & ~7) - (cur + 2);
+       cur[0] = (align << 14) + 0x30000 | 0xc0001000;   TYPE3 NOP, sized
+       cur[1] = 0x68753000;                              tag
+       cur[2] = 0xbadc0de;                               magic  (byte +0x08)
+       cur[3] = ctx->tag_id;                             id     (byte +0x0c)
+       cur[4] = ctx->fence_counter;                      fence  (byte +0x10)
+   With align = 0 that header is exactly 0xc0031000, which pm4_type3(NOP,4)
+   produces. The align term is only padding to an 8-byte boundary.
+
+   We emit the same block, but keep OUR fence in its own ONION allocation
+   rather than inside the command buffer - the game's fence address moves every
+   submit, ours does not, and a fence that is never recycled while the GPU
+   might still be writing it is the safer of the two. The 5th dword carries the
+   frame counter so the block still reads the way the driver's tooling expects.
+
+   gnm's marker gate only accepts 0x68750777..0x68750781, so 0x68753000 is
+   outside that range and the CP simply skips it - exactly as it does for the
+   game. */
+static inline void pm4_leading_tag(struct PM4Builder* b, uint32_t tag_id,
+                                   uint32_t counter) {
+    if (!pm4_have_space(b, 5)) { b->overflow++; return; }
+    pm4_emit(b, pm4_type3(PM4_NOP, 4));   /* = 0xc0031000, align 0 */
+    pm4_emit(b, 0x68753000u);             /* the game's tag */
+    pm4_emit(b, 0x0badc0deu);             /* magic */
+    pm4_emit(b, tag_id);
+    pm4_emit(b, counter);
+}
+
 static inline void pm4_init_default_hw_state(struct PM4Builder* b) {
     uint32_t avail = b->cap - b->off;
     if (avail < 0x100) return;

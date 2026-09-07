@@ -154,6 +154,24 @@
    invalidate, window-offset scissors, viewport depth range, ONION memory,
    one-SubmitDone-per-frame) can be evaluated on their own. If the hang
    survives them, turn this back to 4. */
+/* FORCE_NO_FLIP: never use the marker/flip path - build every frame with
+   EVENT_WRITE_EOP and submit with plain sceGnmSubmitCommandBuffers.
+
+   THE DECISIVE EXPERIMENT. The checkpoint proved the command processor stops
+   at frame 547 having retired stage 0x1F, and the only thing after 0x1F is the
+   completion packet - which on a normal frame is the 64-dword MARKER BLOCK
+   that gnm's patcher rewrites. So the marker/flip path is the prime suspect.
+
+   With this set to 1 the marker is never emitted. NOTHING WILL BE PRESENTED -
+   the screen holds the first frame - but the trace tells us everything:
+       fence keeps advancing, cpm keeps changing for minutes
+           -> the CP is fine without the marker; the flip path is the killer
+       fence still freezes around frame ~550
+           -> the marker is innocent and the problem is elsewhere
+   Either answer eliminates half the remaining search space.
+   Set back to 0 for a normal, presenting build. */
+#define FORCE_NO_FLIP   0
+
 #define KEEP_GPU_FED    1
 #define KA_SLOTS        4      /* dedicated keep-alive command buffers */
 #define BATCH_FRAMES    1
@@ -1196,6 +1214,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Default hardware-state init (sceGnmDrawInitDefaultHardwareState equivalent).
        Required on real PS4 — without it context registers are undefined and the
        GPU hangs. Must come first, before context_control and any draw state. */
+    /* The game's leading tag NOP - first thing in every command buffer.
+       See pm4_leading_tag() in pm4.h. */
+    pm4_leading_tag(b, 0x5344u /* 'SD' */, g_cp_frame);
     CPMARK(b, 0x10);   /* main: entered */
     pm4_init_default_hw_state(b);
     CPMARK(b, 0x11);   /* main: hw state done */
@@ -1575,6 +1596,7 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        separate command buffer (it runs first when present), so it also needs
        the register defaults established before any draw. Idempotent with the
        main DCB's copy when both run. */
+    pm4_leading_tag(b, 0x5348u /* 'SH' */, g_cp_frame);
     CPMARK(b, 0x20);   /* shadow: entered */
     pm4_init_default_hw_state(b);
     CPMARK(b, 0x21);   /* shadow: hw state done */
@@ -3459,6 +3481,12 @@ int main(void) {
 #endif  /* with BATCH_FRAMES==1 the CPU's own write to vb is the one the GPU
            reads, so no staging or GPU-side restore is needed at all */
 
+        /* Set BEFORE either builder, and OUTSIDE the shadow conditional: both
+           leading tags and every CPMARK embed this, and if the shadow pass is
+           skipped it would otherwise never update and the checkpoint would look
+           frozen for the wrong reason. */
+        g_cp_frame = frame;
+
         uint32_t shadow_sz = 0;
 #if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
         if (shadow_depth && g_shadow_ready) {
@@ -3471,12 +3499,11 @@ int main(void) {
         }
 #endif
 
-        g_cp_frame = frame;   /* checkpoint value changes every frame */
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
                               fb[bi],depth,0,fence,fv+batch_pos,
-                              g_display_stalled /* 0 = marker flip (normal), 1 = no-flip */);
+                              (FORCE_NO_FLIP || g_display_stalled) /* 1 = no marker, EOP only */);
         batch_pos++;
         if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
         batch_pos = 0;
@@ -3520,7 +3547,7 @@ int main(void) {
             /* The game's flip path: ONE call that submits and registers the
                flip, with the marker block at the DCB tail carrying our fence.
                eboot 0x94edf0 passes (1, &dcb, &size, 0, 0, flipMode, ...). */
-            if (g_display_stalled) {
+            if (FORCE_NO_FLIP || g_display_stalled) {
                 /* NO-FLIP submit. The flip is registered by
                    sceGnmSubmitAndFlipCommandBuffers itself, via the marker -
                    NOT by our flip loop. So skipping the WAIT (fskip) never
@@ -3667,7 +3694,7 @@ int main(void) {
                 }
             }
 #endif
-            if (flip_ev_ok) {
+            if (flip_ev_ok && !FORCE_NO_FLIP) {
                 /* BOUNDED. This was called with a NULL timeout pointer, i.e.
                    block forever, and it is the only unbounded wait between
                    "pre-flips" and "batch-end" - which is exactly where the app
@@ -3680,7 +3707,9 @@ int main(void) {
                 int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
                 if (wr != 0 || out <= 0) {
                     g_evt_timeouts++;
-                    g_display_stalled = 1;   /* stop queuing flips */
+                    /* Under FORCE_NO_FLIP no flip is ever queued, so no flip
+                       event can ever arrive - do NOT read that as a stall. */
+                    if (!FORCE_NO_FLIP) g_display_stalled = 1;
                 } else if (g_display_stalled) {
                     /* the display is answering again - resume normal flips */
                     g_display_stalled = 0; g_stall_recoveries++;

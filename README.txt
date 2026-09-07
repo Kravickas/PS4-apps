@@ -1,55 +1,53 @@
 ============================================================
-*** THE FAILURE ORDER IS THE OPPOSITE OF WHAT I ASSUMED ***
+*** IMPLEMENTING THE GAME'S STRUCTURE, NOT ANOTHER EXPERIMENT ***
 ============================================================
-  f=544  dt=17201   fence=545  fenceit=0    flipit=1  evto=0   OK
-  f=547  dt=105372  fence=548  fenceit=0    flipit=0  evto=1   FLIP EVENT DIES
-  f=548  dt=463507  fence=548  fenceit=250  flipit=0  evto=1   fence dies next
+Fair challenge. I had traced this rounds ago and kept deferring it.
 
-At frame 547 the FENCE IS HEALTHY - it advanced to 548 with fenceit=0. What
-fails first is the FLIP EVENT: evto 0 -> 1, flipit 0. The fence stall arrives
-one frame LATER.
+THE GAME'S COMMAND BUFFER STARTS WITH A TAG NOP. Ours started with the
+hardware state. From its submit dispatcher (eboot 0x94edf0):
 
-So this is the DISPLAY failing and taking the GPU with it, not a GPU stall
-taking down the display. I had it backwards in every previous round.
+    align  = ((cur + 0xf) & ~7) - (cur + 2);
+    cur[0] = (align << 14) + 0x30000 | 0xc0001000;   TYPE3 NOP, sized
+    cur[1] = 0x68753000;                              tag
+    cur[2] = 0xbadc0de;                               magic  (byte +0x08)
+    cur[3] = ctx->tag_id;                             id     (byte +0x0c)
+    cur[4] = ctx->fence_counter;                      fence  (byte +0x10)
 
-*** AND MY fskip FIX DID NOT WORK - here is why ***
-saf=0x80d11081 still appeared at frame 563, with fskip climbing to 33.
-The flip is no longer issued by our flip loop: sceGnmSubmitAndFlipCommandBuffers
-SUBMITS AND REGISTERS THE FLIP in one call via the marker. Our loop only WAITS.
-So `continue` skipped the WAIT, never the flip, and the queue filled exactly as
-before.
+With align = 0 that header is EXACTLY 0xc0031000 - verified identical to our
+pm4_type3(PM4_NOP, 4). The align term is only padding to an 8-byte boundary.
+EVERY submit the game makes begins with this block. We emitted nothing like it.
 
-*** AND A FLAW IN MY OWN DIAGNOSTIC ***
-cpm=0x1f on every frame, dead ones included. I read that as "the CP is still
-retiring the whole buffer". IT PROVES NOTHING - the checkpoint wrote a CONSTANT,
-so a stopped CP leaves the last value in place and looks identical to a live
-one.
+NOW IMPLEMENTED: pm4_leading_tag() emits the same five dwords at the start of
+both the shadow and the main pass, with the same header, the same 0x68753000
+tag and the same 0xbadc0de magic.
 
-THREE FIXES
- 1. CHECKPOINT NOW PROVES LIVENESS. The value is (frame << 8) | stage, so it
-    CHANGES every frame. If cpm stops changing, the command processor really
-    has stopped - and now we can tell.
- 2. NO-FLIP SUBMIT WHILE THE DISPLAY IS STALLED. When the flip event times out
-    we set g_display_stalled and switch to the driver's OTHER documented path:
-    build_dcb(no_flip=1) emitting EVENT_WRITE_EOP, submitted with plain
-    sceGnmSubmitCommandBuffers. That keeps the GPU fed and the fence observable
-    WITHOUT adding to the flip queue, so the display can drain instead of
-    hitting 0x80d11081. It clears itself (drec=) as soon as an event arrives.
- 3. REMOVED THE `continue` I ADDED LAST ROUND. It skipped the event wait - the
-    one place a recovery can be observed - so the app could never have left
-    no-flip mode. It also never stopped a flip, for the reason above. fskip is
-    now bookkeeping only.
+WHAT I DID NOT COPY, AND WHY
+  The game's FENCE lives inside that NOP - a different address every submit.
+  Ours stays in its own ONION allocation. A fence that is never recycled while
+  the GPU might still be writing it is the safer of the two, and relocating it
+  is a real change with real risk. That single difference is why I kept
+  deferring the whole block, which was the wrong call: the TAG is independent
+  of the fence and I could have shipped it much earlier.
+
+  gnm's marker gate only accepts 0x68750777..0x68750781, so 0x68753000 falls
+  outside it and the CP simply skips the block - exactly as it does for the
+  game.
+
+ALSO IN THIS BUILD
+  FORCE_NO_FLIP back to 0 - this is a normal presenting build, not a probe.
+  g_cp_frame is now set OUTSIDE the shadow-pass conditional. It had landed
+  inside it, so with the shadow pass skipped the checkpoint would have looked
+  frozen for entirely the wrong reason - a diagnostic that lies is worse than
+  none.
+
+STILL TRUE FROM THE LAST TRACE
+  cpm = 0x2231f -> the command processor stopped at frame 547, stage 0x1F, and
+  no-flip submits afterwards did not advance the fence either. The CP is dead,
+  not merely refusing flips. This build does not claim to fix that; it makes
+  our command stream structurally match the reference so that difference is no
+  longer a variable.
 
   make
-
-READ THE LOG
-  cpm=    MUST CHANGE every frame now. If it freezes, the CP is genuinely dead
-          and the upper 24 bits tell you the last frame it executed.
-  dstall= 1 while the display is not answering, 0 normally
-  drec=   how many times it recovered
-  saf=    should NO LONGER reach 0x80d11081
-  fstuck= if the fence still freezes, at what value (521 then 548 so far -
-          close but not identical, so it is not a fixed count)
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***
