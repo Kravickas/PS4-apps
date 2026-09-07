@@ -1,51 +1,45 @@
 ============================================================
-*** IMPLEMENTING THE GAME'S STRUCTURE, NOT ANOTHER EXPERIMENT ***
+*** BUILD FIX + THE CHECK THAT MAKES IT NOT HAPPEN AGAIN ***
 ============================================================
-Fair challenge. I had traced this rounds ago and kept deferring it.
+    src/pm4.h:319: call to undeclared function 'pm4_have_space'
+    src/pm4.h:444: static declaration follows non-static declaration
 
-THE GAME'S COMMAND BUFFER STARTS WITH A TAG NOP. Ours started with the
-hardware state. From its submit dispatcher (eboot 0x94edf0):
+pm4_leading_tag at 319 called pm4_have_space defined at 444. Same class of
+mistake as the pm4_write_data_dword / pm4_emit failure two builds ago: I added
+a helper next to related code instead of after its dependencies.
 
-    align  = ((cur + 0xf) & ~7) - (cur + 2);
-    cur[0] = (align << 14) + 0x30000 | 0xc0001000;   TYPE3 NOP, sized
-    cur[1] = 0x68753000;                              tag
-    cur[2] = 0xbadc0de;                               magic  (byte +0x08)
-    cur[3] = ctx->tag_id;                             id     (byte +0x0c)
-    cur[4] = ctx->fence_counter;                      fence  (byte +0x10)
+FIXED: pm4_have_space moved to sit immediately after pm4_init, which is right
+after the struct - it needs nothing else. Current order:
+    211 struct PM4Builder
+    218 pm4_init
+    232 pm4_have_space
+    243 pm4_emit
+    260 pm4_write_data_dword
+    329 pm4_leading_tag
+    450 pm4_event_write_eop
+    494 pm4_prepare_flip
 
-With align = 0 that header is EXACTLY 0xc0031000 - verified identical to our
-pm4_type3(PM4_NOP, 4). The align term is only padding to an 8-byte boundary.
-EVERY submit the game makes begins with this block. We emitted nothing like it.
+AND A REAL CHECK, because catching this by hand twice is not a method.
+tools_ordercheck.py parses every static function in a header, walks its body,
+and reports any call to another static function - or use of a struct - that is
+defined LATER in the file. It does not depend on me guessing which pairs to
+inspect.
 
-NOW IMPLEMENTED: pm4_leading_tag() emits the same five dwords at the start of
-both the shadow and the main pass, with the same header, the same 0x68753000
-tag and the same 0xbadc0de magic.
+  VERIFIED IT ACTUALLY CATCHES THE BUG: I re-injected the broken ordering into
+  a copy and ran it -
+      *** pm4_leading_tag (line ~112) uses pm4_have_space which is defined
+          LATER ***   exit=1
+  and on the fixed header it reports 24 static functions, no
+  use-before-definition, exit=0. A checker I had not falsified would be worth
+  no more than the assumption it replaced.
 
-WHAT I DID NOT COPY, AND WHY
-  The game's FENCE lives inside that NOP - a different address every submit.
-  Ours stays in its own ONION allocation. A fence that is never recycled while
-  the GPU might still be writing it is the safer of the two, and relocating it
-  is a real change with real risk. That single difference is why I kept
-  deferring the whole block, which was the wrong call: the TAG is independent
-  of the fence and I could have shipped it much earlier.
+  Also run: src/obj_loader.h clean (17 functions), no pm4_* used in main.c that
+  is missing from pm4.h, no header calling a function defined in main.c, and
+  brace/paren/bracket balance across all four sources.
 
-  gnm's marker gate only accepts 0x68750777..0x68750781, so 0x68753000 falls
-  outside it and the CP simply skips the block - exactly as it does for the
-  game.
-
-ALSO IN THIS BUILD
-  FORCE_NO_FLIP back to 0 - this is a normal presenting build, not a probe.
-  g_cp_frame is now set OUTSIDE the shadow-pass conditional. It had landed
-  inside it, so with the shadow pass skipped the checkpoint would have looked
-  frozen for entirely the wrong reason - a diagnostic that lies is worse than
-  none.
-
-STILL TRUE FROM THE LAST TRACE
-  cpm = 0x2231f -> the command processor stopped at frame 547, stage 0x1F, and
-  no-flip submits afterwards did not advance the fence either. The CP is dead,
-  not merely refusing flips. This build does not claim to fix that; it makes
-  our command stream structurally match the reference so that difference is no
-  longer a variable.
+The build content is otherwise unchanged from the previous round: the game's
+leading tag NOP (0xc0031000 / 0x68753000 / 0xbadc0de), FORCE_NO_FLIP = 0, and
+g_cp_frame set outside the shadow conditional.
 
   make
 

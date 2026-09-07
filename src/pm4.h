@@ -222,6 +222,18 @@ static inline void pm4_init(struct PM4Builder* b, uint32_t* buffer, uint32_t cap
     b->overflow = 0;
 }
 
+/* The game checks remaining space before emitting a completion packet:
+       no-flip:  if (remaining_dwords <  6)    -> grow/flush callback
+       flip:     if (remaining_dwords < 0x40)  -> grow/flush callback
+   It never emits one into a buffer too small to hold it. Ours would be
+   silently truncated by pm4_emit, which for the flip marker means it no longer
+   sits at dcb[size_dw - 0x40] and gnm's patcher rewrites the wrong dwords.
+   These report failure so the caller can refuse to submit. */
+static inline int pm4_have_space(const struct PM4Builder* b, uint32_t dwords) {
+    return (b->cap - b->off) >= dwords;
+}
+
+
 /* Silently dropping on overflow is dangerous here, not merely lossy: the flip
    marker MUST be the last 64 dwords of the DCB because gnm's patcher reads
    dcb[size_dw - 0x40]. If the buffer filled mid-build, prepare_flip's dwords
@@ -434,16 +446,6 @@ static inline void pm4_draw_index_auto(struct PM4Builder* b, uint32_t index_coun
     pm4_emit(b, 2); // draw_initiator: source_select=AUTO
 }
 
-/* The game checks remaining space before emitting a completion packet:
-       no-flip:  if (remaining_dwords <  6)    -> grow/flush callback
-       flip:     if (remaining_dwords < 0x40)  -> grow/flush callback
-   It never emits one into a buffer too small to hold it. Ours would be
-   silently truncated by pm4_emit, which for the flip marker means it no longer
-   sits at dcb[size_dw - 0x40] and gnm's patcher rewrites the wrong dwords.
-   These report failure so the caller can refuse to submit. */
-static inline int pm4_have_space(const struct PM4Builder* b, uint32_t dwords) {
-    return (b->cap - b->off) >= dwords;
-}
 
 static inline void pm4_event_write_eop(struct PM4Builder* b,
                                        volatile uint32_t* fence_addr,
