@@ -352,7 +352,19 @@ static int g_hw_state_done = 0;
 
    Set to 0 to restore the old per-frame behaviour if anything renders wrong -
    that is the risk here: if some register we rely on is NOT actually persisting,
-   the first frame after the change will show it immediately. */
+   the first frame after the change will show it immediately.
+
+   WHAT THIS DOES NOT DO: it does NOT remove per-frame CLEAR_STATE. gnm
+   prepends its OWN preamble buffer to the first submit after every
+   SubmitDone, and that buffer is
+       CONTEXT_CONTROL(0x80000000, 0x80000000) + CLEAR_STATE
+       + ACQUIRE_MEM(coher 0x2ec47fc0, size 0xffffffff)
+   decoded from gnm's constant blobs at 0x8a60/0x8a70. So CLEAR_STATE and a
+   full-range cache invalidate happen once per frame from the DRIVER whatever
+   we do. This define only removes ~1000 bytes of redundant register writes
+   from OUR buffer. It was briefly recorded as having tested and ruled out the
+   per-frame-CLEAR_STATE hypothesis; it did not, and that hypothesis is not
+   testable from our side. */
 #define INIT_STATE_ONCE 1
 
 static inline void pm4_init_default_hw_state_always(struct PM4Builder* b) {
@@ -486,7 +498,16 @@ static inline void pm4_event_write_eop(struct PM4Builder* b,
        for them - low bits are reserved - so an unaligned pointer would put
        garbage in reserved bits. */
     pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFCu));        // address_lo, 4-byte aligned
-    pm4_emit(b, (uint32_t)(addr >> 32) | 0x20000000u);  // addr_hi | data_sel=1(Data32) | int_sel=0 -- MATCHES THE GAME: God of War's submit path (eboot 0x94edf0) emits exactly (addr_hi | 0x20000000)
+    /* addr_hi | data_sel=Data32Low | int_sel=None.
+       Decoded against an independent field layout (shadPS4 PM4CmdEventWriteEop):
+           address_hi  bits [0:16]
+           int_sel     bits [24:26]  -> (0x20000000 >> 24) & 3 = 0 = None
+           data_sel    bits [29:32]  -> (0x20000000 >> 29) & 7 = 1 = Data32Low
+       So: write a 32-bit fence value to memory, raise NO interrupt. Identical
+       to what the game emits (eboot 0x94edf0), now confirmed a third time
+       against a separate decoder's definitions rather than only by matching
+       the game's constant. */
+    pm4_emit(b, (uint32_t)(addr >> 32) | 0x20000000u);
     pm4_emit(b, fence_value);                           // data_lo
     pm4_emit(b, 0);                                     // data_hi
 }

@@ -48,6 +48,46 @@
 // ============================================================================
 
 #include <stdint.h>
+/* SET_AFFINITY: declare which cores we may run on, as the game does.
+   This is the ONLY change in this build that adds new imports
+   (scePthreadSelf, scePthreadSetaffinity), and we currently link no
+   scePthread* symbol at all - so if the OpenOrbis stubs do not carry them the
+   LINK will fail. Set to 0 and the two calls disappear entirely, along with
+   the need for the imports. affinity ret= in the log says what happened:
+       0    the call succeeded
+       <0   the call failed (harmless, default affinity kept)
+       -98  SET_AFFINITY was 0
+       -99  never reached */
+/* MAP_COMPUTE_QUEUES: map two compute queues at init exactly as the game does,
+   even though we issue no compute dispatches.
+
+   WHY, given the corrected diagnosis: the failure is SUBMIT -> DISPATCH - the
+   command processor completes a buffer and never starts the next. The DOORBELL
+   is the dispatch mechanism, and it is a lock-free ring in a shared page with
+   no syscall: write index wraps at 64 without checking the consumer, pending
+   count saturates at 0x40 rather than erroring. Whether the kernel services
+   that ring may depend on having a mapped queue. The game maps two
+   (pipe 0 queue 4, pipe 1 queue 4, ring 0x1000); we map none, and I dismissed
+   that rounds ago with "we issue no compute dispatches".
+
+   NOW WITH A NAME BEHIND IT. AMD's GC documentation describes exactly this
+   structure: pipes hold hardware queues (HQDs), the driver creates one MQD per
+   hardware queue, and the MicroEngine Scheduler maps MQDs to HQDs. Mapping a
+   queue is what gives the MES something to schedule; an application that maps
+   none has no user queues at all, only the legacy kernel-queue path. The
+   doorbell we ring is the standard AMD doorbell - the "submit with no ioctl
+   per submission" mechanism - and switch_buffer is a pipe queue-switch
+   request. pipe <= 6 and queue <= 7 are the hardware bounds, and the
+   queue + pipe*8 return is the flattened HQD index.
+   Set to 0 to revert. mcq= in the log carries both return codes. */
+/* 0 = mode 0, ioctl 0xc0108102, THE GAME'S PATH.
+   1 = mode 1, ioctl 0xc020810c, the wait-free path the game never uses. */
+#define WAITFREE_SUBMIT 0
+
+#define MAP_COMPUTE_QUEUES 1
+
+#define SET_AFFINITY 1
+
 #include "pm4.h"
 #include "logo_texture.h"
 #include "nid_resolve.h"
@@ -172,6 +212,36 @@
    Set back to 0 for a normal, presenting build. */
 #define FORCE_NO_FLIP   0
 
+/* 2 = two submits per frame but still ONE flip. A DISCRIMINATOR, not a fix:
+   the failure is a COUNT (frame ~547 whether that takes 11 seconds at 60fps or
+   67 seconds at 8fps), and everything consumed once per frame is still a
+   suspect. Two submits per frame separates them:
+       dies at frame ~273 -> the resource is per SUBMIT
+       dies at frame ~547 -> per FRAME or per FLIP; submits are innocent
+   Set back to 1 for one submit per frame. */
+/* PACE_ON_FENCE_ONLY: pace exactly the way the game does.
+
+   Established from the binary: sceKernelWaitEqueue has ZERO call sites and
+   ZERO pointer references in the whole eboot, as do sceVideoOutWaitVblank,
+   GetFlipStatus and IsFlipPending. The game CREATES the equeue and REGISTERS
+   the flip event (1 call each) and then NEVER TOUCHES IT AGAIN. Its entire
+   per-frame CPU pacing is:
+        submit; SubmitDone; spin until *fence == counter;
+   The display paces it because the flip is issued with flipMode 1 (VSYNC), so
+   the flip cannot retire faster than scanout and neither can the fence.
+
+   We were additionally doing a BLOCKING sceKernelWaitEqueue every frame - a
+   kernel round trip and a per-frame CONSUMABLE the reference does not have.
+   "Something consumed once per frame that runs out at ~547" is exactly our bug.
+
+   With this set we still DRAIN the queue non-blockingly (so it cannot grow if
+   the display does post events) but we never BLOCK on it. Registering the
+   event stays - the game does that much. Set to 0 to restore the old blocking
+   wait. */
+#define PACE_ON_FENCE_ONLY 1
+
+/* Back to 1. The submit-count discriminator would confound this run with the
+   pacing change - one variable at a time. Set to 2 for that test afterwards. */
 #define KEEP_GPU_FED    1
 #define KA_SLOTS        4      /* dedicated keep-alive command buffers */
 #define BATCH_FRAMES    1
@@ -669,6 +739,33 @@ static volatile uint32_t *g_cp_mark = 0;
         pm4_write_data_dword((b), g_cp_mark, ((g_cp_frame & 0xFFFFFF) << 8) | (code)); \
 } while (0)
 static uint32_t g_cp_frame = 0;
+/* Timestamps cost a kernel round trip each, and we made FIFTEEN of them per
+   frame purely to fill trace fields that are discarded on 15 frames out of 16.
+   The reference title does not import sceKernelGetProcessTime at all. This
+   returns a real timestamp only on frames that will actually be logged, and 0
+   otherwise - so instrumentation costs nothing on the frames it is not used
+   on. g_trace_this_frame is set once per frame, before the work begins. */
+static int g_trace_this_frame = 0;
+static int g_affinity_ret = -99;   /* result of scePthreadSetaffinity at init */
+static int g_hw_ok = -1;           /* kernel's own GPU health verdict */
+static int g_hw_ok_at_stall = -1;  /* same, sampled at the first fence timeout */
+static int g_mcq0 = -99, g_mcq1 = -99;   /* MapComputeQueue return codes */
+
+/* Keep an angle in [0, 2pi). The rotation accumulators grow without bound -
+   after an hour at 60fps cam_yaw reaches ~4320 rad, where float32 has only
+   ~0.001 rad of resolution left and the motion visibly quantises. Wrapping
+   costs nothing and removes a class of long-run drift.
+   (Checked: this is NOT the frame-547 hang - at 547 no sin or cos of any
+   accumulator is near zero, so nothing degenerates there.) */
+static float wrap_2pi(float a) {
+    const float TWO_PI = 6.28318530718f;
+    while (a >= TWO_PI) a -= TWO_PI;
+    while (a < 0.0f)    a += TWO_PI;
+    return a;
+}
+static inline uint64_t tstamp(void) {
+    return g_trace_this_frame ? sceKernelGetProcessTime() : 0;
+}
 static int g_fence_timeouts = 0;    /* EOP fence waits that expired */
 static unsigned int g_fence_stuck_at = 0;  /* fence value when it stopped */
 static unsigned int g_fence_wanted = 0;    /* value we were waiting for */
@@ -690,16 +787,36 @@ static const char *asset_path(int slot, const char *name) {
     return d;
 }
 static int lg_i64(char *o, long long v);
+static void trace_line(const char *buf, unsigned long n);
 /* Write a phase marker, but only for the batches around the observed crash
    (it dies during batch 34), so this costs nothing for the whole run before. */
+/* Phase markers are ACCUMULATED, not written one at a time.
+
+   trace_line does sceKernelWrite + sceKernelFsync - two syscalls, one of them a
+   synchronous flush to storage. With 8 phase() calls a frame that was 16
+   syscalls and 8 fsyncs EVERY FRAME inside the window, which is both a large
+   per-frame cost and enough I/O to distort the timing we are trying to measure.
+
+   Now they go into a buffer and the whole frame's worth is emitted in ONE
+   write + ONE fsync by phase_flush() at the end of the frame. Same data, same
+   durability, 1/8th the syscalls. */
+static char g_ph_buf[1024];
+static int  g_ph_len = 0;
 static void phase(const char *tag){
-    if (g_batch < 300 || g_batch > 620) return;
-    char L[64]; int p=0;
+    if (g_batch < 500 || g_batch > 580) return;
+    if (g_ph_len > (int)sizeof(g_ph_buf) - 64) return;   /* never overrun */
+    char *L = g_ph_buf + g_ph_len; int p=0;
     const char *m="PH "; while(*m) L[p++]=*m++;
     p+=lg_i64(L+p,(long long)g_batch);
     L[p++]=' ';
     while(*tag) L[p++]=*tag++;
-    L[p++]='\n'; L[p]=0; trace_msg(L);
+    L[p++]='\n';
+    g_ph_len += p;
+}
+static void phase_flush(void){
+    if (g_ph_len <= 0) return;
+    trace_line(g_ph_buf, (unsigned long)g_ph_len);
+    g_ph_len = 0;
 }
 static int g_slow_submits = 0;     /* consecutive submits over 100ms = the wall */
 static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
@@ -1589,8 +1706,11 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     const uint32_t *bg_v, uint32_t *desc,
     int model_verts, int floor_verts,
     uint32_t *ib_ptr, int num_indices, int is_indexed,
-    void *shadow_depth,
-    volatile uint32_t *fence, uint32_t fv) {
+    void *shadow_depth) {
+    /* NO fence/fv parameter. The shadow pass emits no EOP - it shares one
+       command buffer with the main pass and the inter-pass ACQUIRE_MEM is the
+       barrier - so it never had anything to signal. Carrying an unused fence
+       through the signature invited the mistake of believing it was live. */
 
     /* Default hardware-state init — same as main DCB. The shadow buffer is a
        separate command buffer (it runs first when present), so it also needs
@@ -2274,7 +2394,40 @@ int main(void) {
        Placed here because the loading screen submits and calls SubmitDone
        before the main loop, so enabling here gets it flushed early; the old
        placement was after the loading screen and missed those submits. */
+    /* MODE 0, NOT 1. Decompiling gnm's packet_builder showed the submit mode
+       selects a DIFFERENT KERNEL IOCTL:
+           if (6 < mode) -> "submit mode error error (mode:%d)"
+           (0x2d >> mode) & 1   ->  0,2,3,5 : ioctl 0xc0108102, 16-byte arg
+                                    1,4,6   : ioctl 0xc020810c, 32-byte arg
+       We were calling gnm_set_mode(1), so every submit went down 0xc020810c.
+       THE GAME DOES NOT IMPORT libSceGnmWaitFreeSubmit AT ALL - it is mode 0
+       and uses 0xc0108102. Two different ioctls, two different kernel
+       handlers. We spent the whole investigation comparing packets, state,
+       flip protocol and CPU path against the game while submitting down a
+       path it never touches.
+
+       Wait-free went in to remove a 510ms stall at frame 541, and it did -
+       but the note taken at the time was already right: it is a BRAKE
+       REMOVAL, and the GPU wedged permanently instead. The wedge is now known
+       to be a DISPATCH failure (the CP completes one buffer and never starts
+       the next), which is exactly what a different submit ioctl with
+       different kernel bookkeeping could produce.
+
+       Set WAITFREE_SUBMIT to 1 to go back to mode 1. */
+#if WAITFREE_SUBMIT
     int mode_set = gnm_set_mode(1);
+#else
+    /* DO NOT CALL IT AT ALL. Both waitfree entry points (gnm 0x1a10 / 0x1a60)
+       take the driver mutex, issue a DRAIN (ioctl 0xc0048117) if the counter
+       is non-zero, then write the mode byte at 0x1007c and mark it dirty -
+       which SubmitDone later pushes with ioctl 0xc004811d.
+       THE GAME CALLS NEITHER FUNCTION, so it never drains this way and never
+       issues the mode-push ioctl. Calling gnm_set_mode(0) to "select mode 0"
+       would still do both. The mode byte is a zero-initialised static, so
+       mode 0 is already the default and the exact match is to leave it
+       untouched. */
+    int mode_set = 0;
+#endif
     int mode_set_early = mode_set;      /* -2 = driver not ready yet, will retry */
     int mode_now = gnm_get_mode();
 
@@ -2627,23 +2780,26 @@ int main(void) {
     g_ps_grad_gpu = ps_grad_gpu;
 
     uint32_t *dcb_mem[NUM_FRAMES];
+    /* NOT ALLOCATED. The shadow pass shares the main pm4 builder and its
+       command buffer - build_shadow_dcb writes into the same DCB, which is why
+       the inter-pass ACQUIRE_MEM is the barrier. These NUM_FRAMES x DCB_SIZE
+       buffers were allocated at startup and never written or submitted. */
     uint32_t *shadow_dcb_mem[NUM_FRAMES];
     /* Command buffers in ONION: the CP reads them and we rewrite them by CPU
        every frame, so they need coherency, not write-combine bandwidth. */
     for (int i=0;i<NUM_FRAMES;i++) {
         dcb_mem[i]=(uint32_t*)gpu_alloc_typed(DCB_SIZE,0x10000,MEM_TYPE_ONION);
-        shadow_dcb_mem[i]=(uint32_t*)gpu_alloc_typed(DCB_SIZE,0x10000,MEM_TYPE_ONION);
+        shadow_dcb_mem[i]=0;   /* unused - the shadow pass shares the main DCB */
     }
     /* Fences in ONION: the GPU writes them and the CPU polls them. */
     volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
-    volatile uint32_t *shadow_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
     /* Separate fence for the keep-alive submits so they never interfere with
        the frame fence the flip path writes. */
     volatile uint32_t *keepalive_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
     uint32_t keepalive_fv = 0;
     /* The EOP packet writes through these addresses. A NULL fence would make
        the GPU write to address 0, which faults the command processor. */
-    if (!fence || !shadow_fence) FATAL_EXIT("fence alloc failed");
+    if (!fence) FATAL_EXIT("fence alloc failed");
     /* Checkpoint slot for the GPU-side stage markers. ONION so the CPU sees
        the CP's writes immediately. Optional: if it fails, CPMARK compiles to
        nothing at runtime and the rest of the app is unaffected. */
@@ -2669,7 +2825,6 @@ int main(void) {
     ka_ok = 0;
 #endif
     *fence=0;
-    *shadow_fence=0;
 
 
 
@@ -2856,6 +3011,63 @@ int main(void) {
        has been moved to ONION, so this only has to happen ONCE - which is
        exactly what the API is for. Without it the first frames can sample
        texels the GPU has not seen yet. */
+    /* Declare which cores we may run on, as the game does. It calls
+       scePthreadSetaffinity 7 times; the general worker mask it uses is 0x3f
+       (cores 0-5), and it pins the thread that owns SubmitDone /
+       UnmapComputeQueue / VideoOutClose to core 0 (mask 0x1).
+       We set 0x3f rather than pinning to one core: it matches the reference's
+       general mask and leaves the scheduler free to keep our hot fence spin off
+       whichever core SceVideoOutServiceThread happens to be on. That thread
+       lives in OUR process (libSceVideoOut creates it) and on a base PS4 it
+       does display housekeeping every 100ms - starving it is not something to
+       leave to chance.
+       HONEST NOTE ON WHAT THIS DOES AND DOES NOT DO: 0x3f is cores 0-5, and
+       the videoout service thread FLOATS - traced it, its prio/affinity come
+       from an internal config block at module init (vo 0x580, below the export
+       range) and NO public API reaches them, so it is free to use those same
+       six cores. This mask therefore does NOT separate us from it. It is
+       PARITY WITH THE GAME, not contention avoidance.
+       A narrower mask WOULD separate us, but pinning the main thread costs
+       every other thread in the process, and "our spin starves the display
+       thread" is a hypothesis with no measurement behind it - the spin
+       normally exits in ~30us. If hwstall= comes back 1, that hypothesis moves
+       up the list and a subset mask becomes worth testing on evidence.
+       Failure is non-fatal: if the call is unavailable we simply keep the
+       default affinity. */
+#if SET_AFFINITY
+    { void *self = scePthreadSelf();
+      g_affinity_ret = self ? scePthreadSetaffinity(self, 0x3fULL) : -1; }
+#else
+    g_affinity_ret = -98;   /* not attempted */
+#endif
+
+#if MAP_COMPUTE_QUEUES
+    /* Map two compute queues exactly as the game does at init (pipe 0 queue 4,
+       pipe 1 queue 4, ring 0x1000 dwords). We dispatch nothing to them - see
+       the note at MAP_COMPUTE_QUEUES for why they may still matter.
+       PRX guards (gnm 0x3cf0): pipe <= 6, queue <= 7, ring 4-byte aligned.
+       ONION so the read-pointer the kernel writes is CPU-visible.
+       Returns queue + pipe*8 on success (gnm 0x3dcf: lea eax,[r15+rbx*8]), so
+       pipe0/queue4 -> 4 and pipe1/queue4 -> 12. Errors are 0x80d170xx, which
+       are negative as int32, so >= 0 separates id from failure cleanly and
+       Unmap gets exactly the id Map returned. */
+    {
+        void *cq_ring0 = gpu_alloc_typed(0x1000 * 4, 0x1000, MEM_TYPE_ONION);
+        void *cq_ring1 = gpu_alloc_typed(0x1000 * 4, 0x1000, MEM_TYPE_ONION);
+        void *cq_rptr  = gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
+        if (cq_ring0 && cq_ring1 && cq_rptr) {
+            my_memset(cq_ring0, 0, 0x1000 * 4);
+            my_memset(cq_ring1, 0, 0x1000 * 4);
+            my_memset(cq_rptr, 0, 0x1000);
+            g_mcq0 = sceGnmMapComputeQueue(0, 4, cq_ring0, 0x1000, cq_rptr);
+            g_mcq1 = sceGnmMapComputeQueue(1, 4, cq_ring1, 0x1000,
+                                           (void*)((char*)cq_rptr + 0x40));
+        } else {
+            g_mcq0 = g_mcq1 = -2;   /* allocation failed */
+        }
+    }
+#endif
+
     sceGnmFlushGarlic();
 
     uint32_t frame=0;
@@ -2875,9 +3087,18 @@ int main(void) {
     int dcb_slot = 0;
     /* Per-sub-frame staging of everything the CPU rewrites in vb each frame,
        copied back by DMA at GPU execution time. */
+#if BATCH_FRAMES > 1
     void *batch_stage = gpu_alloc_typed(BATCH_STAGE_SZ * BATCH_FRAMES + 0x1000,
                                         0x4000, MEM_TYPE_ONION);
-    if (!batch_stage) return 1;
+#else
+    /* Not allocated: its only user is inside #if BATCH_FRAMES > 1, so at
+       BATCH_FRAMES == 1 this was reserved GPU memory nothing could write. */
+    void *batch_stage = (void*)1;   /* non-NULL so the check below passes */
+#endif
+    /* Was a bare `return 1`, and it sits AFTER sceVideoOutRegisterBuffers
+       (line ~2350) - so it would exit with video-out still registered and the
+       OS blocking on teardown. Use the unwinding path like every other fatal. */
+    if (!batch_stage) FATAL_EXIT("batch staging alloc failed");
 
     /* Tell the system we have finished loading, so it tears down its splash
        screen. Until this is called the system keeps the splash up and keeps
@@ -2895,8 +3116,23 @@ int main(void) {
        process has never issued that ioctl. Speculative but cheap and safe
        (byte-validated; a layout mismatch makes it a no-op). */
     /* Retry if the driver was not ready at the earlier attempt. */
-    if (mode_set != 0) { mode_set = gnm_set_mode(1); mode_now = gnm_get_mode(); }
+#if WAITFREE_SUBMIT
+            if (mode_set != 0) { mode_set = gnm_set_mode(1); mode_now = gnm_get_mode(); }
+#endif
     { char L[96]; int p=0;
+      g_hw_ok = sceGnmDebugHardwareStatus(0);   /* baseline while healthy */
+      const char *mq = "mapcomputequeue=";
+      while (*mq) L[p++] = *mq++;
+      p += lg_i64(L+p, (long long)g_mcq0); L[p++]=' ';
+      p += lg_i64(L+p, (long long)g_mcq1); L[p++]='\n';
+      const char *mh = "hwstatus at start=";
+      while (*mh) L[p++] = *mh++;
+      p += lg_i64(L+p, (long long)g_hw_ok);
+      L[p++] = '\n';
+      const char *m0 = "affinity ret=";
+      while (*m0) L[p++] = *m0++;
+      p += lg_i64(L+p, (long long)g_affinity_ret);
+      L[p++] = '\n';
       const char *m = "gnm waitfree early=";
       while (*m) L[p++] = *m++;
       p += lg_i64(L+p, (long long)mode_set_early);
@@ -2935,7 +3171,26 @@ int main(void) {
         int bi=frame%NUM_FRAMES;
 
         /* Section timing to locate the per-frame stall. */
-        uint64_t t_loop0 = sceKernelGetProcessTime();
+        /* Decide NOW whether this frame will be logged, so the 14 timestamps
+           below cost nothing on the 15 frames out of 16 that are discarded.
+           Mirrors the condition used by the trace block at the end. */
+        g_trace_this_frame = ((frame % 16) == 0) || (g_slow_tail > 0);
+
+        /* REAL elapsed time for this frame, in seconds.
+           Animation used to advance by a fixed amount PER FRAME, so the scene's
+           speed WAS the frame rate - at 1.8fps the sun crawled. That doubled as
+           a diagnostic while we were chasing the stall, but it is wrong: motion
+           should be tied to time, not to how fast we happen to be rendering.
+           Clamped to 100ms so a stalled frame cannot teleport the scene, and
+           the first frame gets a nominal 1/60 rather than a garbage delta. */
+        uint64_t t_now_us = sceKernelGetProcessTime();
+        static uint64_t t_prev_us = 0;
+        float dt_sec = t_prev_us ? (float)(t_now_us - t_prev_us) * 1e-6f
+                                 : (1.0f / 60.0f);
+        t_prev_us = t_now_us;
+        if (dt_sec > 0.1f)   dt_sec = 0.1f;
+        if (dt_sec < 0.0f)   dt_sec = 0.0f;
+        uint64_t t_loop0 = tstamp();
 
         /* Poll for system events. Log EVERY event type (not just quit) so we can
            catch what the system posts at the ~8s mark where the flip vsync wait
@@ -2946,12 +3201,12 @@ int main(void) {
             if (et_now == 0x10000000) { running = 0; quit_reason = 1; }
             if (et_now != 0) { g_last_event = et_now; g_event_count++; }
         }
-        uint64_t t_evt = sceKernelGetProcessTime();
+        uint64_t t_evt = tstamp();
 
         // Read gamepad
         if (pad_handle >= 0)
             pad_ok = (scePadRead(pad_handle, &pad, 1) >= 0);
-        uint64_t t_pad = sceKernelGetProcessTime();
+        uint64_t t_pad = tstamp();
 
         /* Manual quit fallback: hold all four triggers (L1+R1+L2+R2) together.
            Guarantees a clean exit + teardown regardless of the system-event
@@ -2976,14 +3231,17 @@ int main(void) {
         if (pressed & PAD_TRI) { cam_yaw=-1.5708f; cam_pitch=0; cam_x=3.5f; cam_y=0.55f; cam_z=0.8f; vel_y=0; on_ground=1; sprint=0; }
 
         // L1/R1: zoom
-        if (pad.buttons & PAD_R1) cam_y += move_speed;
-        if (pad.buttons & PAD_L1) cam_y -= move_speed;
+        if (pad.buttons & PAD_R1) cam_y += move_speed * 60.0f * dt_sec;
+        if (pad.buttons & PAD_L1) cam_y -= move_speed * 60.0f * dt_sec;
 
         // Left stick: orbit camera
         float lx = ((float)pad.lx - 128.0f) / 128.0f;
         float ly = ((float)pad.ly - 128.0f) / 128.0f;
         /* Left stick: move forward/back + strafe */
-        float spd = sprint ? move_speed * 3.0f : move_speed;
+        /* All movement is per-SECOND now. move_speed was a per-frame step, so
+           x60 keeps the original feel at 60fps while making it frame-rate
+           independent. */
+        float spd = (sprint ? move_speed * 3.0f : move_speed) * 60.0f * dt_sec;
         if (ly > 0.15f || ly < -0.15f) {
             cam_x += my_sin(cam_yaw) * (-ly) * spd;
             cam_z -= my_cos(cam_yaw) * (-ly) * spd;
@@ -2997,8 +3255,8 @@ int main(void) {
         float rx = ((float)pad.rx - 128.0f) / 128.0f;
         float ry = ((float)pad.ry - 128.0f) / 128.0f;
         /* Right stick: look around */
-        if (rx > 0.15f || rx < -0.15f) cam_yaw += rx * 0.04f;
-        if (ry > 0.15f || ry < -0.15f) cam_pitch += ry * 0.03f;
+        if (rx > 0.15f || rx < -0.15f) cam_yaw   += rx * 2.4f * dt_sec;  /* was 0.04/frame */
+        if (ry > 0.15f || ry < -0.15f) cam_pitch += ry * 1.8f * dt_sec;  /* was 0.03/frame */
         if (cam_pitch > 1.5f) cam_pitch = 1.5f;
         if (cam_pitch < -1.5f) cam_pitch = -1.5f;
 
@@ -3008,17 +3266,20 @@ int main(void) {
         if (pad.buttons & PAD_DOWN)  move_speed *= 0.98f;
         if (move_speed < 0.001f) move_speed = 0.001f;
         if (move_speed > 0.5f) move_speed = 0.5f;
-        if (pad.buttons & PAD_LEFT)  cam_yaw -= 0.02f;
-        if (pad.buttons & PAD_RIGHT) cam_yaw += 0.02f;
+        if (pad.buttons & PAD_LEFT)  cam_yaw -= 1.2f * dt_sec;   /* was 0.02/frame */
+        if (pad.buttons & PAD_RIGHT) cam_yaw += 1.2f * dt_sec;   /* was 0.02/frame */
 
         // Auto-spin
-        if (auto_spin) cam_yaw += 0.02f;
+        if (auto_spin) cam_yaw += 1.2f * dt_sec;                 /* was 0.02/frame */
 
         /* Sun controls: L3 toggles auto-orbit, L2/R2 manual rotation */
         if (pressed & 0x0002) sun_speed = (sun_speed > 0.001f) ? 0.0f : 0.0027f; /* L3 toggle */
-        if (pad.buttons & 0x0100) sun_angle -= 0.00432f; /* L2 held = sun left, 40% slower */
-        if (pad.buttons & 0x0200) sun_angle += 0.00432f; /* R2 held = sun right */
-        sun_angle += sun_speed;
+        if (pad.buttons & 0x0100) sun_angle -= 0.2592f * dt_sec; /* L2 held = sun left, 40% slower */
+        if (pad.buttons & 0x0200) sun_angle += 0.2592f * dt_sec; /* R2 held = sun right */
+        sun_angle += sun_speed * 60.0f * dt_sec;   /* sun_speed was per-frame */
+        /* Wrap every accumulator once per frame, after all increments. */
+        sun_angle    = wrap_2pi(sun_angle);
+        cam_yaw      = wrap_2pi(cam_yaw);
 
         /* BG lighting handled by PS via light direction */
 
@@ -3037,8 +3298,10 @@ int main(void) {
                accumulators freeze, so the cube holds its current orientation
                until rotation is re-enabled. */
             if (cube_rotation_enabled) {
-                cube_angle_y += 0.013f;  /* primary Y spin rate */
-                cube_angle_x += 0.007f;  /* slower X spin rate */
+                cube_angle_y += 0.78f * dt_sec;   /* was 0.013/frame */
+                cube_angle_x += 0.42f * dt_sec;   /* was 0.007/frame */
+                cube_angle_y = wrap_2pi(cube_angle_y);
+                cube_angle_x = wrap_2pi(cube_angle_x);
             }
             float angle_y = cube_angle_y;
             float angle_x = cube_angle_x;
@@ -3390,9 +3653,9 @@ int main(void) {
         if (g_slow_submits >= 5 && !g_drain_probed) {
             g_drain_probed = 1;
             trace_msg("drain probe: stall detected, idling 10s (no submits)\n");
-            uint64_t t0 = sceKernelGetProcessTime();
+            uint64_t t0 = tstamp();
             for (int i = 0; i < 100; i++) sceKernelUsleep(100000);
-            uint64_t t1 = sceKernelGetProcessTime();
+            uint64_t t1 = tstamp();
             { char L[128]; int p=0;
               #define LPD(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
               LPD("drain probe: idled "); p+=lg_i64(L+p,(long long)(t1-t0));
@@ -3415,7 +3678,7 @@ int main(void) {
             if (g_paced_left == 0) trace_msg("paced probe: done\n");
         }
 
-        uint64_t t_pre_build = sceKernelGetProcessTime();
+        uint64_t t_pre_build = tstamp();
         /* BATCHING: the submit quota is per IOCTL CALL, not per command buffer
            or per frame (proven: 2 command buffers per call walled at the same
            CALL count, not half). So we accumulate BATCH_FRAMES frames into ONE
@@ -3495,7 +3758,7 @@ int main(void) {
                                          shadow_vb_v, shadow_floor_v, bg_v, desc,
                                          g_shadow_verts, FLOOR_VERTS,
                                          0, 0, 0,
-                                         shadow_depth, shadow_fence, fv);
+                                         shadow_depth);
         }
 #endif
 
@@ -3534,7 +3797,7 @@ int main(void) {
                marker is not where gnm's patcher will look and it would rewrite
                unrelated dwords. Skipping the frame is recoverable; a corrupted
                command stream is not. */
-            t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
+            t_ioctl0 = tstamp();   /* AFTER build_dcb, before ioctl */
             if (pm4.overflow) {
                 /* Do NOT submit. The flip marker must be the last 64 dwords
                    because gnm's patcher reads dcb[size_dw - 0x40]; if pm4_emit
@@ -3565,10 +3828,10 @@ int main(void) {
                                                             video, bi, 1, (int64_t)frame);
             }
             }
-            t_saf = sceKernelGetProcessTime();
+            t_saf = tstamp();
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
-            t_done0 = sceKernelGetProcessTime();
+            t_done0 = tstamp();
             /* ONE SubmitDone, no spin. Measured: drn hit its 64 cap on EVERY
                frame, so sceGnmAreSubmitsAllowed never returns 1 and the spin
                never converged - SubmitDone cannot drive the counter to 0. And
@@ -3588,7 +3851,7 @@ int main(void) {
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
         }
-        t_submit = sceKernelGetProcessTime();
+        t_submit = tstamp();
         long long d_ioctl = (long long)(t_saf - t_ioctl0);   /* JUST the kernel submit */
         long long d_build = (long long)(t_ioctl0 - t_pre_build); /* JUST build_dcb (CPU) */
         long long d_done  = 0;   /* set below, after the single SubmitDone */
@@ -3599,7 +3862,7 @@ int main(void) {
            The display rate is unchanged - we just spent ONE submit for K
            frames instead of K submits. */
         phase("pre-flips");
-        uint64_t t_flip0 = sceKernelGetProcessTime();
+        uint64_t t_flip0 = tstamp();
         int flip_ret = 0;
         for (int k = 0; k < BATCH_FRAMES; k++) {
             /* Reset the budget PER sub-frame. fence_iters was shared across
@@ -3630,13 +3893,44 @@ int main(void) {
                keep the bounded timeout the game does not have. */
             fence_iters = 0;
             for (int sp = 0; sp < 20000 && *fence < fv+k; sp++) cpu_pause16();
-            for (;fence_iters<250 && *fence < fv+k;fence_iters++) sceKernelUsleep(1000);
+            /* Once the fence has demonstrably stopped, STOP PAYING FOR IT.
+               After a handful of timeouts we know it is not coming, and
+               250 x 1ms every frame is what makes the app unresponsive: with
+               ~570ms frames it can take that long to even notice the system's
+               quit event, and the OS kills us instead of letting us exit.
+               That is the crash on close. Keep a token wait so a recovery is
+               still detectable. */
+            {
+                int budget = (g_fence_timeouts > 5) ? 2 : 250;
+                for (;fence_iters<budget && *fence < fv+k;fence_iters++)
+                    sceKernelUsleep(1000);
+            }
             int fence_ok = (*fence >= fv+k);
             if (!fence_ok) {
                 g_fence_timeouts++;
+                /* With PACE_ON_FENCE_ONLY the flip event is no longer waited
+                   on, so the fence is our ONLY liveness signal. Drive the
+                   no-flip fallback from it, otherwise a wedged GPU would keep
+                   getting flips queued at it until the queue returns
+                   0x80d11081. A few timeouts, not one, so a single slow frame
+                   does not trip it.
+                   THE MARGIN IS NOW KNOWN, not guessed: shadPS4's videoout
+                   driver rejects a flip once flip_pending_num > 16, and that
+                   matches the hardware exactly - our fence died at 548 and
+                   0x80d11081 arrived at 563, fifteen frames of one un-retired
+                   flip each. Tripping at 4 leaves twelve frames of headroom. */
+                if (g_fence_timeouts > 3) g_display_stalled = 1;
+                /* Sample the kernel's GPU verdict at the MOMENT of the first
+                   timeout, not just on logged frames - this is the one frame
+                   whose answer actually matters. */
+                if (g_fence_timeouts == 1) g_hw_ok_at_stall = sceGnmDebugHardwareStatus(0);
                 g_fence_stuck_at = *fence;
                 g_fence_wanted   = fv+k;
                 phase("FENCE-TIMEOUT");
+            }
+            else if (g_display_stalled) {
+                /* fence is answering again - resume normal flips */
+                g_display_stalled = 0; g_stall_recoveries++;
             }
             phase("fence-ok");
             /* DO NOT FLIP A FRAME THE GPU NEVER FINISHED.
@@ -3702,7 +3996,17 @@ int main(void) {
                    loop freezes here and the app looks hung. 100ms lets us
                    survive a missing event and count it instead. */
                 struct kevent_t ev; int out=0;
-                unsigned int tmo = 100000;
+                /* 100ms while healthy; 2ms once we know the display has
+                   stopped answering - enough to still spot a recovery, not
+                   enough to make the frame loop unresponsive. */
+                unsigned int tmo = g_display_stalled ? 2000u : 100000u;
+#if PACE_ON_FENCE_ONLY
+                /* NO BLOCKING WAIT. The game never calls sceKernelWaitEqueue
+                   at all; it paces on the fence and lets flipMode 1 (VSYNC)
+                   hold the rate. We keep only the non-blocking drain below so
+                   the queue cannot grow. */
+                (void)tmo; (void)ev; out = 0;
+#else
                 /* Block for the flip event that paces this frame... */
                 int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
                 if (wr != 0 || out <= 0) {
@@ -3714,19 +4018,24 @@ int main(void) {
                     /* the display is answering again - resume normal flips */
                     g_display_stalled = 0; g_stall_recoveries++;
                 }
+#endif
                 flip_iters = out;
-                /* ...then DRAIN anything still queued, with a zero timeout so
-                   it never blocks. Taking exactly one event per frame means any
-                   surplus accumulates: +1 queue entry per frame fills a bounded
-                   queue after N frames, after which posts are dropped or the
-                   poster errors - "works, then stops after a few seconds".
-                   Bounded at 16 so an event storm cannot spin the frame. */
-                for (int dr = 0; dr < 16; dr++) {
-                    struct kevent_t evd; int outd = 0;
-                    unsigned int tmo0 = 0;
-                    if (sceKernelWaitEqueue(flip_eq, &evd, 1, &outd, &tmo0) != 0) break;
-                    if (outd <= 0) break;
-                    g_evt_drained++;
+                /* PERIODIC, not per-frame. The game calls sceKernelWaitEqueue
+                   ZERO times in the entire binary - it registers the flip event
+                   and never touches the queue again. We keep a drain purely as
+                   insurance against unbounded growth, but paying a syscall
+                   every frame for a queue that measured evd=0 is exactly the
+                   per-frame cost we are trying to eliminate. Once every 64
+                   frames still bounds the queue at 64 entries while costing
+                   1/64th of the syscalls. */
+                if ((frame & 63) == 0) {
+                    for (int dr = 0; dr < 64; dr++) {
+                        struct kevent_t evd; int outd = 0;
+                        unsigned int tmo0 = 0;
+                        if (sceKernelWaitEqueue(flip_eq, &evd, 1, &outd, &tmo0) != 0) break;
+                        if (outd <= 0) break;
+                        g_evt_drained++;
+                    }
                 }
             }
 #if HALF_RATE
@@ -3748,20 +4057,21 @@ int main(void) {
            game does. */
         if (saf_ret == 0) g_hw_state_done = 1;
 
-        { uint64_t t_sd0 = sceKernelGetProcessTime();
+        { uint64_t t_sd0 = tstamp();
           sdret = sceGnmSubmitDone();
           sdret2 = sdret;
           /* SubmitDone returns 0x80d110ff when its ready-poll (ioctl 0x8116)
              does not return 1. Counting it here means a persistent driver
              failure shows up as a number instead of staying invisible. */
           if (sdret != 0) g_ka_fail++;
-          d_done = (long long)(sceKernelGetProcessTime() - t_sd0); }
+          d_done = (long long)(tstamp() - t_sd0); }
 
         fv += BATCH_FRAMES;
         dcb_slot = (dcb_slot + 1) % NUM_FRAMES;
         g_batch++;
         phase("batch-end");
-        uint64_t t_flip1 = sceKernelGetProcessTime();
+        phase_flush();   /* one write + one fsync for the whole frame */
+        uint64_t t_flip1 = tstamp();
         long long d_flip = (long long)(t_flip1 - t_flip0);
 
         /* Wall detector: healthy submit is 30-60us; past the wall ~500ms. */
@@ -3786,6 +4096,18 @@ int main(void) {
            So: sample every 16th frame while fast, but log EVERY frame as soon
            as one takes longer than 30ms, and keep logging for 200 frames after
            things recover so the entry and exit of a choke are both captured. */
+        /* REAL timestamp every frame, not gated: dt is computed from it and
+           dt is what decides whether this frame gets logged at all. Gating it
+           would make dt garbage and break the adaptive logging. */
+        /* Ask the KERNEL whether the GPU is healthy. This is a real ioctl
+           (0xc0088111), so sample it only on frames we log - it is a
+           diagnostic, not something to pay for 60 times a second. If hwok
+           drops to 0 at the same frame cpm freezes, the kernel can see the
+           wedge too and it is genuinely a hardware stall; if hwok stays 1
+           while cpm is frozen, the kernel believes the GPU is fine and our
+           command buffers are being dropped somewhere between the two. */
+        if (g_trace_this_frame) g_hw_ok = sceGnmDebugHardwareStatus(0);
+
         uint64_t now = sceKernelGetProcessTime();
         static uint64_t prev_t = 0;
         uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
@@ -3827,9 +4149,24 @@ int main(void) {
             LP(" ka="); p+=lg_i64(L+p,g_keepalive);
             LP(" kaf="); p+=lg_i64(L+p,g_ka_fail);
             LP(" cpm="); p+=lg_hex(L+p,(unsigned long long)(g_cp_mark?*g_cp_mark:0));
+            /* cpf = the frame the CP last touched; cplag = how far behind the
+               CPU it is. These two make the distinction that cost me several
+               rounds: cpm alone cannot separate "completed frame N" from
+               "died at the end of frame N", because 0x1F is the LAST
+               checkpoint either way. cplag says it directly -
+                   cplag 0 or 1  the CP is keeping up
+                   cplag growing the CP has stopped STARTING new buffers,
+                                 which is a dispatch failure, not an execution
+                                 failure. */
+            { unsigned long long m = g_cp_mark ? *g_cp_mark : 0;
+              unsigned long long cpf = m >> 8;
+              LP(" cpf="); p+=lg_i64(L+p,(long long)cpf);
+              LP(" cplag="); p+=lg_i64(L+p,(long long)((unsigned long long)frame - cpf)); }
             LP(" ovf="); p+=lg_i64(L+p,g_dcb_overflow);
             LP(" evd="); p+=lg_i64(L+p,g_evt_drained);
             LP(" fskip="); p+=lg_i64(L+p,g_flips_skipped);
+            LP(" hwok="); p+=lg_i64(L+p,g_hw_ok);
+            LP(" hwstall="); p+=lg_i64(L+p,g_hw_ok_at_stall);
             LP(" dstall="); p+=lg_i64(L+p,g_display_stalled);
             LP(" drec="); p+=lg_i64(L+p,g_stall_recoveries);
             LP(" fnto="); p+=lg_i64(L+p,g_fence_timeouts);
@@ -3886,22 +4223,32 @@ int main(void) {
        is the "hangs on close, then crashes" behaviour.
        Now: roughly 250ms per stage, then give up and close anyway. Closing
        cleanly with work still outstanding is far better than not closing. */
+    /* IF THE GPU IS ALREADY DEAD, DO NOT WAIT FOR IT.
+       We KNOW it is dead: the checkpoint stopped changing and the fence stopped
+       advancing. Draining, fence-waiting and flip-waiting against a wedged
+       command processor just burns a second of the OS's patience while it is
+       trying to close us - and the app gets killed instead of exiting. When
+       the GPU is known-bad we skip straight to releasing the handles. */
+    int gpu_dead = (g_fence_timeouts > 0) || g_display_stalled;
     int td_q1=0, td_q2=0;
-    sceGnmSubmitDone();
-    for (; td_q1<20000 && !sceGnmAreSubmitsAllowed(); td_q1++) cpu_pause16();
-    sceGnmSubmitDone();
-    for (; td_q2<20000 && !sceGnmAreSubmitsAllowed(); td_q2++) cpu_pause16();
+    if (!gpu_dead) {
+        sceGnmSubmitDone();
+        for (; td_q1<20000 && !sceGnmAreSubmitsAllowed(); td_q1++) cpu_pause16();
+        sceGnmSubmitDone();
+        for (; td_q2<20000 && !sceGnmAreSubmitsAllowed(); td_q2++) cpu_pause16();
+    }
 
     /* Our own EOP fence: the last submitted frame has actually retired.
        ~250 waits x ~1ms = ~250ms, then proceed regardless. */
     int td_fence=0;
-    for (; td_fence<250 && *fence < fv; td_fence++) sceKernelUsleep(1000);
+    if (!gpu_dead)
+        for (; td_fence<250 && *fence < fv; td_fence++) sceKernelUsleep(1000);
 
     /* Let queued flips drain before pulling the buffers out from under them.
        ~250ms, then proceed. */
     int td_flip=0; int td_pend=-1;
     { OrbisVideoOutFlipStatus fs;
-      for (; td_flip<250; td_flip++) {
+      for (; !gpu_dead && td_flip<250; td_flip++) {
           if (sceVideoOutGetFlipStatus(video,&fs) != 0) break;
           td_pend = fs.numFlipPending;
           if (fs.numFlipPending == 0) break;
@@ -3913,6 +4260,7 @@ int main(void) {
       LP(" q2="); p+=lg_i64(L+p,td_q2);
       LP(" fencewait="); p+=lg_i64(L+p,td_fence);
       LP(" flipwait="); p+=lg_i64(L+p,td_flip);
+      LP(" gpudead="); p+=lg_i64(L+p,gpu_dead);
       LP(" pend="); p+=lg_i64(L+p,td_pend);
       LP(" fence="); p+=lg_u64(L+p,(unsigned long long)*fence);
       LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv); L[p++]='\n';
@@ -3937,6 +4285,13 @@ int main(void) {
     }
     sceVideoOutClose(video);
     if (pad_handle >= 0) scePadClose(pad_handle);   /* scePadOpen had no match */
+#if MAP_COMPUTE_QUEUES
+    /* The game's teardown (fn 0xcd670) unmaps its compute queues before
+       closing video-out. Ours returns a vqueue id in g_mcq*, so unmap only
+       what actually mapped. */
+    if (g_mcq0 >= 0) sceGnmUnmapComputeQueue((uint32_t)g_mcq0);
+    if (g_mcq1 >= 0) sceGnmUnmapComputeQueue((uint32_t)g_mcq1);
+#endif
     trace_msg("teardown: closed\n");
     return 0;
 }

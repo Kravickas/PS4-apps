@@ -98,6 +98,22 @@ extern int sceGnmSubmitDone(void);
    what the CPU wrote. Real on this firmware (gnm 0x460 loads the driver fd and
    tail-jumps to an ioctl wrapper), not a stub. */
 extern int sceGnmFlushGarlic(void);
+/* THE ONLY LIVE GPU-HEALTH QUERY ON RETAIL FIRMWARE. Verified real, not a
+   stub: gnm 0x5c0 takes the gc driver fd and issues ioctl 0xc0088111 with an
+   8-byte argument, returning (ioctl_result == 0) as a boolean. Must be called
+   with 0 - any non-zero argument returns immediately without doing anything.
+   (sceGnmDebugReset and sceGnmDebugModuleReset really ARE stubs, returning
+   0x8eee00ff, so there is no way to RESET a wedged GPU from userland.) */
+extern int sceGnmDebugHardwareStatus(int must_be_zero);
+/* Map a compute queue. Guards read from the PRX (gnm 0x3cf0):
+       pipe  <= 6      (cmp edi, 6)
+       queue <= 7      (cmp esi, 7)
+       ring address 4-byte aligned  (and edx, 3)
+   The game maps TWO at init - pipe 0 queue 4 and pipe 1 queue 4, ring 0x1000 -
+   even though the doorbell it later rings is a null kick. */
+extern int sceGnmMapComputeQueue(uint32_t pipe, uint32_t queue, void *ring,
+                                 uint32_t ringSizeDw, void *readPtr);
+extern int sceGnmUnmapComputeQueue(uint32_t vqueueId);
 
 /* Writes the driver's own default hardware state into cmd and returns the
    number of dwords written (0 on failure). sizeInDwords must be >= 0x100.
@@ -114,6 +130,13 @@ extern int printf(const char*, ...);
 extern int scePadInit(void);
 extern int scePadOpen(int, int, int, void*);
 extern int scePadClose(int handle);
+/* Thread affinity. The game uses these: masks 0x3f (cores 0-5, the general
+   pool), 0x20 (core 5), 0x60 (cores 5-6) and 0x01 (core 0, on the thread that
+   also does SubmitDone / UnmapComputeQueue / VideoOutClose). */
+#if SET_AFFINITY
+extern void *scePthreadSelf(void);
+extern int scePthreadSetaffinity(void *thread, unsigned long long mask);
+#endif
 extern int scePadRead(int, void*, int);
 extern int scePadReadState(int, void*);
 extern int sceUserServiceInitialize(void*);

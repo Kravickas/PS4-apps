@@ -1,61 +1,145 @@
 ============================================================
-*** WE RE-EMITTED THE HARDWARE STATE TWICE PER FRAME. THE GAME NEVER DOES ***
+*** THE AMD ORDERING BUG - CHECKED AGAINST OUR PATH, DOES NOT APPLY ***
 ============================================================
-The trace is identical for the third run: cpm = 0x2231f, i.e. the command
-processor executed frame 547 up to stage 0x1F and stopped, while the CPU ran on
-to 693. Driver state stays perfectly healthy throughout - asb/asa/asd = 1,
-ifb/ifa/ifd = 0, sdret = 0, sret = 0, drn = 0, ovf = 0, evd = 0. The kernel
-believes it dispatched everything and that nothing is outstanding. The GPU just
-is not executing.
+AMD patched exactly this class in their own kernel driver:
 
-The leading tag NOP did not change it. So I looked for what we still do that
-the game does not, and found something much larger than a tag.
+  drm/amdkfd: make sure ring buffer is flushed before update wptr
+    "when CP is reading wptr caused by ... doorbell ring, if in some case CP
+     operates slower and wptr has been updated to next packet, but THE PACKET
+     CONTENT HAS NOT BEEN FLUSHED TO MEMORY YET, IT WILL CAUSE CP FETCHED
+     STALLED DATA. Adding mb to ensure ring buffer has been updated before
+     updating wptr."
 
-  Our DCB, EVERY frame:
-      build_shadow_dcb -> pm4_init_default_hw_state   ~127 dwords
-      build_dcb        -> pm4_init_default_hw_state   ~127 dwords
+  A missing barrier between writing command data and ringing the doorbell -
+  intermittent, count-dependent, and indistinguishable from a wedge. Exactly
+  the shape of our failure.
 
-  Each of those is sceGnmDrawInitDefaultHardwareState350, and it begins with
-      CONTEXT_CONTROL
-      CLEAR_STATE
-      ACQUIRE_MEM   coher_cntl 0x2ec47fc0, size 0xFFFFFFFF
-  So every frame carried TWO CLEAR_STATEs and TWO FULL-ADDRESS-RANGE cache
-  invalidates, plus ~254 redundant dwords out of a 480-dword buffer. Across 547
-  frames that is 1094 CLEAR_STATEs.
+WHY IT IS NOT OURS
+    1. CPU writes the DCB with plain stores into ONION
+    2. sceGnmSubmitAndFlipCommandBuffers -> ... -> ioctl()   A SYSCALL
+    3. the kernel builds IB packets, the CP fetches from our DCB
 
-  THE GAME CALLS DrawInitDefaultHardwareState350 ZERO TIMES. Verified directly:
-  it imports the symbol and has no call sites, and its frame path only sets the
-  state that actually changes. Context state persists between submits - that is
-  what CONTEXT_CONTROL exists for.
+  - ONION is write-back and CPU<->GPU COHERENT. The AMD hazard is content not
+    reaching memory; coherent WB does not have that failure mode.
+  - x86 is TSO: stores are not reordered with other stores.
+  - There is a SYSCALL between the writes and any fetch, and a syscall is a
+    serialising event. The AMD case has NO syscall - it is a bare doorbell
+    write, which is exactly why they needed an explicit mb().
+  - gnm's doorbell ring happens AFTER the submit ioctl anyway.
 
-  CLEAR_STATE is a heavyweight context operation, not a register write. Issuing
-  it twice a frame forever is the largest remaining behavioural difference
-  between us and the reference, and it is the right shape for something that
-  exhausts a finite context resource after a few hundred frames.
+  So I am NOT adding a barrier. A fence that cannot change anything would look
+  like diligence and do nothing, and this build has enough switches already.
 
-NOW IMPLEMENTED: INIT_STATE_ONCE
-  The full hardware state is emitted on the FIRST main-loop frame and never
-  again. Sequence verified:
-      loading frames -> flag 0, init emitted (harmless, short phase)
-      main frame 0   -> flag 0, both passes emit it, then the flag is set
-                        after a successful submit
-      main frame 1+  -> flag 1, neither pass emits it
-  Per-frame DCBs now only set what changes, exactly as the game does.
+BUT IT RETROSPECTIVELY VALIDATES THE GARLIC WORK FROM EARLIER
+  The one place this hazard is REAL on x86 is write-combine memory: WC stores
+  are not ordered and do not reach memory promptly. Early this session the
+  vertex buffer, shadow vertex buffer, descriptor table and every shader binary
+  were in GARLIC - rewritten by the CPU each frame, read by the GPU, with
+  nothing forcing the stores out. Moving them to ONION and adding the single
+  sceGnmFlushGarlic for the write-once textures closed precisely the hazard
+  this AMD patch documents. That fix was made on reasoning about WC semantics;
+  it now has an independent citation behind it.
 
-THE RISK, STATED PLAINLY
-  If some register we depend on does NOT actually persist between submits, the
-  very first frame after the change will show it - wrong colours, wrong depth,
-  a black screen. That is a loud, immediate failure rather than a subtle one,
-  which is the good case. Set INIT_STATE_ONCE to 0 in pm4.h to revert in one
-  line.
+  make  (build unchanged)
+
+============================================================
+*** EVERY gnm EXPORT NOW NAMED AND CLASSIFIED ***
+============================================================
+Pulled shadPS4's LIB_FUNCTION NID table (251 entries) and joined it against the
+firmware, so every export in libSceGnmDriver.sprx is now named rather than a
+NID string. Full table attached as gnm_exports_classified.txt.
+
+    TOTAL 251    REAL 93    STUB/CONST 158    REAL and reaching an ioctl 72
+
+ALL 72 LIVE EXPORTS ARE NAMED - 72 of 72, no unknowns left. The only three that
+shadPS4 has no name for are Func_4774D83BB4DDBF9A / B0A8688B679CB42D /
+BADE7B4C199140DD at 0x1a10 / 0x1a60 / 0x1ab0, and those are the
+libSceGnmWaitFreeSubmit enable/disable pair I identified from the submit path
+weeks ago.
+
+WHY THIS SETTLES A QUESTION
+  I have been assuming sceGnmDebugHardwareStatus is the only live GPU-health
+  query on retail. That was an assumption based on the handful of names I
+  happened to remember. It is now CHECKED across the whole export table:
+  of 251 exports, 72 are live, and none of the other 71 reports GPU state.
+  The diagnostic surface really is one boolean.
+
+  It also confirms the reset situation: DebugReset, DebugModuleReset and 155
+  other entries return 0x8eee00ff or 0 without touching the driver. There is
+  no way to reset or inspect a wedged GPU from userland beyond that one call.
+
+WORTH NOTING FROM THE TABLE
+  sceGnmRequestFlipAndSubmitDone (0x19a0) is LIVE - an alternative flip path
+  that combines SubmitDone with the flip request. We use SubmitAndFlip. Not
+  changing it without a reason, but it is the one live API in the flip area we
+  have never exercised, and now it is on the record rather than buried in a NID.
 
   make
 
-WHAT TO LOOK FOR
-  Frame 0 should look identical to before. If it does, the state persists.
-  Then the only question is whether it still dies at ~547 - and if it does not,
-  the per-frame CLEAR_STATE was the cause.
-  dcbsz= should drop by roughly 1000 bytes from frame 1 onward.
+The build is unchanged from the last round apart from hwstall=, which samples
+the kernel's GPU verdict at the exact frame the fence first times out.
+
+============================================================
+*** AND THE LIMIT OF WHAT STATIC ANALYSIS CAN REACH ***
+============================================================
+I traced the per-flip path to its end this round: SubmitEopFlip (vo 0x1970)
+builds its 48-byte arg and calls ioctl 0xc0308203. No counter, no limit, no
+queue depth anywhere in userland. The "flip queue is full" state that returns
+0x80d11081 is decided KERNEL-side, and there is no 12.02 kernel dump.
+
+Combined with the kqueue finding (the event queue coalesces and cannot
+overflow), the userland CPU path no longer contains a candidate for
+"something consumed once per frame that runs out at ~547". Per-frame kernel
+entries are down from 21 to 5, and the five that remain are the two the game
+also makes plus three that are unavoidable.
+
+  make
+
+============================================================
+*** CPU PATH: TRACE I/O WAS 16 SYSCALLS AND 8 FSYNCS PER FRAME ***
+============================================================
+Enumerated every call site in our frame loop and looked at what each costs.
+
+  trace_line() is  sceKernelWrite + sceKernelFsync  - two syscalls, one of them
+  a SYNCHRONOUS FLUSH TO STORAGE. phase() called it 8 times a frame inside the
+  marker window, so every frame in that window paid 16 syscalls and 8 fsyncs.
+  That is both a large per-frame cost and enough I/O to distort the very timing
+  we are trying to measure.
+
+  FIXED: phase markers now accumulate into a buffer and the whole frame's worth
+  goes out in ONE write + ONE fsync via phase_flush() at the end of the frame.
+  Same data, same durability, 1/8th the syscalls.
+      inside the window:  16 syscalls / 8 fsyncs  ->  2 syscalls / 1 fsync
+  Outside the window phase() still returns immediately.
+
+  Combined with last round's timestamp gating (15 kernel round trips per frame
+  -> ~1), the instrumentation now costs a small fraction of what it did.
+
+ALSO: THE ORDER CHECKER NOW UNDERSTANDS FORWARD DECLARATIONS
+  It fired on phase()/lg_i64 and phase_flush()/trace_line. One was real -
+  trace_line had no prototype and phase_flush is defined 100 lines above it -
+  and one was a FALSE POSITIVE: lg_i64 has a forward declaration that the
+  checker was not modelling.
+
+  A checker that cries wolf gets ignored, which defeats the point of having it,
+  so I taught it that a prototype satisfies the dependency exactly as a
+  definition does. Then re-ran it against the deliberately-broken header from
+  before to confirm it still catches a REAL error:
+      *** pm4_leading_tag uses pm4_have_space which is defined LATER ***  exit=1
+  and against all three real sources: 42 + 25 + 17 functions, clean, exit=0.
+
+  The missing trace_line prototype is added. It is now run over main.c too,
+  not just the headers - that gap is why it did not catch this one earlier.
+
+  make
+
+REMAINING PER-FRAME CALLS, for reference
+  1 sceKernelGetProcessTime (needed - dt drives the adaptive logging)
+  1 sceSystemServiceReceiveEvent, 1 scePadRead  (the game does both, 1 site each)
+  1 submit ioctl, 1 SubmitDone
+  1 non-blocking WaitEqueue drain (returns immediately when the queue is empty)
+  sceGnmAreSubmitsAllowed x3 - NOT syscalls, it is a plain memory read of the
+  in-flight counter, traced from the PRX
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***
