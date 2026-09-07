@@ -1,51 +1,60 @@
 ============================================================
-*** LOGGING AIMED AT THE DISPLAY PIPELINE ***
+*** FRAME 547: THE GPU DID EVERYTHING. THE DISPLAY STOPPED. ***
 ============================================================
-You are right that we are barely moving, and more logging is the right call -
-but pointed where the evidence now says the problem is.
+The display counters answered it outright (and dpus=9-12us, so the poll itself
+is free - unlike the last probe I added):
 
-  The submit blocks for 509820us. The videoout service thread's equeue ceiling
-  is 500000us (vo 0x5df0: mov [rbp-0x30], 0x7a120). The submit is waiting on
-  the DISPLAY, not the GPU - cplag stays 0 and the fence keeps advancing right
-  through the stall.
+   f    bi  labpre labpost fcur fpend fgpu  fnum fence   vbl
+  546    0    0x0     0x1     0     0    0   547   547  2305
+  547    1    0x0     0x1     0     1    1   547   548  2341   <- the last flip
+  548    2    0x0     0x0     0     1    1   547   548  2430
+  617    -    0x1     0x1     0     1    1   547   548  4753
 
-  So this build samples the counters that decide it, once per frame:
+  AT FRAME 547 THE GPU DID ITS WHOLE JOB:
+      labpost=0x1   it wrote the buffer label for buffer 1
+      fence=548     it wrote the fence through the marker
+      cplag=0       it was keeping pace
+  Both WRITE_DATA packets in the patched marker executed. Our command buffer is
+  not at fault, and neither is the sky, the shadow pass or anything we draw.
 
-      fnum=   flips COMPLETED         (does it stop at 512?)
-      fpend=  flips pending           (does it climb to the 16 limit?)
-      fgpu=   EOP flips pending
-      fcur=   buffer currently on screen
-      vbl=    vblanks since open      (is the display still ticking at all?)
-      dpus=   THE COST OF THIS POLL
+  THE DISPLAY IS ALIVE THROUGHOUT:
+      vbl 2341 -> 4753, still counting at 60Hz seventy frames later.
 
-  Those four flip fields are exactly the counters shadPS4 models - it
-  increments numFlipPending on submit and decrements it on present, and
-  numGpuFlipPending only for EOP flips. Field order in our struct matches.
+  THE FLIP SIMPLY NEVER RETIRES:
+      fnum  frozen at 547   547 flips completed, then never another
+      fpend stuck at 1      one flip pending, forever
+      fgpu  stuck at 1      and it is a GPU/EOP flip
+      fcur  stuck at 0      the display stays on buffer 0
 
-  WHAT THE ANSWER WILL LOOK LIKE
-      vbl keeps counting, fnum stops, fpend climbs
-          the display is alive but flips stop retiring - a flip-completion
-          failure, and the 500ms backstop is the kernel giving up waiting
-      vbl also stops
-          the display itself stalls, which is a different and larger problem
-      fpend stays low and fnum keeps rising
-          flips are fine and the 500ms wait is for something else entirely
+  Everything downstream - the stuck fence, cplag climbing to 70, the crash on
+  close - follows from that single fact.
 
-*** AND I MEASURED ITS COST THIS TIME ***
-  dpus= is the cost of the poll itself. The last probe I added
-  (sceGnmDebugHardwareStatus) silently cost 477ms per call and BECAME the
-  bottleneck it was meant to diagnose - it held the app at 2fps by itself and I
-  spent two rounds blaming the wrong things. This one cannot do that unnoticed:
-  if dpus is large it is the new problem and DISPLAY_POLL 0 turns it off.
+*** THE CHANGE THIS BUILD MAKES ***
+  gnm's marker tag table, traced from the patcher and confirmed against an
+  independent decoder:
+      0x68750777  NOP, no EOP
+      0x68750778  WRITE_DATA label + WRITE_DATA fence, NO EOP, NO INTERRUPT
+      0x68750780  EOP, INT_SEL=1 IrqOnly - must carry no data
+      0x68750781  EOP, INT_SEL=2 IrqWhenWriteConfirm - MAY carry data
 
-  The trace line also went from L[2048] to L[3072]. At 64 fields the
-  pessimistic bound is ~1984, which left 64 bytes of headroom - the same margin
-  that nearly bit us when this was L[896] with 47 fields.
+  We have been using 0x778, which raises NO INTERRUPT. On that path flip
+  completion depends entirely on the display noticing the label by itself -
+  and the trace shows exactly that failing: the label is written, and the
+  display stops acting on it, with no interrupt to fall back on.
+
+  FLIP_TAG_IRQ 1 switches to 0x68750781 - the same marker delivered as an EOP
+  that carries our fence AND raises an interrupt. All four tags are patched
+  into the same 64-dword block, so our emitted block is unchanged; only the tag
+  dword differs and gnm picks the tail from it.
+
+  Set FLIP_TAG_IRQ 0 in pm4.h to go back to the game's 0x778.
 
   make      (no .py in the build)
 
-  Run it into the stall and send the log. fnum/fpend/vbl across frame 512 is
-  the whole question.
+  If it runs past 547 with fnum still climbing, that was it. If it still stops
+  at 547 with fpend stuck at 1, the completion path is failing for a reason an
+  interrupt cannot reach - and the next test is NUM_FRAMES 4, which separates
+  a per-buffer limit from a global flip count.
 
 ============================================================
 *** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***

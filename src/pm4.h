@@ -537,7 +537,29 @@ static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
 
    This MUST be the last 64 dwords of the DCB: the patcher reads
    dcb[size_dw - 0x40]. */
+/* MARKER TAG. The traced patcher table:
+       0x68750777  NOP, no EOP
+       0x68750778  WRITE_DATA label + WRITE_DATA fence, NO EOP, NO INTERRUPT
+       0x68750780  EOP, INT_SEL=1 IrqOnly      - must carry NO data
+       0x68750781  EOP, INT_SEL=2 IrqWhenWriteConfirm - MAY carry data
+
+   0x778 is the game's, and it is what we have used. On that path flip
+   completion depends entirely on the display noticing the label write, with no
+   interrupt anywhere. The hardware trace shows exactly that failing: at frame
+   547 the GPU wrote the label (labpost=0x1) and the fence (548), the display
+   kept generating vblanks (vbl 2341 -> 4753), and the flip never retired -
+   fnum frozen at 547, fpend and fgpu stuck at 1 forever.
+
+   0x781 is the same marker delivered as an EOP that CARRIES THE FENCE AND
+   RAISES AN INTERRUPT. If the failure is the display's polling of the label,
+   interrupt-driven completion should not depend on it.
+   Set FLIP_TAG_IRQ to 0 to go back to the game's 0x778. */
+#define FLIP_TAG_IRQ 1
+#if FLIP_TAG_IRQ
+#define PM4_PREPARE_FLIP_TAG 0x68750781u
+#else
 #define PM4_PREPARE_FLIP_TAG 0x68750778u
+#endif
 static inline void pm4_prepare_flip(struct PM4Builder* b,
                                     volatile uint32_t* fence_addr,
                                     uint32_t fence_value) {
