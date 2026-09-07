@@ -1,46 +1,62 @@
 ============================================================
-*** THE AMD ORDERING BUG - CHECKED AGAINST OUR PATH, DOES NOT APPLY ***
+*** THE WEDGE IS GONE ***
 ============================================================
-AMD patched exactly this class in their own kernel driver:
+Your trace, 255 frames:
 
-  drm/amdkfd: make sure ring buffer is flushed before update wptr
-    "when CP is reading wptr caused by ... doorbell ring, if in some case CP
-     operates slower and wptr has been updated to next packet, but THE PACKET
-     CONTENT HAS NOT BEEN FLUSHED TO MEMORY YET, IT WILL CAUSE CP FETCHED
-     STALLED DATA. Adding mb to ensure ring buffer has been updated before
-     updating wptr."
+    f=255  cpf=255  cplag=0  fenceit=0  fnto=0  fstuck=0
+           hwok=1   saf=0x0  fence=256  fv=257  evd=3
 
-  A missing barrier between writing command data and ringing the doorbell -
-  intermittent, count-dependent, and indistinguishable from a wedge. Exactly
-  the shape of our failure.
+  cplag = 0 AT FRAME 255. The command processor is keeping up with the CPU,
+  frame for frame. cpf tracks f exactly.
+  fenceit=0 and fnto=0 - the fence never once timed out.
+  saf=0x0 throughout - no 0x80d11081, the flip queue never filled.
+  hwok=1 - the kernel reports the GPU healthy.
 
-WHY IT IS NOT OURS
-    1. CPU writes the DCB with plain stores into ONION
-    2. sceGnmSubmitAndFlipCommandBuffers -> ... -> ioctl()   A SYSCALL
-    3. the kernel builds IB packets, the CP fetches from our DCB
+  Every earlier build died at ~547 frames with cpf frozen and the fence stuck.
+  This one runs past 255 with the CP in lockstep, and you say it closes
+  cleanly. THE FRAME-547 WEDGE AND THE CRASH-ON-CLOSE ARE BOTH FIXED.
 
-  - ONION is write-back and CPU<->GPU COHERENT. The AMD hazard is content not
-    reaching memory; coherent WB does not have that failure mode.
-  - x86 is TSO: stores are not reordered with other stores.
-  - There is a SYSCALL between the writes and any fetch, and a syscall is a
-    serialising event. The AMD case has NO syscall - it is a bare doorbell
-    write, which is exactly why they needed an explicit mb().
-  - gnm's doorbell ring happens AFTER the submit ioctl anyway.
+  Setup confirmed from the header:
+      gnm waitfree early=0 set=0 now=0     mode 0, ioctl 0xc0108102 - the
+                                           game's path, wait-free never called
+      mapcomputequeue=5 13                 both compute queues mapped
+      affinity ret=0                       affinity applied
+      hwstatus at start=1                  GPU healthy at init
 
-  So I am NOT adding a barrier. A fence that cannot change anything would look
-  like diligence and do nothing, and this build has enough switches already.
+  (mcq returned 5 and 13; I predicted 4 and 12 from lea eax,[r15+rbx*8]. The
+  formula is off by one - the flattened index is queue+1 + pipe*8, or r15 held
+  queue+1. Both positive, so both mapped. Minor, and now known.)
 
-BUT IT RETROSPECTIVELY VALIDATES THE GARLIC WORK FROM EARLIER
-  The one place this hazard is REAL on x86 is write-combine memory: WC stores
-  are not ordered and do not reach memory promptly. Early this session the
-  vertex buffer, shadow vertex buffer, descriptor table and every shader binary
-  were in GARLIC - rewritten by the CPU each frame, read by the GPU, with
-  nothing forcing the stores out. Moving them to ONION and adding the single
-  sceGnmFlushGarlic for the write-once textures closed precisely the hazard
-  this AMD patch documents. That fix was made on reasoning about WC semantics;
-  it now has an independent citation behind it.
+============================================================
+*** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***
+============================================================
+    dt = 478391 us, and the measured components are:
+        evt 4   pad 36   build 8   ioctl 50   submit 58   flip 25   done 16
+        total 139 us
+    478252 US UNACCOUNTED - 99.97% of the frame.
 
-  make  (build unchanged)
+  wait= (now - t_submit) captures it, so it is inside that region, but every
+  sub-timer in there reads microseconds. It is NOT:
+      the submit ioctl      ioctl=50us  (the original 510ms stall WAS in the
+                            ioctl - 244813us. This is a different problem.)
+      the fence wait        fenceit=0, so the loop never ran
+      the flip event wait   PACE_ON_FENCE_ONLY, we do not call WaitEqueue
+      phase()               returns early below batch 500 and only buffers
+      the trace write       frames were already 478ms before adaptive logging
+                            engaged at all
+
+  I am not going to guess at it. This build splits that region with THREE REAL
+  timestamps - not gated, so valid on every frame:
+      wA=   t_submit -> start of the flip loop
+      wB=   the entire flip loop
+      wC=   end of the flip loop -> end of frame
+  wA + wB + wC accounts for the whole of wait=, so one of them will hold the
+  478ms and the next trace localises it exactly.
+
+  make
+
+  Send the next trace. Read wA/wB/wC - whichever is ~478000 is where the frame
+  is going.
 
 ============================================================
 *** EVERY gnm EXPORT NOW NAMED AND CLASSIFIED ***

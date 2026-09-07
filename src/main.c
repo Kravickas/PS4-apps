@@ -3861,8 +3861,17 @@ int main(void) {
            CPU can wait for frame k individually, flip it, and pace on vblank.
            The display rate is unchanged - we just spent ONE submit for K
            frames instead of K submits. */
+        /* The 2fps trace showed dt=478ms with only 139us across every existing
+           timer - 478252us unaccounted, all of it inside (t_submit .. now).
+           phase() returns early below batch 500 and only buffers to memory, and
+           fenceit=0 means the fence wait never looped. So the cost is somewhere
+           none of the current timers bracket. These three split that region
+           exactly, with REAL timestamps (not gated) so they are valid on every
+           frame regardless of logging. */
+        uint64_t t_w0 = sceKernelGetProcessTime();
         phase("pre-flips");
         uint64_t t_flip0 = tstamp();
+        uint64_t t_w1 = sceKernelGetProcessTime();
         int flip_ret = 0;
         for (int k = 0; k < BATCH_FRAMES; k++) {
             /* Reset the budget PER sub-frame. fence_iters was shared across
@@ -4071,6 +4080,7 @@ int main(void) {
         g_batch++;
         phase("batch-end");
         phase_flush();   /* one write + one fsync for the whole frame */
+        uint64_t t_w2 = sceKernelGetProcessTime();
         uint64_t t_flip1 = tstamp();
         long long d_flip = (long long)(t_flip1 - t_flip0);
 
@@ -4108,6 +4118,7 @@ int main(void) {
            command buffers are being dropped somewhere between the two. */
         if (g_trace_this_frame) g_hw_ok = sceGnmDebugHardwareStatus(0);
 
+        uint64_t t_w3 = sceKernelGetProcessTime();
         uint64_t now = sceKernelGetProcessTime();
         static uint64_t prev_t = 0;
         uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
@@ -4174,6 +4185,10 @@ int main(void) {
             LP(" fwant="); p+=lg_i64(L+p,(long long)g_fence_wanted);
             LP(" done="); p+=lg_i64(L+p,d_done);
             LP(" wait="); p+=lg_i64(L+p,d_wait);
+            /* the three splits of the unaccounted region */
+            LP(" wA="); p+=lg_i64(L+p,(long long)(t_w1 - t_w0));   /* t_submit -> flip start */
+            LP(" wB="); p+=lg_i64(L+p,(long long)(t_w2 - t_w1));   /* the whole flip loop  */
+            LP(" wC="); p+=lg_i64(L+p,(long long)(t_w3 - t_w2));   /* flip end -> frame end */
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
             LP(" ptms="); p+=lg_i64(L+p,(long long)(now/1000));
             LP(" evc="); p+=lg_i64(L+p,g_event_count);
