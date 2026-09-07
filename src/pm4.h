@@ -66,7 +66,53 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define PM4_EVENT_WRITE_EOP     0x47
 #define PM4_NOP                 0x10
 #define PM4_ACQUIRE_MEM         0x58
+/* CP_COHER_CNTL bits for ACQUIRE_MEM / surface-sync. */
+#define COHER_TCL1_ACTION_ENA   (1u<<22)  /* invalidate vector L1 */
+#define COHER_TC_ACTION_ENA     (1u<<23)  /* invalidate/flush L2  */
+#define COHER_CB_ACTION_ENA     (1u<<25)  /* flush colour pipe    */
+#define COHER_DB_ACTION_ENA     (1u<<26)  /* flush depth pipe     */
+#define COHER_SH_KCACHE_ENA     (1u<<27)  /* scalar K$            */
+#define COHER_SH_ICACHE_ENA     (1u<<28)  /* instruction I$       */
+#define COHER_CB_DEST_BASE_ENA  (1u<<6)
+/* Render-target -> texture barrier.
+   TCL1 IS REQUIRED ALONGSIDE TC ON THIS HARDWARE. From Mesa:
+     "radeonsi: always set the TCL1_ACTION_ENA when invalidating L2.
+      Some CIK-VI docs say this is the default behavior on SI. That doesn't
+      answer whether it's also the default behavior on CIK-VI."
+   We were invalidating L2 (TC) without L1 (TCL1), so a pass sampling a
+   surface another pass had just written could read stale texels out of the
+   vector L1. The firmware's own CLEAR_STATE ACQUIRE_MEM uses coher_cntl
+   0x2ec47fc0, which sets TCL1, TC, CB, DB and K$ - corroborating that TCL1
+   belongs here. */
+#define COHER_RT_TO_TEXTURE   (COHER_CB_ACTION_ENA | COHER_DB_ACTION_ENA | \
+                               COHER_TC_ACTION_ENA | COHER_TCL1_ACTION_ENA | \
+                               COHER_SH_KCACHE_ENA | COHER_CB_DEST_BASE_ENA)
 #define PM4_WRITE_DATA          0x37
+
+/* GPU-side checkpoint. Every GPU status query is a stub on retail firmware
+   (GetProtectionFaultTimeStamp, DebugHardwareStatus, GetGpuBlockStatus,
+   GetLastWaitedAddress, GetShaderStatus all return 0), so when the command
+   processor wedges there is no way to ask it where it stopped. This makes the
+   CP report it directly: each checkpoint stores a distinct value to a
+   CPU-visible dword, and the LAST value present after a hang is the last
+   packet the CP retired.
+
+   Header 0xc0033700 is confirmed against the firmware - gnm's own marker
+   patcher emits exactly this packet.
+     [1] control: DST_SEL=5 (memory) << 8 | WR_CONFIRM (1<<20) | ENGINE ME
+     [2] addr lo   [3] addr hi   [4] value                                   */
+static inline void pm4_write_data_dword(struct PM4Builder* b,
+                                        volatile uint32_t* dst, uint32_t value) {
+    uint64_t a = (uint64_t)(uintptr_t)dst;
+    pm4_emit(b, pm4_type3(PM4_WRITE_DATA, 4));
+    pm4_emit(b, (5u << 8) | (1u << 20));          /* DST_SEL=memory, WR_CONFIRM */
+    pm4_emit(b, (uint32_t)(a & 0xFFFFFFFCu));
+    pm4_emit(b, (uint32_t)(a >> 32) & 0xFFFFu);
+    pm4_emit(b, value);
+}
+
+/* Set to 0 to remove all checkpoint packets from the command stream. */
+#define GPU_CHECKPOINTS 1
 
 // Register bases
 #define CTX_REG_BASE    0xA000u
@@ -91,11 +137,44 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define CTX_DB_DEPTH_SIZE           0x016
 #define CTX_DB_DEPTH_SLICE          0x017
 #define CTX_WINDOW_SCISSOR          0x081  // 2 dwords
+/* PA_SC_WINDOW_OFFSET. Confirmed via Mesa: R_028200 -> index (0x200)/4 = 0x080.
+   Set by NEITHER gnm init function NOR us, so it holds whatever the previous
+   context left. Any scissor that does not set WINDOW_OFFSET_DISABLE is shifted
+   by it. We now zero it explicitly AND set the disable bit on every scissor. */
+#define CTX_WINDOW_OFFSET           0x080
 #define CTX_COLOR_TARGET_MASK       0x08E
 #define CTX_COLOR_SHADER_MASK       0x08F
 #define CTX_GENERIC_SCISSOR         0x090  // 2 dwords
 #define CTX_VIEWPORT_SCISSOR0       0x094  // 2 dwords
+/* PA_SC_VPORT_ZMIN_0 / ZMAX_0 - the viewport depth range, two consecutive
+   float registers. NEITHER sceGnmDrawInitDefaultHardwareState350 NOR
+   DrawInitToDefaultContextState400 sets them (verified against the firmware's
+   own register list), and CLEAR_STATE does not define them either - so like
+   SPI_BARYC_CNTL, the application owns this register. Left unset it holds
+   whatever the previous context left, and a stale or 0/0 range depth-clips the
+   whole scene away or squashes it to a plane. */
+#define CTX_VIEWPORT_ZMIN0          0x0B4  // 2 dwords: ZMIN then ZMAX
+/* CONFIRMED against Mesa's Sea Islands map: R_0282D0_PA_SC_VPORT_ZMIN_0 and
+   R_0282D4_PA_SC_VPORT_ZMAX_0. Context registers start at byte 0x028000 and
+   index = (addr - 0x028000)/4, so 0x0282D0 -> 0x0B4 and 0x0282D4 -> 0x0B5.
+   Mesa writes ZMIN=0 and ZMAX=fui(1.0)=0x3f800000 for all 16 viewports, which
+   is exactly what we write for viewport 0. The switch stays as a safety valve
+   but the register identification is no longer a guess. */
+#define WRITE_VIEWPORT_DEPTH_RANGE  1
 #define CTX_INDEX_OFFSET            0x102
+/* VGT_GS_ONCHIP_CNTL. Mesa/radv, guarded by chip_class >= CIK:
+       "If this is 0, Bonaire can hang even if GS isn't being used.
+        Other chips are unaffected. These are suboptimal values, but we
+        don't use on-chip GS."
+       R_028A44_VGT_GS_ONCHIP_CNTL = ES_VERTS_PER_SUBGRP(64) |
+                                     GS_PRIMS_PER_SUBGRP(4)
+   Byte 0x028A44 -> context index (0xA44)/4 = 0x291. Liverpool is CIK-family,
+   we do not use GS either, and NEITHER gnm init function sets this register -
+   the firmware writes 0x290 (VGT_SHADER_STAGES_EN) and stops. A documented
+   hardware hang from a register nobody initialises is worth closing.
+   ES_VERTS_PER_SUBGRP is bits [10:0], GS_PRIMS_PER_SUBGRP bits [21:11]. */
+#define CTX_VGT_GS_ONCHIP_CNTL      0x291
+#define VGT_GS_ONCHIP_CNTL_SAFE     (64u | (4u << 11))   /* = 0x2040 */
 #define CTX_STENCIL_CONTROL         0x10B
 #define CTX_STENCIL_REF_FRONT       0x10C
 #define CTX_STENCIL_REF_BACK        0x10D
@@ -105,6 +184,15 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define CTX_PS_INPUT_ENA            0x1B3
 #define CTX_PS_INPUT_ADDR           0x1B4
 #define CTX_NUM_INTERP              0x1B6
+/* SPI_BARYC_CNTL. gnm's canonical PS setup (sub_0x24b0, the function
+   sceGnmSetEmbeddedPsShader tail-jumps to) writes this register from the
+   PsStageRegisters struct at +0x24, and NOTHING in
+   DrawInitDefaultHardwareState350 or DrawInitToDefaultContextState400 sets it -
+   gnm expects the app's PS setup to own it. We never wrote it, so it held
+   whatever CLEAR_STATE left. It selects which barycentric sets the SPI
+   provides (PERSP_CENTER/CENTROID/SAMPLE, LINEAR_*) and POS_FLOAT_LOCATION. */
+#define CTX_SPI_BARYC_CNTL          0x1B8
+#define CTX_DB_SHADER_CONTROL       0x203
 #define CTX_SHADER_POS_FORMAT       0x1C3
 #define CTX_Z_EXPORT_FORMAT         0x1C4
 #define CTX_COLOR_EXPORT_FORMAT     0x1C5
@@ -148,16 +236,25 @@ struct PM4Builder {
     uint32_t* buf;
     uint32_t  off;
     uint32_t  cap;
+    uint32_t overflow;   /* dwords dropped because the buffer was full */
 };
 
 static inline void pm4_init(struct PM4Builder* b, uint32_t* buffer, uint32_t capacity_dwords) {
     b->buf = buffer;
     b->off = 0;
     b->cap = capacity_dwords;
+    b->overflow = 0;
 }
 
+/* Silently dropping on overflow is dangerous here, not merely lossy: the flip
+   marker MUST be the last 64 dwords of the DCB because gnm's patcher reads
+   dcb[size_dw - 0x40]. If the buffer filled mid-build, prepare_flip's dwords
+   would be dropped, b->off would stop advancing, and the patcher would rewrite
+   whatever 64 dwords happen to sit at that offset - corrupting the command
+   stream in a way that is invisible from the CPU side. So count the drops. */
 static inline void pm4_emit(struct PM4Builder* b, uint32_t val) {
     if (b->off < b->cap) b->buf[b->off++] = val;
+    else                 b->overflow++;
 }
 
 static inline void pm4_emit_f(struct PM4Builder* b, float val) {
@@ -178,7 +275,36 @@ static inline void pm4_emit_f(struct PM4Builder* b, float val) {
    state. Homebrew that skips it leaves those context registers undefined -> GPU hang /
    black screen on hardware. shadPS4 self-initializes its register tracking, so the
    omission is invisible there. Emitted once at command-buffer start, before draw state. */
+/* Declared locally so pm4.h does not depend on nid_resolve.h include order. */
+extern int sceGnmDrawInitDefaultHardwareState350(uint32_t *cmd, uint32_t sizeInDwords);
+
+/* Emit the driver's OWN default hardware state.
+
+   We used to open-code this from a hand-transcribed register table. Diffing
+   that table against what sceGnmDrawInitDefaultHardwareState350 actually
+   emits (reconstructed from the AVX blob stores in gnm 0x4340) found nine
+   divergences, including:
+     CONTEXT 0x102 and SH 0x047  - the driver sets them, we never did
+     CONTEXT 0x293  0x06020000 vs our 0x06000000   (bit 17)
+     SH 0x007/0x046/0x087/0x0c7/0x107/0x147: the driver programs bits 16-23
+        = 0x17, we wrote ZERO - no wave/late-alloc limit for ANY shader stage.
+   Rather than patch nine registers from my reading of those fields, call the
+   firmware's own function: the state is then correct by construction.
+
+   Falls back to nothing if the call fails - a zero return means the driver
+   refused (size < 0x100 dwords), which the caller can see as a short DCB. */
 static inline void pm4_init_default_hw_state(struct PM4Builder* b) {
+    uint32_t avail = b->cap - b->off;
+    if (avail < 0x100) return;
+    int written = sceGnmDrawInitDefaultHardwareState350(b->buf + b->off, avail);
+    if (written > 0) b->off += (uint32_t)written;
+}
+
+/* The previous hand-transcribed table, kept for reference and as a fallback if
+   sceGnmDrawInitDefaultHardwareState350 ever refuses. NOT used by default -
+   it is known to diverge from the firmware in nine registers (see above). */
+__attribute__((unused))
+static void pm4_init_default_hw_state_local(struct PM4Builder* b) {
     /* ClearContextState preamble (gnmdriver.cpp ClearStateSequence) */
     static const uint32_t clear_state[] = {
         0xc0012800u, 0x80000000u, 0x80000000u, 0xc0001200u, 0u, 0xc0055800u,
@@ -277,13 +403,30 @@ static inline void pm4_draw_index_auto(struct PM4Builder* b, uint32_t index_coun
     pm4_emit(b, 2); // draw_initiator: source_select=AUTO
 }
 
+/* The game checks remaining space before emitting a completion packet:
+       no-flip:  if (remaining_dwords <  6)    -> grow/flush callback
+       flip:     if (remaining_dwords < 0x40)  -> grow/flush callback
+   It never emits one into a buffer too small to hold it. Ours would be
+   silently truncated by pm4_emit, which for the flip marker means it no longer
+   sits at dcb[size_dw - 0x40] and gnm's patcher rewrites the wrong dwords.
+   These report failure so the caller can refuse to submit. */
+static inline int pm4_have_space(const struct PM4Builder* b, uint32_t dwords) {
+    return (b->cap - b->off) >= dwords;
+}
+
 static inline void pm4_event_write_eop(struct PM4Builder* b,
                                        volatile uint32_t* fence_addr,
                                        uint32_t fence_value) {
     uint64_t addr = (uint64_t)(uintptr_t)fence_addr;
+    if (!pm4_have_space(b, 6)) { b->overflow++; return; }   /* game checks < 6 */
     pm4_emit(b, pm4_type3(PM4_EVENT_WRITE_EOP, 5));
     pm4_emit(b, 0x0504u);                              // CACHE_FLUSH_TS(4), event_index=5
-    pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFFu));        // address_lo
+    /* 4-BYTE ALIGN THE ADDRESS. Decompiled from the game's submit path
+       (eboot 0x94edf0): it emits (fence_addr & 0xfffffffffc), masking the low
+       two bits before writing address_lo. The EOP address field has no room
+       for them - low bits are reserved - so an unaligned pointer would put
+       garbage in reserved bits. */
+    pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFCu));        // address_lo, 4-byte aligned
     pm4_emit(b, (uint32_t)(addr >> 32) | 0x20000000u);  // addr_hi | data_sel=1(Data32) | int_sel=0 -- MATCHES THE GAME: God of War's submit path (eboot 0x94edf0) emits exactly (addr_hi | 0x20000000)
     pm4_emit(b, fence_value);                           // data_lo
     pm4_emit(b, 0);                                     // data_hi
@@ -319,6 +462,10 @@ static inline void pm4_prepare_flip(struct PM4Builder* b,
                                     volatile uint32_t* fence_addr,
                                     uint32_t fence_value) {
     uint64_t addr = (uint64_t)(uintptr_t)fence_addr;
+    /* 64 dwords or nothing: a partial marker is worse than none, because the
+       patcher would rewrite whatever sits at dcb[size_dw - 0x40] instead.
+       The overflow counter makes the caller refuse to submit. */
+    if (!pm4_have_space(b, 64)) { b->overflow++; return; }
     pm4_emit(b, pm4_type3(PM4_NOP, 63));                 // +0x00 = 0xc03e1000
     pm4_emit(b, PM4_PREPARE_FLIP_TAG);                   // +0x04 marker
     pm4_emit(b, (uint32_t)(addr & 0xFFFFFFFFu));         // +0x08 p0 = fence lo

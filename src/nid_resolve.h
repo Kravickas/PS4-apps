@@ -94,6 +94,18 @@ extern int sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void** dcb_addrs,
                                              int buf_idx, uint32_t flip_mode,
                                              int64_t flip_arg);
 extern int sceGnmSubmitDone(void);
+/* Flushes the CPU's write-combine buffers for GARLIC memory so the GPU sees
+   what the CPU wrote. Real on this firmware (gnm 0x460 loads the driver fd and
+   tail-jumps to an ioctl wrapper), not a stub. */
+extern int sceGnmFlushGarlic(void);
+
+/* Writes the driver's own default hardware state into cmd and returns the
+   number of dwords written (0 on failure). sizeInDwords must be >= 0x100.
+   Signature derived from gnm 0x4340: rdi=cmd, esi=sizeInDwords, and the
+   shared core at 0x4350 guards with "cmp esi,0x100 / jb error".
+   This is the authoritative init state - using it removes any chance of our
+   hand-rolled copy diverging from the firmware's. */
+extern int sceGnmDrawInitDefaultHardwareState350(uint32_t *cmd, uint32_t sizeInDwords);
 
 /* Returns 1 when the driver's in-flight counter is 0 (GPU quiesced).
    The game spins on this after SubmitDone before tearing down. */
@@ -101,6 +113,7 @@ extern int sceGnmAreSubmitsAllowed(void);
 extern int printf(const char*, ...);
 extern int scePadInit(void);
 extern int scePadOpen(int, int, int, void*);
+extern int scePadClose(int handle);
 extern int scePadRead(int, void*, int);
 extern int scePadReadState(int, void*);
 extern int sceUserServiceInitialize(void*);

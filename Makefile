@@ -23,7 +23,7 @@ ALL_STUBS   := $(sort $(patsubst $(TOOLCHAIN)/lib/lib%.so,-l%,$(wildcard $(TOOLC
 EXTRA_LIBS  := $(filter-out $(CORE_LIBS),$(ALL_STUBS))
 SRCDIR      := src
 INTDIR      := build
-PROJ        := shadcube4
+PROJ        := homebrew
 OUT_ELF     := $(INTDIR)/$(PROJ).elf
 OUT_OELF    := $(INTDIR)/$(PROJ).oelf
 

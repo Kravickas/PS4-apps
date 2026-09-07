@@ -141,6 +141,21 @@
        time-based  -> ~11 seconds = ~330 frames
    Set to 0 to restore 60fps. */
 #define HALF_RATE       0
+/* KEEP_GPU_FED: submit the frame's work as N separate submits instead of one,
+   spread across the vblank wait, so the GPU is not idle for ~99% of every
+   frame. Measured: our frame is 16.68ms of which 16.06ms is a vblank wait with
+   the GPU already finished; the game issues ~17 submits per frame from a job
+   system and its GPU never drains. This makes the difference testable rather
+   than hypothetical. 0 = one submit per frame (previous behaviour). */
+/* 1 = one submit per frame (the game's shape). Set to 4 to also issue three
+   no-flip keep-alive submits during the vblank wait - that was an EXPERIMENT
+   to test whether GPU idleness causes the wedge. It is OFF for this build so
+   that the real fixes below (CIK GS_ONCHIP hang workaround, TCL1 cache
+   invalidate, window-offset scissors, viewport depth range, ONION memory,
+   one-SubmitDone-per-frame) can be evaluated on their own. If the hang
+   survives them, turn this back to 4. */
+#define KEEP_GPU_FED    1
+#define KA_SLOTS        4      /* dedicated keep-alive command buffers */
 #define BATCH_FRAMES    1
 #define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
@@ -612,6 +627,17 @@ static int g_submit_count = 0;     /* total GPU command-buffer submits */
 static int g_batch = 0;      /* completed batches, for crash localisation */
 static int g_slow_tail = 0;  /* frames still to log at full rate after a stall */
 static int g_evt_timeouts = 0;  /* flip-event waits that expired instead of firing */
+static int g_keepalive = 0;     /* extra no-flip submits issued to keep the GPU fed */
+static int g_ka_fail = 0;       /* SubmitDone failures (0x80d110ff) */
+static int g_dcb_overflow = 0;  /* frames whose DCB overflowed and were skipped */
+static int g_evt_drained = 0;   /* surplus flip events drained (should stay 0) */
+/* GPU-side checkpoint slot. The CP writes a stage code here as it retires
+   each part of the command buffer; after a hang the last value tells us
+   which packet it stopped on. Set by main() once the allocation exists. */
+static volatile uint32_t *g_cp_mark = 0;
+#define CPMARK(b, code) do { \
+    if (GPU_CHECKPOINTS && g_cp_mark) pm4_write_data_dword((b), g_cp_mark, (code)); \
+} while (0)
 static int g_fence_timeouts = 0;    /* EOP fence waits that expired */
 static unsigned int g_fence_stuck_at = 0;  /* fence value when it stopped */
 static unsigned int g_fence_wanted = 0;    /* value we were waiting for */
@@ -1006,10 +1032,34 @@ static void build_mvp(float *mvp, float yaw, float pitch,
 }
 
 // === Descriptor builders ===
-static void build_vsharp(uint32_t *v, void *base, uint32_t size) {
+/* Build a buffer descriptor (V#).
+
+   STRIDE IS ZERO HERE, and that matters on this hardware. From radv's vertex
+   buffer setup:
+       desc[1] = BASE_ADDRESS_HI(va >> 32) | STRIDE(stride);
+       if (chip_class <= CIK && stride)
+           desc[2] = (size - offset) / stride;   // NUM_RECORDS IN ELEMENTS
+       else
+           desc[2] = size - offset;              // in BYTES
+   Liverpool is CIK, so on a STRIDED buffer num_records would have to be in
+   units of stride, not bytes. The quirk is guarded on stride != 0, and ours is
+   0 - our shaders fetch with computed byte offsets rather than a strided
+   vertex-fetch descriptor - so num_records in bytes is correct as written.
+
+   If anyone ever gives this descriptor a non-zero stride, num_records MUST be
+   divided by it or every fetch runs off the end of the buffer. The assert-like
+   branch below keeps that from being silent. */
+static void build_vsharp_strided(uint32_t *v, void *base, uint32_t size,
+                                 uint32_t stride) {
     uint64_t a = (uint64_t)(uintptr_t)base;
-    v[0]=(uint32_t)a; v[1]=(uint32_t)(a>>32)&0xFFFF; v[2]=size;
+    uint32_t num_records = stride ? (size / stride) : size;   /* CIK: elements */
+    v[0]=(uint32_t)a;
+    v[1]=((uint32_t)(a>>32)&0xFFFF) | ((stride & 0x3FFF) << 16);
+    v[2]=num_records;
     v[3]=(1u<<3)|(2u<<6)|(3u<<9)|(4u<<12)|(4u<<15);
+}
+static void build_vsharp(uint32_t *v, void *base, uint32_t size) {
+    build_vsharp_strided(v, base, size, 0);
 }
 static void build_tsharp(uint32_t *t, void *tex, int w, int h) {
     uint64_t a=(uint64_t)(uintptr_t)tex;
@@ -1116,7 +1166,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Default hardware-state init (sceGnmDrawInitDefaultHardwareState equivalent).
        Required on real PS4 — without it context registers are undefined and the
        GPU hangs. Must come first, before context_control and any draw state. */
+    CPMARK(b, 0x10);   /* main: entered */
     pm4_init_default_hw_state(b);
+    CPMARK(b, 0x11);   /* main: hw state done */
 
 #ifdef MINIMAL_TEST
     /* DIAGNOSTIC (opt-in: -DMINIMAL_TEST): skip ALL draws. GPU-DMA-fill the
@@ -1185,12 +1237,30 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
 
     // Scissors
+    CPMARK(b, 0x12);   /* stage: scissors/viewport */
+    pm4_set_context_reg(b,CTX_WINDOW_OFFSET,0);   /* orphan state: nobody else sets it */
+    /* CIK hardware-hang workaround, from Mesa: leaving VGT_GS_ONCHIP_CNTL at 0
+       can hang the GPU even with GS unused. No gnm init function sets it. */
+    pm4_set_context_reg(b,CTX_VGT_GS_ONCHIP_CNTL,VGT_GS_ONCHIP_CNTL_SAFE);
     { uint32_t s[2]={0,(DISPLAY_W&0x7FFF)|((DISPLAY_H&0x7FFF)<<16)};
       pm4_set_context_regs(b,CTX_SCREEN_SCISSOR,s,2);
-      pm4_set_context_regs(b,CTX_GENERIC_SCISSOR,s,2);
       pm4_set_context_regs(b,CTX_VIEWPORT_SCISSOR0,s,2);
-      s[0]=(1u<<31);
+      s[0]=(1u<<31);   /* WINDOW_OFFSET_DISABLE */
+      /* Mesa sets this bit on BOTH the generic and window scissors
+         (R_028240 and R_028204). We used to set it only on the window one, so
+         the generic scissor stayed subject to PA_SC_WINDOW_OFFSET - a register
+         no init function writes. */
+      pm4_set_context_regs(b,CTX_GENERIC_SCISSOR,s,2);
       pm4_set_context_regs(b,CTX_WINDOW_SCISSOR,s,2); }
+
+    /* Viewport depth range. The app owns this - no init function sets it.
+       Our projection produces NDC z in [0,1] (CLIPPER_CONTROL bit19 selects
+       the zero-to-one convention), so the range is 0.0 .. 1.0. */
+#if WRITE_VIEWPORT_DEPTH_RANGE
+    { uint32_t z[2]; float zmin=0.0f, zmax=1.0f;
+      __builtin_memcpy(&z[0], &zmin, 4); __builtin_memcpy(&z[1], &zmax, 4);
+      pm4_set_context_regs(b,CTX_VIEWPORT_ZMIN0,z,2); }
+#endif
 
     // Viewport — zscale=1, zoffset=0 for ZeroToOne clip space
     // (shadPS4 computes minDepth = zoffset - zscale, maxDepth = zoffset + zscale
@@ -1288,7 +1358,12 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_Z_EXPORT_FORMAT,0);
     pm4_set_context_reg(b,CTX_COLOR_EXPORT_FORMAT,9);
     pm4_set_context_reg(b,CTX_COLOR_CONTROL,0x00CC0010u);
-    pm4_set_context_reg(b,0x203,0);
+    pm4_set_context_reg(b,CTX_DB_SHADER_CONTROL,0);
+    /* SPI_BARYC_CNTL: gnm's PS setup always writes this and no init function
+       does, so it was left at whatever CLEAR_STATE produced. 0 = PERSP_CENTER
+       only, POS_FLOAT_LOCATION=0 (pixel center) - which is exactly what our
+       shaders use, now stated explicitly instead of relied on implicitly. */
+    pm4_set_context_reg(b,CTX_SPI_BARYC_CNTL,0);
     /* ClipperControl.clip_space = 1 (ZeroToOne / DX-convention, bit 19).
        Paired with our NDC.z∈[0,1] projection matrix. Avoids dependence on
        VK_EXT_depth_clip_control which may not be honored → produced the
@@ -1363,6 +1438,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
          no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
        Emitting both, or emitting an EOP and then flipping separately from the
        CPU, is neither path. */
+    CPMARK(b, 0x1F);   /* stage: all draws retired, about to complete */
     if (no_flip) pm4_event_write_eop(b,fence,fv);
     else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
@@ -1402,6 +1478,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
          no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
        Emitting both, or emitting an EOP and then flipping separately from the
        CPU, is neither path. */
+    CPMARK(b, 0x1F);   /* stage: all draws retired, about to complete */
     if (no_flip) pm4_event_write_eop(b,fence,fv);
     else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
@@ -1438,6 +1515,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
          no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
        Emitting both, or emitting an EOP and then flipping separately from the
        CPU, is neither path. */
+    CPMARK(b, 0x1F);   /* stage: all draws retired, about to complete */
     if (no_flip) pm4_event_write_eop(b,fence,fv);
     else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
     return b->off*4;
@@ -1467,7 +1545,9 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        separate command buffer (it runs first when present), so it also needs
        the register defaults established before any draw. Idempotent with the
        main DCB's copy when both run. */
+    CPMARK(b, 0x20);   /* shadow: entered */
     pm4_init_default_hw_state(b);
+    CPMARK(b, 0x21);   /* shadow: hw state done */
 
     pm4_context_control(b);
 
@@ -1478,12 +1558,29 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
 
     /* Scissors/viewport — shadow map size */
+    pm4_set_context_reg(b,CTX_WINDOW_OFFSET,0);   /* orphan state: nobody else sets it */
+    /* CIK hardware-hang workaround, from Mesa: leaving VGT_GS_ONCHIP_CNTL at 0
+       can hang the GPU even with GS unused. No gnm init function sets it. */
+    pm4_set_context_reg(b,CTX_VGT_GS_ONCHIP_CNTL,VGT_GS_ONCHIP_CNTL_SAFE);
     { uint32_t s[2]={0,(SHADOW_W&0x7FFF)|((SHADOW_H&0x7FFF)<<16)};
       pm4_set_context_regs(b,CTX_SCREEN_SCISSOR,s,2);
-      pm4_set_context_regs(b,CTX_GENERIC_SCISSOR,s,2);
       pm4_set_context_regs(b,CTX_VIEWPORT_SCISSOR0,s,2);
-      s[0]=(1u<<31);
+      s[0]=(1u<<31);   /* WINDOW_OFFSET_DISABLE */
+      /* Mesa sets this bit on BOTH the generic and window scissors
+         (R_028240 and R_028204). We used to set it only on the window one, so
+         the generic scissor stayed subject to PA_SC_WINDOW_OFFSET - a register
+         no init function writes. */
+      pm4_set_context_regs(b,CTX_GENERIC_SCISSOR,s,2);
       pm4_set_context_regs(b,CTX_WINDOW_SCISSOR,s,2); }
+
+    /* Viewport depth range. The app owns this - no init function sets it.
+       Our projection produces NDC z in [0,1] (CLIPPER_CONTROL bit19 selects
+       the zero-to-one convention), so the range is 0.0 .. 1.0. */
+#if WRITE_VIEWPORT_DEPTH_RANGE
+    { uint32_t z[2]; float zmin=0.0f, zmax=1.0f;
+      __builtin_memcpy(&z[0], &zmin, 4); __builtin_memcpy(&z[1], &zmax, 4);
+      pm4_set_context_regs(b,CTX_VIEWPORT_ZMIN0,z,2); }
+#endif
     pm4_emit(b,pm4_type3(PM4_SET_CONTEXT_REG,7));
     pm4_emit(b,CTX_VIEWPORT0);
     pm4_emit_f(b,(float)SHADOW_W*0.5f); pm4_emit_f(b,(float)SHADOW_W*0.5f);
@@ -1532,6 +1629,15 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        occluder and culling handles the cube self-overlap from light's POV. */
     pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,0);
+    /* Unbind the depth surface explicitly. This pass renders shadow_depth as a
+       COLOR target and uses no depth buffer, but it shares one command buffer
+       with the main pass, which sets DB_Z_INFO=3 (a live depth surface). With
+       nothing resetting it here, the shadow pass inherits the main pass's
+       depth binding from the previous frame - a bound surface with no depth
+       state of its own. DEPTH_CONTROL=0 stops writes, so nothing is corrupted
+       today, but leaving a live surface bound to a pass that does not use it
+       is not a state we should rely on. Z_INVALID makes it explicit. */
+    pm4_set_context_reg(b,CTX_DB_Z_INFO,0);            /* Z_INVALID */
 
     /* Pipeline state — color pass, RGBA8 export.
        Shadow PS reads attr1=world_pos. NUM_INTERP=2 (VS exports 2 params);
@@ -1546,7 +1652,12 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_Z_EXPORT_FORMAT,0);
     pm4_set_context_reg(b,CTX_COLOR_EXPORT_FORMAT,9);  /* 32_R_GR (RGBA8 pixel pipe) — same as main CB */
     pm4_set_context_reg(b,CTX_COLOR_CONTROL,0x00CC0010u);
-    pm4_set_context_reg(b,0x203,0);
+    pm4_set_context_reg(b,CTX_DB_SHADER_CONTROL,0);
+    /* SPI_BARYC_CNTL: gnm's PS setup always writes this and no init function
+       does, so it was left at whatever CLEAR_STATE produced. 0 = PERSP_CENTER
+       only, POS_FLOAT_LOCATION=0 (pixel center) - which is exactly what our
+       shaders use, now stated explicitly instead of relied on implicitly. */
+    pm4_set_context_reg(b,CTX_SPI_BARYC_CNTL,0);
     /* ClipperControl = ZeroToOne (bit 19) — matches main DCB clip convention,
        matches the way light_MVP is constructed (NDC.z ∈ [0,1]). */
     pm4_set_context_reg(b,CTX_CLIPPER_CONTROL,1u<<19);
@@ -1616,7 +1727,10 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        (1u<<25) = CB_ACTION_ENA  (flush CB pixel pipe)
        (1u<<23) = TC_ACTION_ENA  (invalidate texture cache)
        (1u<<6)  = CB_DEST_BASE_ENA */
-    pm4_acquire_mem(b, (1u<<25)|(1u<<23)|(1u<<6));
+    /* Flush the render pipes and invalidate BOTH cache levels before the main
+       pass samples this surface. TCL1 (vector L1) is required alongside TC
+       (L2) on CIK - see COHER_RT_TO_TEXTURE in pm4.h. */
+    pm4_acquire_mem(b, COHER_RT_TO_TEXTURE);
 
     /* No EOP fence — shadow+main submitted as one Vulkan command buffer so the
        acquire_mem above is the barrier. */
@@ -2071,7 +2185,17 @@ static void loading_progress(int pass, const char *msg, void *ud) {
 int main(void) {
     printf("=== ShadCube4 ===\n");
 
-    int video = sceVideoOutOpen(0,0,0,0);
+    /* userId 0xFF = SCE_USER_SERVICE_USER_ID_SYSTEM. Decompiled from the
+       game's GPU init (eboot 0x133960), which opens video out as the SYSTEM
+       user, twice - once as a probe that it immediately closes, then for real:
+           sceVideoOutOpen(0xff, 0, 0, 0);
+           sceVideoOutClose(probe);
+           video = sceVideoOutOpen(0xff, 0, 0, 0);
+       We were passing 0, which is not a defined user id (INVALID is -1,
+       EVERYONE 0xFE, SYSTEM 0xFF). It is accepted and the display works, but
+       binding the display to an undefined user is not something to rely on -
+       a full-screen title opens it as SYSTEM. */
+    int video = sceVideoOutOpen(0xFF,0,0,0);
     if (video < 0) return 1;
     sceVideoOutSetFlipRate(video,0);
 
@@ -2086,6 +2210,7 @@ int main(void) {
        Verified vs shadPS4 buffer.h: TilingMode::Tile=0, Linear=1. */
     sceVideoOutSetBufferAttribute(buf_attr,0x80000000,1,0,DISPLAY_W,DISPLAY_H,DISPLAY_W);
     sceVideoOutRegisterBuffers(video,0,fb,NUM_FRAMES,buf_attr);
+
 
     /* Enable WAIT-FREE SUBMIT as early as the driver allows.
        libSceGnmDriver.prx exports seven library namespaces; one of them is
@@ -2108,6 +2233,20 @@ int main(void) {
     int eq_created = (sceKernelCreateEqueue(&flip_eq, "cube_flip") == 0);
     /* One registered flip event; we block on it each frame to pace. */
     int flip_ev_ok = eq_created && (sceVideoOutAddFlipEvent(flip_eq, video, 0) == 0);
+
+    /* From here on video-out is REGISTERED and the flip event exists. Any early
+       exit must tear all of it down in the same order the normal teardown uses,
+       or the OS blocks when the app is closed (~1 min timeout, then a crash).
+       This macro is the only sanctioned early exit. */
+    #define FATAL_EXIT(msg) do { \
+        trace_msg("FATAL: " msg "\n"); \
+        sceGnmSubmitDone(); \
+        if (flip_ev_ok) sceVideoOutDeleteFlipEvent(flip_eq, video); \
+        if (eq_created) sceKernelDeleteEqueue(flip_eq); \
+        sceVideoOutUnregisterBuffers(video, 0); \
+        sceVideoOutClose(video); \
+        return 1; \
+    } while (0)
 
     /* Flip-done label base. RE of libSceGnmDriver shows the PS4 buffer-label
        protocol: WAIT_REG_MEM(label[bi]==0) before rendering into bi, WRITE_DATA
@@ -2259,7 +2398,10 @@ int main(void) {
          desc[64..71]  floor albedo T#         (byte 256..287)
          desc[72..79]  floor normal T#         (byte 288..319)
        512 bytes = 128 dwords gives headroom. */
-    uint32_t *desc=(uint32_t*)gpu_alloc(512,0x100);
+    /* Also ONION: the descriptor table is rebuilt by the CPU and read by the
+       GPU in the same frame. */
+    uint32_t *desc=(uint32_t*)gpu_alloc_typed(512,0x100,MEM_TYPE_ONION);
+    if (!desc) FATAL_EXIT("descriptor alloc failed");
     build_tsharp(desc,tex,tex_w,tex_h);
     build_ssharp_aniso(desc+8);   /* 16× anisotropic — used by cube + floor */
     /* Second sampler at desc[80..83]: PCF depth-compare sampler for the floor
@@ -2322,9 +2464,22 @@ int main(void) {
                                  + (unsigned long)CUBE_VERTS * VERT_STRIDE
                                  + (unsigned long)FLOOR_VERTS * VERT_STRIDE
                                  + 256;
-    void *shadow_vb = gpu_alloc(shadow_vb_size, 0x1000);
+    /* ONION: the CPU writes the light MVP and copies the rotated cube
+
+       vertices into this buffer every frame, same as vb. */
+
+    void *shadow_vb = gpu_alloc_typed(shadow_vb_size, 0x1000, MEM_TYPE_ONION);
     if (!shadow_vb) shadow_depth = 0;
-    void *vb=gpu_alloc(VERT_BUF_SIZE + 256, 0x1000);
+    /* ONION, not GARLIC. The CPU rewrites this buffer EVERY FRAME - the MVP
+       matrix, the rotated cube vertices, the sun direction and the floor MVP
+       mirror - and the GPU then reads it. GARLIC is CPU write-combine: those
+       stores drain asynchronously and out of order, with nothing in our frame
+       guaranteeing they land before the command processor fetches the data.
+       ONION is write-back and CPU<->GPU coherent, which is why the game keeps
+       its per-frame data there (467 ONION allocations vs 163 GARLIC) and never
+       needs sceGnmFlushGarlic. GARLIC stays correct for write-once, GPU-read
+       data: render targets, textures, static geometry. */
+    void *vb=gpu_alloc_typed(VERT_BUF_SIZE + 256, 0x1000, MEM_TYPE_ONION);
     build_static_vb((float*)vb,
                     (const unsigned char*)floor_disp_tex,
                     floor_disp_w, floor_disp_h);  // uploaded ONCE
@@ -2375,9 +2530,16 @@ int main(void) {
 
 
 
-    void *vs=gpu_alloc(sizeof(vs_shader_binary)+256,0x1000);
-    void *vs_shadow=gpu_alloc(sizeof(vs_shadow_binary)+256,0x1000);
-    void *ps=gpu_alloc(sizeof(ps_shader_binary)+256,0x1000);
+    /* ONION: the CPU memcpys the shader code in and the GPU then FETCHES AND
+       EXECUTES it. Instruction fetch from a buffer whose write-combine stores
+       may not have drained is not something to leave to chance, and shader
+       binaries are tiny and read once - GARLIC's bandwidth buys nothing. */
+    void *vs=gpu_alloc_typed(sizeof(vs_shader_binary)+256,0x1000,MEM_TYPE_ONION);
+    void *vs_shadow=gpu_alloc_typed(sizeof(vs_shadow_binary)+256,0x1000,MEM_TYPE_ONION);
+    void *ps=gpu_alloc_typed(sizeof(ps_shader_binary)+256,0x1000,MEM_TYPE_ONION);
+    /* A NULL here would memcpy to address 0 and then have the GPU execute from
+       it. Bail cleanly instead - out of GPU memory is a legitimate failure. */
+    if (!vs || !vs_shadow || !ps) FATAL_EXIT("shader alloc failed");
     my_memcpy(vs,vs_shader_binary,sizeof(vs_shader_binary));
     my_memcpy(vs_shadow,vs_shadow_binary,sizeof(vs_shadow_binary));
     my_memcpy(ps,ps_shader_binary,sizeof(ps_shader_binary));
@@ -2387,7 +2549,7 @@ int main(void) {
        arrays (CPU-only ELF memory) faults the GPU MMU on real hardware and hangs
        (shadPS4 reads guest memory via its cache, so it never faulted there). */
     #define UPLOAD_SHADER(dst, src) \
-        void *dst = gpu_alloc(sizeof(src)+256, 0x1000); \
+        void *dst = gpu_alloc_typed(sizeof(src)+256, 0x1000, MEM_TYPE_ONION); /* shader code: coherent, GPU executes it */ \
         my_memcpy(dst, src, sizeof(src));
     UPLOAD_SHADER(ps_dark_gpu,          ps_dark_binary);
     UPLOAD_SHADER(ps_floor_gpu,         ps_floor_binary);
@@ -2419,6 +2581,37 @@ int main(void) {
     /* Fences in ONION: the GPU writes them and the CPU polls them. */
     volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
     volatile uint32_t *shadow_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
+    /* Separate fence for the keep-alive submits so they never interfere with
+       the frame fence the flip path writes. */
+    volatile uint32_t *keepalive_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
+    uint32_t keepalive_fv = 0;
+    /* The EOP packet writes through these addresses. A NULL fence would make
+       the GPU write to address 0, which faults the command processor. */
+    if (!fence || !shadow_fence) FATAL_EXIT("fence alloc failed");
+    /* Checkpoint slot for the GPU-side stage markers. ONION so the CPU sees
+       the CP's writes immediately. Optional: if it fails, CPMARK compiles to
+       nothing at runtime and the rest of the app is unaffected. */
+    g_cp_mark = (volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
+    if (g_cp_mark) *g_cp_mark = 0;
+    if (keepalive_fence) *keepalive_fence = 0;
+    /* Dedicated command buffers for the keep-alive submits. They must NOT share
+       dcb_mem[]: the next frame would overwrite a buffer the GPU could still be
+       reading, which is exactly how a command processor gets wedged. Small,
+       because a keep-alive DCB is only the default hardware state + one EOP. */
+    uint32_t *ka_dcb[KA_SLOTS];
+    int ka_ok = 1;
+    int ka_slot = 0;
+#if KEEP_GPU_FED > 1
+    for (int i=0;i<KA_SLOTS;i++) {
+        ka_dcb[i]=(uint32_t*)gpu_alloc_typed(0x4000,0x4000,MEM_TYPE_ONION);
+        if (!ka_dcb[i]) ka_ok = 0;
+    }
+#else
+    /* Experiment disabled: do not burn 4 x 16KB of GPU memory on buffers
+       nothing will submit. */
+    for (int i=0;i<KA_SLOTS;i++) ka_dcb[i]=0;
+    ka_ok = 0;
+#endif
     *fence=0;
     *shadow_fence=0;
 
@@ -2505,7 +2698,7 @@ int main(void) {
                     unsigned long new_shadow_size = 0x50 + (unsigned long)mesh.num_verts * VERT_STRIDE + 256;
                     /* Cap at 256MB — huge models skip shadow */
                     if (new_shadow_size <= 0x10000000UL) {
-                        void *new_shadow_vb = gpu_alloc(new_shadow_size, 0x1000);
+                        void *new_shadow_vb = gpu_alloc_typed(new_shadow_size, 0x1000, MEM_TYPE_ONION); /* must match shadow_vb's type */
                         if (new_shadow_vb) {
                             shadow_vb = new_shadow_vb;
                             my_memcpy((char*)shadow_vb + 0x50,
@@ -2600,7 +2793,21 @@ int main(void) {
     float sun_speed = 0.0027f;  // 40% slower than 0.0045 (= 76% slower than original 0.01125)
     uint32_t prev_buttons = 0;
 
-    uint32_t frame=0,fv=1;
+    /* Flush the CPU write-combine buffers before the first frame.
+       Textures, the framebuffers' initial contents and the model-loader
+       staging arrays live in GARLIC (write-combine) and were filled by CPU
+       stores that drain asynchronously. Everything the CPU rewrites per frame
+       has been moved to ONION, so this only has to happen ONCE - which is
+       exactly what the API is for. Without it the first frames can sample
+       texels the GPU has not seen yet. */
+    sceGnmFlushGarlic();
+
+    uint32_t frame=0;
+    /* Start ABOVE whatever the loading screen left in the fence. It shares this
+       fence and leaves it high (105 in the last trace), so starting at fv=1 made
+       frame 0's "*fence >= fv" pass instantly - measured fenceit=0 - and we
+       flipped a buffer the GPU might still have been rendering into. */
+    uint32_t fv = *fence + 1;
     int running = 1;
     int quit_reason = 0;   /* 0=still running, 1=system quit event, 2=pad combo */
     /* Batch state: sub-frames accumulate into one command buffer (pm4), which
@@ -3259,12 +3466,27 @@ int main(void) {
             asb = sceGnmAreSubmitsAllowed();        /* driver in-flight counter == 0 ? */
             ifb = gnm_inflight_count();             /* raw in-flight count before */
             phase("pre-submit");
+            /* Refuse to submit an overflowed command buffer. The flip marker
+               must be the last 64 dwords; if pm4_emit dropped anything the
+               marker is not where gnm's patcher will look and it would rewrite
+               unrelated dwords. Skipping the frame is recoverable; a corrupted
+               command stream is not. */
             t_ioctl0 = sceKernelGetProcessTime();   /* AFTER build_dcb, before ioctl */
+            if (pm4.overflow) {
+                /* Do NOT submit. The flip marker must be the last 64 dwords
+                   because gnm's patcher reads dcb[size_dw - 0x40]; if pm4_emit
+                   dropped anything the marker is not there and the patcher
+                   would rewrite unrelated dwords. Skipping a frame is
+                   recoverable, a corrupted command stream is not. */
+                g_dcb_overflow++;
+                saf_ret = -1;
+            } else {
             /* The game's flip path: ONE call that submits and registers the
                flip, with the marker block at the DCB tail carrying our fence.
                eboot 0x94edf0 passes (1, &dcb, &size, 0, 0, flipMode, ...). */
             saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
                                                         video, bi, 1, (int64_t)frame);
+            }
             t_saf = sceKernelGetProcessTime();
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
@@ -3275,8 +3497,15 @@ int main(void) {
                past the wall each SubmitDone blocks 512003us, so 64 of them cost
                32.77 SECONDS. sdret/sdret2 were 0x0 throughout, so SubmitDone
                always SUCCEEDS; it is blocking, not failing. */
-            sdret = sceGnmSubmitDone();
-            sdret2 = sdret;
+            /* SubmitDone is DEFERRED to once per frame, after every submit
+               including the keep-alives (see below). The game submits ~17
+               times per frame and calls SubmitDone ONCE - 971 calls for 969
+               frames in its log. SubmitDone rings the DingDong doorbell, a
+               64-entry ring whose pending count saturates and is decremented
+               only by the kernel, plus a drain and a ready poll; issuing it
+               per submit was ringing that doorbell 4x per frame on a ring we
+               otherwise never use. */
+            sdret = 0; sdret2 = 0;
             drn = 0;
             asd = sceGnmAreSubmitsAllowed();
             ifd = gnm_inflight_count();             /* raw in-flight count after done */
@@ -3284,7 +3513,7 @@ int main(void) {
         t_submit = sceKernelGetProcessTime();
         long long d_ioctl = (long long)(t_saf - t_ioctl0);   /* JUST the kernel submit */
         long long d_build = (long long)(t_ioctl0 - t_pre_build); /* JUST build_dcb (CPU) */
-        long long d_done  = (long long)(t_submit - t_done0);  /* JUST sceGnmSubmitDone */
+        long long d_done  = 0;   /* set below, after the single SubmitDone */
 
         /* Flip out the whole batch. The GPU renders all BATCH_FRAMES frames
            back-to-back; each ends with its own EOP fence value (fv+k), so the
@@ -3307,8 +3536,23 @@ int main(void) {
                Timing out here and carrying on lets us see whether the GPU ever
                recovers, and what value the fence is stuck at, instead of
                hanging the loop. */
+            /* SPIN FIRST, then sleep. Decompiled from the game (frame function
+               at eboot 0x132370), its fence wait is a bare hot spin with no
+               sleep and no timeout at all:
+                   while (*(int*)(ctx+0x3a0) != *fence_ptr)
+                       fence_ptr = *(int**)(ctx+0x398);
+               We were calling sceKernelUsleep(100) per iteration, and the
+               MEASURED granularity floor on this hardware is ~1ms regardless of
+               the value asked for. With fenceit measured at 1-2 and the fence
+               signalling in tens of microseconds, we were sleeping ~1ms for
+               something ready in ~30us - a ~30x overshoot out of a 16.6ms frame,
+               enough to miss a vblank under any extra load.
+               So: spin like the game for the common case, then fall back to
+               sleeping so a genuinely stalled fence cannot burn a core, and
+               keep the bounded timeout the game does not have. */
             fence_iters = 0;
-            for (;fence_iters<2000 && *fence < fv+k;fence_iters++) sceKernelUsleep(100);
+            for (int sp = 0; sp < 20000 && *fence < fv+k; sp++) cpu_pause16();
+            for (;fence_iters<250 && *fence < fv+k;fence_iters++) sceKernelUsleep(1000);
             if (*fence < fv+k) {
                 g_fence_timeouts++;
                 g_fence_stuck_at = *fence;
@@ -3320,6 +3564,41 @@ int main(void) {
                it via the marker, so calling sceVideoOutSubmitFlip here would
                queue a SECOND flip for the same frame. */
             phase("flip-done");
+#if KEEP_GPU_FED > 1
+            /* Keep the GPU fed across the vblank wait instead of leaving it
+               idle. Measured: the frame is 16.68ms of which 16.06ms is this
+               wait, with the GPU long finished - it is idle ~99% of the time.
+               The game issues ~17 submits per frame from a job system and its
+               GPU never drains. Each filler is a NO-FLIP submit (hardware
+               state + its own EOP fence), which is the driver's documented
+               second path and touches no render state. */
+            for (int fill = 1; ka_ok && keepalive_fence && fill < KEEP_GPU_FED; fill++) {
+                /* Wait for this slot's previous keep-alive to retire before
+                   rewriting it - KA_SLOTS deep, so this normally never waits. */
+                uint32_t need = (keepalive_fv >= KA_SLOTS) ? (keepalive_fv - KA_SLOTS + 1) : 0;
+                for (int w=0; w<2000 && *keepalive_fence < need; w++) sceKernelUsleep(100);
+                if (*keepalive_fence < need) break;   /* GPU behind: skip filling */
+                uint32_t *buf = ka_dcb[ka_slot];
+                struct PM4Builder fp;
+                pm4_init(&fp, buf, 0x4000/4);
+                pm4_init_default_hw_state(&fp);
+                pm4_event_write_eop(&fp, keepalive_fence, ++keepalive_fv);
+                uint32_t fsz = fp.off * 4;
+                const uint32_t *fa[1] = { buf };
+                uint32_t fs[1] = { fsz };
+                if (sceGnmSubmitCommandBuffers(1, (void**)fa, fs, 0, 0) == 0) {
+                    /* NO SubmitDone here. The game submits ~17 times per frame
+                       and calls SubmitDone ONCE (971 calls / 969 frames in its
+                       log). SubmitDone is not free: it rings the DingDong
+                       doorbell - a 64-entry ring whose pending count saturates
+                       and is decremented only by the kernel - plus a drain and
+                       a ready poll. One per frame, issued after every submit
+                       below, matches the reference implementation. */
+                    g_keepalive++;
+                    ka_slot = (ka_slot + 1) % KA_SLOTS;
+                }
+            }
+#endif
             if (flip_ev_ok) {
                 /* BOUNDED. This was called with a NULL timeout pointer, i.e.
                    block forever, and it is the only unbounded wait between
@@ -3329,9 +3608,23 @@ int main(void) {
                    survive a missing event and count it instead. */
                 struct kevent_t ev; int out=0;
                 unsigned int tmo = 100000;
+                /* Block for the flip event that paces this frame... */
                 int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
                 if (wr != 0 || out <= 0) g_evt_timeouts++;
                 flip_iters = out;
+                /* ...then DRAIN anything still queued, with a zero timeout so
+                   it never blocks. Taking exactly one event per frame means any
+                   surplus accumulates: +1 queue entry per frame fills a bounded
+                   queue after N frames, after which posts are dropped or the
+                   poster errors - "works, then stops after a few seconds".
+                   Bounded at 16 so an event storm cannot spin the frame. */
+                for (int dr = 0; dr < 16; dr++) {
+                    struct kevent_t evd; int outd = 0;
+                    unsigned int tmo0 = 0;
+                    if (sceKernelWaitEqueue(flip_eq, &evd, 1, &outd, &tmo0) != 0) break;
+                    if (outd <= 0) break;
+                    g_evt_drained++;
+                }
             }
 #if HALF_RATE
             if (flip_ev_ok) {
@@ -3342,6 +3635,20 @@ int main(void) {
 #endif
             phase("evt-done");
         }
+        /* THE one SubmitDone for this frame, issued after EVERY submit
+           (the frame DCB and all keep-alives) and after the flips. The game
+           does exactly this: ~17 submits per frame, 971 SubmitDone calls for
+           969 frames. Doing it per submit was ringing the DingDong doorbell
+           four times a frame on a 64-entry ring we otherwise never use. */
+        { uint64_t t_sd0 = sceKernelGetProcessTime();
+          sdret = sceGnmSubmitDone();
+          sdret2 = sdret;
+          /* SubmitDone returns 0x80d110ff when its ready-poll (ioctl 0x8116)
+             does not return 1. Counting it here means a persistent driver
+             failure shows up as a number instead of staying invisible. */
+          if (sdret != 0) g_ka_fail++;
+          d_done = (long long)(sceKernelGetProcessTime() - t_sd0); }
+
         fv += BATCH_FRAMES;
         dcb_slot = (dcb_slot + 1) % NUM_FRAMES;
         g_batch++;
@@ -3381,7 +3688,12 @@ int main(void) {
             long long d_pad   = (long long)(t_pad    - t_evt);
             long long d_saft  = (long long)(t_saf    - t_pre_build);
             long long d_wait  = (long long)(now      - t_submit);
-            char L[896]; int p=0;
+            /* 1280, not 896. The 47 trace fields worst-case to ~892 bytes,
+               which left FOUR bytes of headroom - and the estimate assumes 12
+               chars per value, which a negative 64-bit number exceeds. This
+               buffer is on the stack and pm4-style bounds checking does not
+               apply to it; overflowing it corrupts the frame's locals. */
+            char L[2048]; int p=0;
             #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
             LP("f="); p+=lg_i64(L+p,(long long)frame);
             LP(" dt="); p+=lg_i64(L+p,(long long)dt);
@@ -3404,6 +3716,11 @@ int main(void) {
             LP(" flip="); p+=lg_i64(L+p,d_flip);
             LP(" fret="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)flip_ret);
             LP(" evto="); p+=lg_i64(L+p,g_evt_timeouts);
+            LP(" ka="); p+=lg_i64(L+p,g_keepalive);
+            LP(" kaf="); p+=lg_i64(L+p,g_ka_fail);
+            LP(" cpm="); p+=lg_hex(L+p,(unsigned long long)(g_cp_mark?*g_cp_mark:0));
+            LP(" ovf="); p+=lg_i64(L+p,g_dcb_overflow);
+            LP(" evd="); p+=lg_i64(L+p,g_evt_drained);
             LP(" fnto="); p+=lg_i64(L+p,g_fence_timeouts);
             LP(" fstuck="); p+=lg_i64(L+p,(long long)g_fence_stuck_at);
             LP(" fwant="); p+=lg_i64(L+p,(long long)g_fence_wanted);
@@ -3445,24 +3762,39 @@ int main(void) {
       p += lg_i64(L+p,(long long)frame);
       L[p++]='\n'; L[p]=0; trace_msg(L); }
     trace_msg("teardown: begin\n");
+    /* TEARDOWN BUDGETS. These were bounded but at absurd limits, and the real
+       sleep granularity on this hardware is ~1ms regardless of the value asked
+       for (measured: sceKernelUsleep(100) sleeps ~1ms). So the old caps were:
+           td_fence  1000000 x usleep(10)   = ~1000 s   (SIXTEEN MINUTES)
+           td_flip    100000 x usleep(200)  = ~100 s
+           td_q1/q2  2000000 x cpu_pause16  = a long spin, and
+                     sceGnmAreSubmitsAllowed was MEASURED never to return 1 in
+                     this app, so BOTH ran to their full count every time.
+       If the fence is stuck - the exact failure we are chasing - the app would
+       sit in teardown for minutes, the OS would wait, and then kill it. That
+       is the "hangs on close, then crashes" behaviour.
+       Now: roughly 250ms per stage, then give up and close anyway. Closing
+       cleanly with work still outstanding is far better than not closing. */
     int td_q1=0, td_q2=0;
     sceGnmSubmitDone();
-    for (; td_q1<2000000 && !sceGnmAreSubmitsAllowed(); td_q1++) cpu_pause16();
+    for (; td_q1<20000 && !sceGnmAreSubmitsAllowed(); td_q1++) cpu_pause16();
     sceGnmSubmitDone();
-    for (; td_q2<2000000 && !sceGnmAreSubmitsAllowed(); td_q2++) cpu_pause16();
+    for (; td_q2<20000 && !sceGnmAreSubmitsAllowed(); td_q2++) cpu_pause16();
 
-    /* Our own EOP fence: the last submitted frame has actually retired. */
+    /* Our own EOP fence: the last submitted frame has actually retired.
+       ~250 waits x ~1ms = ~250ms, then proceed regardless. */
     int td_fence=0;
-    for (; td_fence<1000000 && *fence < fv; td_fence++) sceKernelUsleep(10);
+    for (; td_fence<250 && *fence < fv; td_fence++) sceKernelUsleep(1000);
 
-    /* Let queued flips drain before pulling the buffers out from under them. */
+    /* Let queued flips drain before pulling the buffers out from under them.
+       ~250ms, then proceed. */
     int td_flip=0; int td_pend=-1;
     { OrbisVideoOutFlipStatus fs;
-      for (; td_flip<100000; td_flip++) {
+      for (; td_flip<250; td_flip++) {
           if (sceVideoOutGetFlipStatus(video,&fs) != 0) break;
           td_pend = fs.numFlipPending;
           if (fs.numFlipPending == 0) break;
-          sceKernelUsleep(200);
+          sceKernelUsleep(1000);
       } }
     { char L[200]; int p=0;
       #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
@@ -3475,10 +3807,14 @@ int main(void) {
       LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv); L[p++]='\n';
       #undef LP
       trace_line(L,p); }
-    sceVideoOutUnregisterBuffers(video, 0);
+    /* Order matters: delete the flip event BEFORE unregistering the buffers it
+       refers to, then drop the equeue, then the buffers, then the handle.
+       Unregistering first leaves an event pointing at freed display state. */
     if (flip_ev_ok) sceVideoOutDeleteFlipEvent(flip_eq, video);
     if (eq_created) sceKernelDeleteEqueue(flip_eq);
+    sceVideoOutUnregisterBuffers(video, 0);
     sceVideoOutClose(video);
+    if (pad_handle >= 0) scePadClose(pad_handle);   /* scePadOpen had no match */
     trace_msg("teardown: closed\n");
     return 0;
 }
