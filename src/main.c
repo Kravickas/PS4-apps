@@ -89,6 +89,24 @@
    unconditional and unaffected, because it fires once per stall and that is
    precisely when half a second does not matter. Turn this on only if you need
    hwok= tracked during a healthy run. */
+/* DISPLAY_POLL: sample sceVideoOutGetFlipStatus + GetVblankStatus each frame.
+   The evidence now points at the display pipeline - the submit blocks for
+   509820us, which matches the videoout service thread's 500000us equeue
+   ceiling - so these are the counters that matter:
+       num               total flips COMPLETED
+       numFlipPending    the counter that hits the 16 limit
+       numGpuFlipPending the EOP-flip counter
+       currentBuffer     which buffer the display is scanning out
+       vblank count      whether the display is ticking at all
+   If at frame 512 the vblank keeps counting while numFlipPending climbs and
+   num stops, that is the whole answer.
+
+   ITS COST IS MEASURED AND LOGGED as dpus. The last probe I added
+   (sceGnmDebugHardwareStatus) silently cost 477ms per call and became the
+   bottleneck it was meant to diagnose. This one cannot do that unnoticed -
+   if dpus is large, it is the new problem and we turn this off. */
+#define DISPLAY_POLL 1
+
 #define HW_STATUS_POLL 0
 
 #define WAITFREE_SUBMIT 0
@@ -778,6 +796,9 @@ static int g_affinity_ret = -99;   /* result of scePthreadSetaffinity at init */
 static int g_hw_ok = -1;           /* kernel's own GPU health verdict */
 static int g_hw_ok_at_stall = -1;  /* same, sampled at the first fence timeout */
 static int g_mcq0 = -99, g_mcq1 = -99;   /* MapComputeQueue return codes */
+/* display-pipeline counters, sampled per frame under DISPLAY_POLL */
+static long long g_fs_num = -1, g_fs_pend = -1, g_fs_gpu = -1, g_fs_cur = -1;
+static long long g_vbl = -1, g_dp_us = 0;
 
 /* Keep an angle in [0, 2pi). The rotation accumulators grow without bound -
    after an hour at 60fps cam_yaw reaches ~4320 rad, where float32 has only
@@ -4158,6 +4179,21 @@ int main(void) {
 #if HW_STATUS_POLL
         if ((frame & 1023) == 0) g_hw_ok = sceGnmDebugHardwareStatus(0);
 #endif
+#if DISPLAY_POLL
+        {   uint64_t dp0 = sceKernelGetProcessTime();
+            OrbisVideoOutFlipStatus fsp;
+            if (sceVideoOutGetFlipStatus(video, &fsp) == 0) {
+                g_fs_num  = (long long)fsp.num;
+                g_fs_pend = (long long)fsp.numFlipPending;
+                g_fs_gpu  = (long long)fsp.numGpuFlipPending;
+                g_fs_cur  = (long long)fsp.currentBuffer;
+            }
+            OrbisVideoOutVblankStatus vbs;
+            if (sceVideoOutGetVblankStatus(video, &vbs) == 0)
+                g_vbl = (long long)vbs.count;
+            g_dp_us = (long long)(sceKernelGetProcessTime() - dp0);
+        }
+#endif
 
         uint64_t t_w3 = sceKernelGetProcessTime();
         uint64_t now = sceKernelGetProcessTime();
@@ -4175,7 +4211,11 @@ int main(void) {
                chars per value, which a negative 64-bit number exceeds. This
                buffer is on the stack and pm4-style bounds checking does not
                apply to it; overflowing it corrupts the frame's locals. */
-            char L[2048]; int p=0;
+            /* 3072. At 64 fields the pessimistic bound is ~1984, which left
+               64 bytes in a 2048 buffer - the same margin that nearly bit us
+               when this was L[896] with 47 fields. Size it for the fields we
+               have plus room to add more. */
+            char L[3072]; int p=0;
             #define LP(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
             LP("f="); p+=lg_i64(L+p,(long long)frame);
             LP(" dt="); p+=lg_i64(L+p,(long long)dt);
@@ -4230,6 +4270,13 @@ int main(void) {
             LP(" wA="); p+=lg_i64(L+p,(long long)(t_w1 - t_w0));   /* t_submit -> flip start */
             LP(" wB="); p+=lg_i64(L+p,(long long)(t_w2 - t_w1));   /* the whole flip loop  */
             LP(" wC="); p+=lg_i64(L+p,(long long)(t_w3 - t_w2));   /* flip end -> frame end */
+            /* the display pipeline, which is where the evidence points */
+            LP(" fnum=");  p+=lg_i64(L+p,g_fs_num);    /* flips COMPLETED   */
+            LP(" fpend="); p+=lg_i64(L+p,g_fs_pend);   /* pending, 16 = full*/
+            LP(" fgpu=");  p+=lg_i64(L+p,g_fs_gpu);    /* EOP flips pending */
+            LP(" fcur=");  p+=lg_i64(L+p,g_fs_cur);    /* buffer on screen  */
+            LP(" vbl=");   p+=lg_i64(L+p,g_vbl);       /* vblanks since open*/
+            LP(" dpus=");  p+=lg_i64(L+p,g_dp_us);     /* COST of this poll */
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
             LP(" ptms="); p+=lg_i64(L+p,(long long)(now/1000));
             LP(" evc="); p+=lg_i64(L+p,g_event_count);

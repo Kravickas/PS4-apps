@@ -1,54 +1,51 @@
 ============================================================
-*** NO PACING AT ALL - PACE_ON_FENCE_ONLY WAS WRONG, REVERTED ***
+*** LOGGING AIMED AT THE DISPLAY PIPELINE ***
 ============================================================
-    f=17   dt=806 us    -> 1240 FPS
-    f=18   dt=681 us    -> 1468 FPS
-    f=16   dt=947150  fenceit=250  saf=0x80d11081  fence=16 fv=18
-    f=948  dt=524994  cplag=198  fence=751 STUCK  fv=950
+You are right that we are barely moving, and more logging is the right call -
+but pointed where the evidence now says the problem is.
 
-  With the 477ms probe gone the loop FREE-RUNS at over 1000 fps. Nothing paces
-  it. Within 16 frames the flip queue is full - the 16-pending limit confirmed
-  earlier from shadPS4 - and every submit after that returns 0x80d11081 with
-  the fence stuck. By the end the fence is frozen at 751 while fv climbs to
-  950 and cplag is ~198: the GPU is buried under flips it can never retire.
+  The submit blocks for 509820us. The videoout service thread's equeue ceiling
+  is 500000us (vo 0x5df0: mov [rbp-0x30], 0x7a120). The submit is waiting on
+  the DISPLAY, not the GPU - cplag stays 0 and the fence keeps advancing right
+  through the stall.
 
-  So "thousands of fps then 1.something" is one failure, not two: free-run,
-  flood the queue, stall.
+  So this build samples the counters that decide it, once per frame:
 
-WHY MY CHANGE WAS WRONG - and the reasoning error is worth naming
-  I removed the blocking sceKernelWaitEqueue because the reference never calls
-  it; it paces on a bare fence spin. That is true, and it was incomplete in the
-  one way that mattered:
+      fnum=   flips COMPLETED         (does it stop at 512?)
+      fpend=  flips pending           (does it climb to the 16 limit?)
+      fgpu=   EOP flips pending
+      fcur=   buffer currently on screen
+      vbl=    vblanks since open      (is the display still ticking at all?)
+      dpus=   THE COST OF THIS POLL
 
-      THE GAME'S FRAME IS GPU-BOUND. 16.8 submits of real work, ~16.6ms of GPU
-      time. Its fence genuinely takes a frame to arrive, so fence pacing holds
-      it at 60fps for free.
+  Those four flip fields are exactly the counters shadPS4 models - it
+  increments numFlipPending on submit and decrements it on present, and
+  numGpuFlipPending only for EOP flips. Field order in our struct matches.
 
-      OUR FRAME IS SUB-MILLISECOND. One pass, a cube and a floor. Our fence
-      arrives in microseconds, so fence pacing paces us at 1400fps - and every
-      one of those frames registers a flip the display can only retire at 60Hz.
+  WHAT THE ANSWER WILL LOOK LIKE
+      vbl keeps counting, fnum stops, fpend climbs
+          the display is alive but flips stop retiring - a flip-completion
+          failure, and the 500ms backstop is the kernel giving up waiting
+      vbl also stops
+          the display itself stalls, which is a different and larger problem
+      fpend stays low and fnum keeps rising
+          flips are fine and the 500ms wait is for something else entirely
 
-  Copying the reference's pacing WITHOUT its workload is no pacing at all. I
-  matched a mechanism and ignored the load it was carrying.
+*** AND I MEASURED ITS COST THIS TIME ***
+  dpus= is the cost of the poll itself. The last probe I added
+  (sceGnmDebugHardwareStatus) silently cost 477ms per call and BECAME the
+  bottleneck it was meant to diagnose - it held the app at 2fps by itself and I
+  spent two rounds blaming the wrong things. This one cannot do that unnoticed:
+  if dpus is large it is the new problem and DISPLAY_POLL 0 turns it off.
 
-  And the reason this only surfaced now: the 477ms hardware-status probe had
-  been standing in for the pacing by accident. Removing it exposed that we had
-  none.
+  The trace line also went from L[2048] to L[3072]. At 64 fields the
+  pessimistic bound is ~1984, which left 64 bytes of headroom - the same margin
+  that nearly bit us when this was L[896] with 47 fields.
 
-FIXED: PACE_ON_FENCE_ONLY 0. The blocking flip-event wait is back, so the frame
-is held to one flip per vblank instead of sixteen in flight. What limits us now:
-    the blocking WaitEqueue on the flip event   one per vblank
-    the fence wait                              instant for our workload
-    flipMode 1 = VSYNC on the flip itself
+  make      (no .py in the build)
 
-  Protective paths unchanged: fence timeouts > 3 switch to no-flip submits so
-  the queue can drain, the event timeout can fire again, and gpu_dead still
-  makes teardown skip every GPU wait.
-
-  make
-
-  Expect ~60fps. Watch cplag (should sit at 0 or 1), saf (should never be
-  0x80d11081), and whether it still closes cleanly.
+  Run it into the stall and send the log. fnum/fpend/vbl across frame 512 is
+  the whole question.
 
 ============================================================
 *** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***
