@@ -237,6 +237,26 @@
            -> the marker is innocent and the problem is elsewhere
    Either answer eliminates half the remaining search space.
    Set back to 0 for a normal, presenting build. */
+/* CPU_FLIP: flip with sceVideoOutSubmitFlip from the CPU instead of the
+   marker's EOP flip.
+
+   THE NEXT DISCRIMINATOR, and it is pointed at the one thing we know:
+   fgpu=1 at the stall, so the flip that never retires is a GPU/EOP flip -
+   registered by gnm's marker patcher through sceVideoOutSubmitEopFlip.
+   A CPU flip does not go through that machinery at all.
+
+       survives past 547 flips -> the limit lives in the EOP-flip path
+                                  specifically, and the marker protocol is the
+                                  problem
+       still stops at 547      -> the limit is in the display's flip accounting
+                                  regardless of how the flip was registered
+
+   With this set we build the DCB with no_flip=1 (EOP fence, no marker), submit
+   with plain sceGnmSubmitCommandBuffers, wait for the fence, then flip from the
+   CPU. That is the path this app used before the marker protocol went in, so
+   it is known to work. */
+#define CPU_FLIP        1
+
 #define FORCE_NO_FLIP   0
 
 /* 2 = two submits per frame but still ONE flip. A DISCRIMINATOR, not a fix:
@@ -291,25 +311,11 @@
 #define KEEP_GPU_FED    1
 #define KA_SLOTS        4      /* dedicated keep-alive command buffers */
 #define BATCH_FRAMES    1
-/* 4, not 3. THIS IS THE TEST, and it is now well motivated rather than a
-   guess. The display completes exactly 547 flips and then stops: fnum freezes
-   at 547, fpend and fgpu stick at 1 forever, fcur stays on buffer 0, while the
-   vblank counter keeps ticking - so the display is alive and the GPU has done
-   its job (label written, fence advanced, cplag 0).
-
-   With 3 buffers, 547 flips means buffer 1 received (547-1)/3+1 = 183 of them.
-   Going to 4 buffers changes the per-buffer count without changing the global
-   flip count, so the two separate cleanly:
-
-       stops at ~547 flips again  -> a GLOBAL flip limit, buffer count is
-                                     irrelevant
-       stops at a different frame -> a PER-BUFFER limit, and the number tells
-                                     us how many flips one buffer survives
-
-   NUM_FRAMES is only used for the fb[] array and bi = frame % NUM_FRAMES, and
-   sceVideoOutRegisterBuffers is already called with NUM_FRAMES, so 4 needs no
-   other change. Put it back to 3 afterwards - the reference registers 3. */
-#define NUM_FRAMES      4
+/* Back to 3 - the reference registers 3, and the 4-buffer test is DONE:
+   fnum stopped at exactly 547 with 3 buffers AND with 4. The failing flip
+   targeted buffer 1 at 3 buffers and buffer 3 at 4, identical outcome. So the
+   limit is GLOBAL, not per-buffer. */
+#define NUM_FRAMES      3
 #define DCB_SIZE        0x20000
 /* NOP padding added to each frame DCB, in dwords. 0 = off.
    Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */
@@ -817,6 +823,7 @@ static int g_mcq0 = -99, g_mcq1 = -99;   /* MapComputeQueue return codes */
 /* display-pipeline counters, sampled per frame under DISPLAY_POLL */
 static long long g_fs_num = -1, g_fs_pend = -1, g_fs_gpu = -1, g_fs_cur = -1;
 static long long g_vbl = -1, g_dp_us = 0;
+static int g_cpuflip_fail = 0, g_last_cpuflip = 0;   /* CPU_FLIP diagnostics */
 
 /* Keep an angle in [0, 2pi). The rotation accumulators grow without bound -
    after an hour at 60fps cam_yaw reaches ~4320 rad, where float32 has only
@@ -3833,7 +3840,7 @@ int main(void) {
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
                               fb[bi],depth,0,fence,fv+batch_pos,
-                              (FORCE_NO_FLIP || g_display_stalled) /* 1 = no marker, EOP only */);
+                              (FORCE_NO_FLIP || CPU_FLIP || g_display_stalled) /* 1 = no marker, EOP only */);
         batch_pos++;
         if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
         batch_pos = 0;
@@ -3877,7 +3884,7 @@ int main(void) {
             /* The game's flip path: ONE call that submits and registers the
                flip, with the marker block at the DCB tail carrying our fence.
                eboot 0x94edf0 passes (1, &dcb, &size, 0, 0, flipMode, ...). */
-            if (FORCE_NO_FLIP || g_display_stalled) {
+            if (FORCE_NO_FLIP || CPU_FLIP || g_display_stalled) {
                 /* NO-FLIP submit. The flip is registered by
                    sceGnmSubmitAndFlipCommandBuffers itself, via the marker -
                    NOT by our flip loop. So skipping the WAIT (fskip) never
@@ -4025,6 +4032,20 @@ int main(void) {
                Stopping the flips is the no-flip submit above; this is just
                bookkeeping. */
             if (!fence_ok) g_flips_skipped++;
+
+#if CPU_FLIP
+            /* THE CPU FLIP. The DCB was built with no_flip=1 and submitted
+               with plain sceGnmSubmitCommandBuffers, so no marker and no EOP
+               flip was registered. The GPU has now signalled the fence, so the
+               frame is complete and it is safe to present it from here.
+               Skipped if the fence never arrived, for the same reason the
+               marker path skips it: presenting an unfinished frame queues a
+               flip that can never retire. */
+            if (fence_ok && !FORCE_NO_FLIP) {
+                int cf = sceVideoOutSubmitFlip(video, bi, 1, (int64_t)frame);
+                if (cf != 0) { g_cpuflip_fail++; g_last_cpuflip = cf; }
+            }
+#endif
             /* No CPU flip. sceGnmSubmitAndFlipCommandBuffers already registered
                it via the marker, so calling sceVideoOutSubmitFlip here would
                queue a SECOND flip for the same frame. */
@@ -4295,6 +4316,8 @@ int main(void) {
             LP(" fcur=");  p+=lg_i64(L+p,g_fs_cur);    /* buffer on screen  */
             LP(" vbl=");   p+=lg_i64(L+p,g_vbl);       /* vblanks since open*/
             LP(" dpus=");  p+=lg_i64(L+p,g_dp_us);     /* COST of this poll */
+            LP(" cff="); p+=lg_i64(L+p,g_cpuflip_fail);
+            LP(" cfr="); p+=lg_hex(L+p,(unsigned long long)(unsigned)g_last_cpuflip);
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
             LP(" ptms="); p+=lg_i64(L+p,(long long)(now/1000));
             LP(" evc="); p+=lg_i64(L+p,g_event_count);

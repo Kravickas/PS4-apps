@@ -1,33 +1,50 @@
 ============================================================
-*** THE INTERRUPT TAG FAILED - AND THE REASON WAS IN MY OWN TABLE ***
+*** IT IS A GLOBAL FLIP LIMIT: EXACTLY 547, EVERY TIME ***
 ============================================================
-Tag 0x68750781 broke it from frame one:
+The four-buffer test answered cleanly:
 
-   f  labpre labpost fence  fv  fnum  fcur
-   0    0x0     0x1      1   2     0    -1
-   1    0x0     0x0      1   3     0    -1
-   3    0x1     0x1      1   5     0    -1
+    NUM_FRAMES=3   fnum stops at 547, failing flip on buffer 1
+    NUM_FRAMES=4   fnum stops at 547, failing flip on buffer 3
 
-  The label is still written, but OUR FENCE NEVER ADVANCES PAST 1 while fv
-  climbs, fnum stays 0 - not one flip ever completes - and fcur is -1, so the
-  display never had a current buffer at all.
+  Same count, different buffer, identical outcome. NOT per-buffer - the
+  183-flips-per-buffer idea was a red herring.
 
-WHY, from the patcher table I traced myself:
-      0x68750778  ->  NOP + a SECOND WRITE_DATA
-      0x68750780  ->  NOP + an EOP
-      0x68750781  ->  NOP + an EOP
+AND IT IS FLIPS, NOT TIME OR VBLANKS - separable from data already collected:
+      wait-free runs   547 flips at 60fps throughout   -> ~600 vblanks
+      mode-0 runs      547 flips, 512 fast + 35 slow   -> ~2342 vblanks
+  Same flip count with the vblank count differing 4x and the wall clock 3x
+  (9s vs 27s). The only invariant across every run this session is the number
+  of COMPLETED FLIPS.
 
-  0x778 emits TWO WRITE_DATAs - one for the label, one for OUR FENCE.
-  0x780/0x781 emit ONE EOP, and an EOP writes one value to one address. It
-  writes the label; our fence write does not exist on that path.
+  EXACTLY 547, then the 548th never retires: fnum freezes, fpend and fgpu stick
+  at 1, fcur stops moving, the vblank counter keeps ticking.
 
-  I read "0x781 may carry data" from the InterruptSelect constraint and took it
-  to mean it carries BOTH. It carries one. The table in front of me said two
-  packets versus one and I did not do the subtraction.
+  (547 is prime - an odd size for a fixed kernel table, so the limit is more
+  likely something about the 548th flip than a 547-entry pool.)
 
-  REVERTED: FLIP_TAG_IRQ 0, back to 0x68750778.
-  And the label-polling hypothesis is UNTESTED, not disproved - 0x781 breaks
-  the fence before it can say anything about flip completion.
+============================================================
+*** NEXT TEST: CPU_FLIP - EOP FLIP vs CPU FLIP ***
+============================================================
+  fgpu=1 at the stall, so the flip that never retires is a GPU/EOP flip,
+  registered by gnm's marker patcher through sceVideoOutSubmitEopFlip. A CPU
+  flip does not touch that machinery at all.
+
+  CPU_FLIP 1 builds the DCB with no_flip=1 (EOP fence, no marker), submits with
+  plain sceGnmSubmitCommandBuffers, waits for the fence, and then presents with
+  sceVideoOutSubmitFlip from the CPU. That is the path this app used before the
+  marker protocol went in, so it is known to work.
+
+      survives past 547 flips -> the limit is in the EOP-flip path specifically,
+                                 and the marker protocol is the problem
+      still stops at 547      -> the limit is in the display's flip accounting
+                                 regardless of how the flip was registered
+
+  Either answer is worth the run. New fields: cff= (CPU flip failures) and
+  cfr= (last CPU flip return code), so a failing present cannot hide.
+
+  NUM_FRAMES is back to 3.
+
+  make      (no .py in the build)
 
 ============================================================
 *** NEXT TEST: NUM_FRAMES 4 ***
