@@ -1,16 +1,46 @@
 ============================================================
-*** NAME: ShadCube4 ***
+*** BUILD FIX — my error, sorry ***
 ============================================================
-Reverted - TITLE := ShadCube4, banner and header comment back to ShadCube4,
-and /data/ShadCube4/ is the primary asset directory again.
+The build failed on two errors and nine warnings, all from one mistake:
 
-The dual-path lookup added last round is KEPT, with ShadCube4 as primary and
-the other capitalisation as a fallback. The PS4 filesystem is case-sensitive,
-so this costs nothing and means a differently-cased folder still loads. Delete
-DATA_DIR_OLD if you want it gone.
+    src/pm4.h:107: call to undeclared function 'pm4_emit'
+    src/pm4.h:255: static declaration of 'pm4_emit' follows non-static
 
-TITLE_ID (SHAD00004) and CONTENT_ID were never touched, so the sandbox path and
-package identity are unchanged either way.
+I added pm4_write_data_dword (the GPU checkpoint helper) next to
+#define PM4_WRITE_DATA in the OPCODE section at line 104 - but
+struct PM4Builder is not defined until line 235 and pm4_emit until 255. So the
+helper referenced an incomplete struct and called pm4_emit implicitly, which
+then collided with the real static definition later. The nine
+"incompatible pointer types passing 'struct PM4Builder *' to parameter of type
+'struct PM4Builder *'" warnings were the same cause - two different incomplete
+struct types.
+
+FIXED: moved the checkpoint helper (and GPU_CHECKPOINTS) to sit immediately
+AFTER pm4_emit. Verified the ordering explicitly:
+    pm4_type3           offset  2269
+    PM4_WRITE_DATA      offset  4309
+    struct PM4Builder   offset 10444
+    pm4_emit            offset 11254
+    pm4_write_data_dword offset 12155     <- all dependencies precede it
+
+ALSO FIXED, the two remaining warnings (pre-existing, not from this session):
+    sceKernelAllocateDirectMemory takes 'unsigned long*' as its out-param;
+    main.c passed &phys where phys was 'long', and obj_loader.h passed &ph
+    where ph was 'long'. Both changed to unsigned long. Checked their users:
+    obj_talloc still writes through a 'long *phys' (an assignment, not a
+    pointer conversion) and obj_tfree's 'if (phys >= 0)' is unaffected.
+
+PRE-BUILD CHECKS RUN (no compiler in my environment, so these stand in):
+    braces/parens/brackets balanced in all four sources
+    all 19 pm4_* helpers used by main.c are defined in pm4.h
+    no function in pm4.h references PM4Builder before the struct exists
+    no call to pm4_emit before pm4_emit is defined
+    all 51 register/opcode constants resolve (the two my scanner flagged,
+    CTX_DEPTH_CLEAR and VGT_GS_ONCHIP_CNTL, are matches inside COMMENTS - the
+    real identifiers CTX_VGT_GS_ONCHIP_CNTL and VGT_GS_ONCHIP_CNTL_SAFE are
+    defined, and CTX_DEPTH_CLEAR is only a comment on a literal 0x00B)
+
+  make
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***

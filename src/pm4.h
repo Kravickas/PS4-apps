@@ -89,30 +89,6 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
                                COHER_SH_KCACHE_ENA | COHER_CB_DEST_BASE_ENA)
 #define PM4_WRITE_DATA          0x37
 
-/* GPU-side checkpoint. Every GPU status query is a stub on retail firmware
-   (GetProtectionFaultTimeStamp, DebugHardwareStatus, GetGpuBlockStatus,
-   GetLastWaitedAddress, GetShaderStatus all return 0), so when the command
-   processor wedges there is no way to ask it where it stopped. This makes the
-   CP report it directly: each checkpoint stores a distinct value to a
-   CPU-visible dword, and the LAST value present after a hang is the last
-   packet the CP retired.
-
-   Header 0xc0033700 is confirmed against the firmware - gnm's own marker
-   patcher emits exactly this packet.
-     [1] control: DST_SEL=5 (memory) << 8 | WR_CONFIRM (1<<20) | ENGINE ME
-     [2] addr lo   [3] addr hi   [4] value                                   */
-static inline void pm4_write_data_dword(struct PM4Builder* b,
-                                        volatile uint32_t* dst, uint32_t value) {
-    uint64_t a = (uint64_t)(uintptr_t)dst;
-    pm4_emit(b, pm4_type3(PM4_WRITE_DATA, 4));
-    pm4_emit(b, (5u << 8) | (1u << 20));          /* DST_SEL=memory, WR_CONFIRM */
-    pm4_emit(b, (uint32_t)(a & 0xFFFFFFFCu));
-    pm4_emit(b, (uint32_t)(a >> 32) & 0xFFFFu);
-    pm4_emit(b, value);
-}
-
-/* Set to 0 to remove all checkpoint packets from the command stream. */
-#define GPU_CHECKPOINTS 1
 
 // Register bases
 #define CTX_REG_BASE    0xA000u
@@ -256,6 +232,31 @@ static inline void pm4_emit(struct PM4Builder* b, uint32_t val) {
     if (b->off < b->cap) b->buf[b->off++] = val;
     else                 b->overflow++;
 }
+
+/* GPU-side checkpoint. Every GPU status query is a stub on retail firmware
+   (GetProtectionFaultTimeStamp, DebugHardwareStatus, GetGpuBlockStatus,
+   GetLastWaitedAddress, GetShaderStatus all return 0), so when the command
+   processor wedges there is no way to ask it where it stopped. This makes the
+   CP report it directly: each checkpoint stores a distinct value to a
+   CPU-visible dword, and the LAST value present after a hang is the last
+   packet the CP retired.
+
+   Header 0xc0033700 is confirmed against the firmware - gnm's own marker
+   patcher emits exactly this packet.
+     [1] control: DST_SEL=5 (memory) << 8 | WR_CONFIRM (1<<20) | ENGINE ME
+     [2] addr lo   [3] addr hi   [4] value                                   */
+static inline void pm4_write_data_dword(struct PM4Builder* b,
+                                        volatile uint32_t* dst, uint32_t value) {
+    uint64_t a = (uint64_t)(uintptr_t)dst;
+    pm4_emit(b, pm4_type3(PM4_WRITE_DATA, 4));
+    pm4_emit(b, (5u << 8) | (1u << 20));          /* DST_SEL=memory, WR_CONFIRM */
+    pm4_emit(b, (uint32_t)(a & 0xFFFFFFFCu));
+    pm4_emit(b, (uint32_t)(a >> 32) & 0xFFFFu);
+    pm4_emit(b, value);
+}
+
+/* Set to 0 to remove all checkpoint packets from the command stream. */
+#define GPU_CHECKPOINTS 1
 
 static inline void pm4_emit_f(struct PM4Builder* b, float val) {
     union { float f; uint32_t u; } conv;

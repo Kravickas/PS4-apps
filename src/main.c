@@ -787,7 +787,7 @@ static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
    the EOP fence the CPU polls. CPU write-combine stores into a buffer the CP
    reads, with no sceGnmFlushGarlic, is not a guaranteed-visible arrangement. */
 static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtype) {
-    long phys = 0; void *addr = 0;
+    unsigned long phys = 0; void *addr = 0;   /* matches sceKernelAllocateDirectMemory's unsigned long* out-param */
     size = (size + 0x3FFF) & ~0x3FFFUL;
     if (align < 0x4000) align = 0x4000;
     if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, memtype, &phys)) return 0;

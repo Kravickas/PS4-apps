@@ -29,7 +29,7 @@ typedef struct {
 static void *obj_talloc(unsigned long size, long *phys) {
     unsigned long a = 0x4000;
     size = (size + a - 1) & ~(a - 1); if (size < a) size = a;
-    long ph = 0;
+    unsigned long ph = 0;   /* out-param is unsigned long* */
     if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, a, 3, &ph) != 0) return 0;
     void *addr = 0;
     if (sceKernelMapDirectMemory(&addr, size, 3, 0, ph, a) != 0) return 0;
