@@ -1,60 +1,61 @@
 ============================================================
-*** FRAME 547: THE GPU DID EVERYTHING. THE DISPLAY STOPPED. ***
+*** THE INTERRUPT TAG FAILED - AND THE REASON WAS IN MY OWN TABLE ***
 ============================================================
-The display counters answered it outright (and dpus=9-12us, so the poll itself
-is free - unlike the last probe I added):
+Tag 0x68750781 broke it from frame one:
 
-   f    bi  labpre labpost fcur fpend fgpu  fnum fence   vbl
-  546    0    0x0     0x1     0     0    0   547   547  2305
-  547    1    0x0     0x1     0     1    1   547   548  2341   <- the last flip
-  548    2    0x0     0x0     0     1    1   547   548  2430
-  617    -    0x1     0x1     0     1    1   547   548  4753
+   f  labpre labpost fence  fv  fnum  fcur
+   0    0x0     0x1      1   2     0    -1
+   1    0x0     0x0      1   3     0    -1
+   3    0x1     0x1      1   5     0    -1
 
-  AT FRAME 547 THE GPU DID ITS WHOLE JOB:
-      labpost=0x1   it wrote the buffer label for buffer 1
-      fence=548     it wrote the fence through the marker
-      cplag=0       it was keeping pace
-  Both WRITE_DATA packets in the patched marker executed. Our command buffer is
-  not at fault, and neither is the sky, the shadow pass or anything we draw.
+  The label is still written, but OUR FENCE NEVER ADVANCES PAST 1 while fv
+  climbs, fnum stays 0 - not one flip ever completes - and fcur is -1, so the
+  display never had a current buffer at all.
 
-  THE DISPLAY IS ALIVE THROUGHOUT:
-      vbl 2341 -> 4753, still counting at 60Hz seventy frames later.
+WHY, from the patcher table I traced myself:
+      0x68750778  ->  NOP + a SECOND WRITE_DATA
+      0x68750780  ->  NOP + an EOP
+      0x68750781  ->  NOP + an EOP
 
-  THE FLIP SIMPLY NEVER RETIRES:
-      fnum  frozen at 547   547 flips completed, then never another
-      fpend stuck at 1      one flip pending, forever
-      fgpu  stuck at 1      and it is a GPU/EOP flip
-      fcur  stuck at 0      the display stays on buffer 0
+  0x778 emits TWO WRITE_DATAs - one for the label, one for OUR FENCE.
+  0x780/0x781 emit ONE EOP, and an EOP writes one value to one address. It
+  writes the label; our fence write does not exist on that path.
 
-  Everything downstream - the stuck fence, cplag climbing to 70, the crash on
-  close - follows from that single fact.
+  I read "0x781 may carry data" from the InterruptSelect constraint and took it
+  to mean it carries BOTH. It carries one. The table in front of me said two
+  packets versus one and I did not do the subtraction.
 
-*** THE CHANGE THIS BUILD MAKES ***
-  gnm's marker tag table, traced from the patcher and confirmed against an
-  independent decoder:
-      0x68750777  NOP, no EOP
-      0x68750778  WRITE_DATA label + WRITE_DATA fence, NO EOP, NO INTERRUPT
-      0x68750780  EOP, INT_SEL=1 IrqOnly - must carry no data
-      0x68750781  EOP, INT_SEL=2 IrqWhenWriteConfirm - MAY carry data
+  REVERTED: FLIP_TAG_IRQ 0, back to 0x68750778.
+  And the label-polling hypothesis is UNTESTED, not disproved - 0x781 breaks
+  the fence before it can say anything about flip completion.
 
-  We have been using 0x778, which raises NO INTERRUPT. On that path flip
-  completion depends entirely on the display noticing the label by itself -
-  and the trace shows exactly that failing: the label is written, and the
-  display stops acting on it, with no interrupt to fall back on.
+============================================================
+*** NEXT TEST: NUM_FRAMES 4 ***
+============================================================
+  What we know exactly: the display completes 547 flips and stops. fnum freezes
+  at 547, fpend and fgpu stick at 1 forever, fcur stays on buffer 0, and the
+  vblank counter keeps ticking the whole time - so the display is alive and the
+  GPU did its job (label written, fence advanced, cplag 0).
 
-  FLIP_TAG_IRQ 1 switches to 0x68750781 - the same marker delivered as an EOP
-  that carries our fence AND raises an interrupt. All four tags are patched
-  into the same 64-dword block, so our emitted block is unchanged; only the tag
-  dword differs and gnm picks the tail from it.
+  With 3 buffers, 547 flips means buffer 1 received (547-1)/3+1 = 183 of them.
+  Four buffers changes the per-buffer count without changing the global flip
+  count, so the two separate cleanly:
 
-  Set FLIP_TAG_IRQ 0 in pm4.h to go back to the game's 0x778.
+      stops at ~547 flips again   -> a GLOBAL flip limit; buffer count is
+                                     irrelevant and the search moves to what
+                                     the display driver counts per process
+      stops at a different frame  -> a PER-BUFFER limit, and the frame number
+                                     tells us how many flips one buffer survives
+
+  NUM_FRAMES only drives fb[], dcb_mem[], bi = frame % NUM_FRAMES and the
+  RegisterBuffers count, so nothing else needs changing. Costs 8MB more of
+  framebuffer (33MB vs 25MB).
+
+  Put it back to 3 afterwards - the reference registers 3.
 
   make      (no .py in the build)
 
-  If it runs past 547 with fnum still climbing, that was it. If it still stops
-  at 547 with fpend stuck at 1, the completion path is failing for a reason an
-  interrupt cannot reach - and the next test is NUM_FRAMES 4, which separates
-  a per-buffer limit from a global flip count.
+  Send the trace either way; both outcomes are informative.
 
 ============================================================
 *** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***

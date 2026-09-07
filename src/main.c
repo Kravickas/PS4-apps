@@ -291,7 +291,25 @@
 #define KEEP_GPU_FED    1
 #define KA_SLOTS        4      /* dedicated keep-alive command buffers */
 #define BATCH_FRAMES    1
-#define NUM_FRAMES      3
+/* 4, not 3. THIS IS THE TEST, and it is now well motivated rather than a
+   guess. The display completes exactly 547 flips and then stops: fnum freezes
+   at 547, fpend and fgpu stick at 1 forever, fcur stays on buffer 0, while the
+   vblank counter keeps ticking - so the display is alive and the GPU has done
+   its job (label written, fence advanced, cplag 0).
+
+   With 3 buffers, 547 flips means buffer 1 received (547-1)/3+1 = 183 of them.
+   Going to 4 buffers changes the per-buffer count without changing the global
+   flip count, so the two separate cleanly:
+
+       stops at ~547 flips again  -> a GLOBAL flip limit, buffer count is
+                                     irrelevant
+       stops at a different frame -> a PER-BUFFER limit, and the number tells
+                                     us how many flips one buffer survives
+
+   NUM_FRAMES is only used for the fb[] array and bi = frame % NUM_FRAMES, and
+   sceVideoOutRegisterBuffers is already called with NUM_FRAMES, so 4 needs no
+   other change. Put it back to 3 afterwards - the reference registers 3. */
+#define NUM_FRAMES      4
 #define DCB_SIZE        0x20000
 /* NOP padding added to each frame DCB, in dwords. 0 = off.
    Used to test whether the submit wall is a BYTE budget or a SUBMIT COUNT. */

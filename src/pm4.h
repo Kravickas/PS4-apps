@@ -550,11 +550,21 @@ static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
    kept generating vblanks (vbl 2341 -> 4753), and the flip never retired -
    fnum frozen at 547, fpend and fgpu stuck at 1 forever.
 
-   0x781 is the same marker delivered as an EOP that CARRIES THE FENCE AND
-   RAISES AN INTERRUPT. If the failure is the display's polling of the label,
-   interrupt-driven completion should not depend on it.
-   Set FLIP_TAG_IRQ to 0 to go back to the game's 0x778. */
-#define FLIP_TAG_IRQ 1
+   0x781 WAS TRIED ON HARDWARE AND IT DOES NOT WORK. Result: the label is
+   still written (labpost=0x1) but OUR FENCE NEVER ADVANCES PAST 1, fnum stays
+   0 - not one flip ever completes - and fcur is -1, no current buffer at all.
+   Broken from frame one.
+
+   The reason is in the table above and I should have read it: 0x778 emits TWO
+   WRITE_DATAs, one for the label and one for OUR FENCE. 0x780/0x781 emit ONE
+   EOP, and an EOP writes one value to one address. It writes the label; our
+   fence write does not exist on that path. "May carry data" means one datum,
+   not both - I took it to mean both.
+
+   So the label-polling hypothesis is UNTESTED rather than disproved: 0x781
+   breaks the fence before it can tell us anything about flip completion.
+   Leave FLIP_TAG_IRQ at 0. */
+#define FLIP_TAG_IRQ 0
 #if FLIP_TAG_IRQ
 #define PM4_PREPARE_FLIP_TAG 0x68750781u
 #else
