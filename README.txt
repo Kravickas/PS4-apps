@@ -1,31 +1,54 @@
 ============================================================
-*** THE WEDGE IS GONE ***
+*** THE 2 FPS WAS MY OWN DIAGNOSTIC PROBE ***
 ============================================================
-Your trace, 255 frames:
+The three split timers found it immediately:
 
-    f=255  cpf=255  cplag=0  fenceit=0  fnto=0  fstuck=0
-           hwok=1   saf=0x0  fence=256  fv=257  evd=3
+    f=0    dt=0       wA=1  wB=21     wC=478008
+    f=184  dt=479331  wA=1  wB=27     wC=478569
+    f=350  dt=625359  wA=1  wB=13429  wC=565164
 
-  cplag = 0 AT FRAME 255. The command processor is keeping up with the CPU,
-  frame for frame. cpf tracks f exactly.
-  fenceit=0 and fnto=0 - the fence never once timed out.
-  saf=0x0 throughout - no 0x80d11081, the flip queue never filled.
-  hwok=1 - the kernel reports the GPU healthy.
+  wC is the region from the end of the flip loop to the end of the frame, and
+  it contains exactly ONE statement:
 
-  Every earlier build died at ~547 frames with cpf frozen and the fence stuck.
-  This one runs past 255 with the CP in lockstep, and you say it closes
-  cleanly. THE FRAME-547 WEDGE AND THE CRASH-ON-CLOSE ARE BOTH FIXED.
+      if (g_trace_this_frame) g_hw_ok = sceGnmDebugHardwareStatus(0);
 
-  Setup confirmed from the header:
-      gnm waitfree early=0 set=0 now=0     mode 0, ioctl 0xc0108102 - the
-                                           game's path, wait-free never called
-      mapcomputequeue=5 13                 both compute queues mapped
-      affinity ret=0                       affinity applied
-      hwstatus at start=1                  GPU healthy at init
+  That is ioctl 0xc0088111 - the probe I added several rounds ago as "the only
+  live GPU-health query on retail", sampled "only on frames we log - it is a
+  diagnostic, not something to pay for 60 times a second."
 
-  (mcq returned 5 and 13; I predicted 4 and 12 from lea eax,[r15+rbx*8]. The
-  formula is off by one - the flattened index is queue+1 + pipe*8, or r15 held
-  queue+1. Both positive, so both mapped. Minor, and now known.)
+  IT BLOCKS FOR 477 MILLISECONDS PER CALL.
+
+  And it fed itself:
+      frame 0 is logged (0 % 16 == 0)   ->  probe runs   ->  478ms frame
+      dt > 30000  ->  g_slow_tail = 200 ->  EVERY frame is logged
+      every frame logged                ->  probe every frame  ->  2fps forever
+
+  I had the clue and misread it. Two rounds ago I wrote "frames were already
+  478ms before adaptive logging engaged, so the trace write is innocent." The
+  trace WRITE was innocent. What I had bolted onto the trace CONDITION was not.
+  I cleared the wrong suspect and moved on.
+
+FIXED
+    HW_STATUS_POLL 0 (new, default off) - the periodic sample is gone. Even
+    once per 1024 frames is a visible half-second hitch.
+    The sample that matters is UNTOUCHED: hwstall=, taken at the FIRST fence
+    timeout. It fires once per stall, which is exactly when 477ms is free.
+    The startup baseline stays - once, before the loop.
+
+WHAT THE TRACE ALSO SHOWS, now that it is readable
+    up to frame ~184:  cplag=0, fenceit=0   the CP in perfect lockstep
+    by frame 350:      cplag=60, fenceit=2, wB=13429
+
+  So the frame-547 wedge really is fixed - the CP kept pace for 184 frames with
+  the whole frame being my probe. But something still degrades by 350. At 2fps
+  driven by a blocking ioctl that could easily be a consequence rather than a
+  cause, so the next run measures it without the probe in the way.
+
+  make
+
+  Expect a large speed change. Then read cplag - if it stays 0 or 1 the pipeline
+  is healthy; if it climbs again, that is the real remaining problem and wB/wC
+  will say where.
 
 ============================================================
 *** THE REMAINING PROBLEM: 2 FPS, AND MY TIMERS DO NOT SEE IT ***

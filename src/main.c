@@ -82,6 +82,15 @@
    Set to 0 to revert. mcq= in the log carries both return codes. */
 /* 0 = mode 0, ioctl 0xc0108102, THE GAME'S PATH.
    1 = mode 1, ioctl 0xc020810c, the wait-free path the game never uses. */
+/* HW_STATUS_POLL: periodically sample sceGnmDebugHardwareStatus.
+   OFF. That ioctl was MEASURED at 477ms per call, so even once every 1024
+   frames is a visible half-second hitch. The sample that actually matters -
+   the one taken at the FIRST fence timeout, reported as hwstall= - is
+   unconditional and unaffected, because it fires once per stall and that is
+   precisely when half a second does not matter. Turn this on only if you need
+   hwok= tracked during a healthy run. */
+#define HW_STATUS_POLL 0
+
 #define WAITFREE_SUBMIT 0
 
 #define MAP_COMPUTE_QUEUES 1
@@ -4116,7 +4125,20 @@ int main(void) {
            wedge too and it is genuinely a hardware stall; if hwok stays 1
            while cpm is frozen, the kernel believes the GPU is fine and our
            command buffers are being dropped somewhere between the two. */
-        if (g_trace_this_frame) g_hw_ok = sceGnmDebugHardwareStatus(0);
+        /* MEASURED AT 477 MILLISECONDS PER CALL. This probe was tied to the
+           trace condition, and at 2fps the adaptive logging turns every frame
+           into a logged frame - so it ran every frame and held the app at 2fps
+           by itself. The probe caused the slowdown, the slowdown enabled full
+           logging, and full logging ran the probe: a closed loop, which is why
+           the app was 2fps from frame ZERO rather than degrading into it.
+           It is an ioctl into the graphics driver and it is evidently not cheap
+           on retail. Sample it RARELY - once every 1024 frames - so hwok still
+           reports the kernel's verdict without dominating the frame. The
+           at-stall sample (g_fence_timeouts == 1) is untouched: it fires once
+           per stall, which is exactly when its cost does not matter. */
+#if HW_STATUS_POLL
+        if ((frame & 1023) == 0) g_hw_ok = sceGnmDebugHardwareStatus(0);
+#endif
 
         uint64_t t_w3 = sceKernelGetProcessTime();
         uint64_t now = sceKernelGetProcessTime();
