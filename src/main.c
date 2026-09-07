@@ -632,13 +632,25 @@ static int g_ka_fail = 0;       /* SubmitDone failures (0x80d110ff) */
 static int g_dcb_overflow = 0;  /* frames whose DCB overflowed and were skipped */
 static int g_evt_drained = 0;   /* surplus flip events drained (should stay 0) */
 static int g_flips_skipped = 0; /* flips NOT issued because the fence had stalled */
+/* Set when the flip event stops arriving. Measured on hardware: the FLIP EVENT
+   dies FIRST (evto 0->1, flipit 0) while the fence is still healthy, and the
+   fence stalls one frame LATER. So this is the display failing and taking the
+   GPU with it, not the reverse. While set, we submit without a flip. */
+static int g_display_stalled = 0;
+static int g_stall_recoveries = 0;
 /* GPU-side checkpoint slot. The CP writes a stage code here as it retires
    each part of the command buffer; after a hang the last value tells us
    which packet it stopped on. Set by main() once the allocation exists. */
 static volatile uint32_t *g_cp_mark = 0;
+/* The stage code alone is useless: it is a CONSTANT, so if the command
+   processor stops, the slot still reads the last value written and looks
+   identical to a live one. Pack the FRAME NUMBER into the upper bits so the
+   value CHANGES every frame - then a stale cpm proves the CP has stopped. */
 #define CPMARK(b, code) do { \
-    if (GPU_CHECKPOINTS && g_cp_mark) pm4_write_data_dword((b), g_cp_mark, (code)); \
+    if (GPU_CHECKPOINTS && g_cp_mark) \
+        pm4_write_data_dword((b), g_cp_mark, ((g_cp_frame & 0xFFFFFF) << 8) | (code)); \
 } while (0)
+static uint32_t g_cp_frame = 0;
 static int g_fence_timeouts = 0;    /* EOP fence waits that expired */
 static unsigned int g_fence_stuck_at = 0;  /* fence value when it stopped */
 static unsigned int g_fence_wanted = 0;    /* value we were waiting for */
@@ -3459,10 +3471,12 @@ int main(void) {
         }
 #endif
 
+        g_cp_frame = frame;   /* checkpoint value changes every frame */
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
-                              fb[bi],depth,0,fence,fv+batch_pos,0 /* flip via marker, the game's path */);
+                              fb[bi],depth,0,fence,fv+batch_pos,
+                              g_display_stalled /* 0 = marker flip (normal), 1 = no-flip */);
         batch_pos++;
         if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
         batch_pos = 0;
@@ -3506,8 +3520,23 @@ int main(void) {
             /* The game's flip path: ONE call that submits and registers the
                flip, with the marker block at the DCB tail carrying our fence.
                eboot 0x94edf0 passes (1, &dcb, &size, 0, 0, flipMode, ...). */
-            saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
-                                                        video, bi, 1, (int64_t)frame);
+            if (g_display_stalled) {
+                /* NO-FLIP submit. The flip is registered by
+                   sceGnmSubmitAndFlipCommandBuffers itself, via the marker -
+                   NOT by our flip loop. So skipping the WAIT (fskip) never
+                   stopped flips being queued, and the queue still filled to
+                   0x80d11081. Measured: fskip climbed to 33 while the queue
+                   overflowed anyway.
+                   Once the display has stalled we therefore submit the
+                   driver's OTHER documented path - EVENT_WRITE_EOP, no marker,
+                   plain sceGnmSubmitCommandBuffers - which keeps the GPU fed
+                   and the fence observable WITHOUT adding to the flip queue,
+                   giving the display a chance to drain. */
+                saf_ret = sceGnmSubmitCommandBuffers(1, (void**)a, s, 0, 0);
+            } else {
+                saf_ret = sceGnmSubmitAndFlipCommandBuffers(1, (void**)a, s, 0, 0,
+                                                            video, bi, 1, (int64_t)frame);
+            }
             }
             t_saf = sceKernelGetProcessTime();
             asa = sceGnmAreSubmitsAllowed();
@@ -3592,7 +3621,13 @@ int main(void) {
                permanent failure AND leaves teardown with a queue of flips that
                will never retire, which is what crashes the app on close.
                Skipping the flip keeps the queue drainable and the app alive. */
-            if (!fence_ok) { g_flips_skipped++; continue; }
+            /* Count it, but do NOT `continue`. The flip is issued by the
+               SUBMIT (SubmitAndFlip via the marker), not here, so skipping the
+               rest of this loop never stopped a flip - it only skipped the
+               event wait, which is the one place a recovery can be observed.
+               Stopping the flips is the no-flip submit above; this is just
+               bookkeeping. */
+            if (!fence_ok) g_flips_skipped++;
             /* No CPU flip. sceGnmSubmitAndFlipCommandBuffers already registered
                it via the marker, so calling sceVideoOutSubmitFlip here would
                queue a SECOND flip for the same frame. */
@@ -3643,7 +3678,13 @@ int main(void) {
                 unsigned int tmo = 100000;
                 /* Block for the flip event that paces this frame... */
                 int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
-                if (wr != 0 || out <= 0) g_evt_timeouts++;
+                if (wr != 0 || out <= 0) {
+                    g_evt_timeouts++;
+                    g_display_stalled = 1;   /* stop queuing flips */
+                } else if (g_display_stalled) {
+                    /* the display is answering again - resume normal flips */
+                    g_display_stalled = 0; g_stall_recoveries++;
+                }
                 flip_iters = out;
                 /* ...then DRAIN anything still queued, with a zero timeout so
                    it never blocks. Taking exactly one event per frame means any
@@ -3755,6 +3796,8 @@ int main(void) {
             LP(" ovf="); p+=lg_i64(L+p,g_dcb_overflow);
             LP(" evd="); p+=lg_i64(L+p,g_evt_drained);
             LP(" fskip="); p+=lg_i64(L+p,g_flips_skipped);
+            LP(" dstall="); p+=lg_i64(L+p,g_display_stalled);
+            LP(" drec="); p+=lg_i64(L+p,g_stall_recoveries);
             LP(" fnto="); p+=lg_i64(L+p,g_fence_timeouts);
             LP(" fstuck="); p+=lg_i64(L+p,(long long)g_fence_stuck_at);
             LP(" fwant="); p+=lg_i64(L+p,(long long)g_fence_wanted);
