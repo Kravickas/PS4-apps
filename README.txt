@@ -1,43 +1,16 @@
 ============================================================
-*** ALL NINE PER-DRAW PACKETS NOW IDENTIFIED ***
+*** NAME: ShadCube4 ***
 ============================================================
-Last round left four single-register and one two-register SET_CONTEXT
-unresolved. Extracted their indices AND values straight from the instruction
-stream (the register index is the dword written at [rax+4] right after the
-header, and the value at [rax+8]):
+Reverted - TITLE := ShadCube4, banner and header comment back to ShadCube4,
+and /data/ShadCube4/ is the primary asset directory again.
 
-  reg    name                        game value    ours
-  0x1e0  CB_BLEND0_CONTROL           0x000000      0            MATCH
-  0x08e  CB_TARGET_MASK              0x00000f      0xF          MATCH
-  0x202  CB_COLOR_CONTROL            0x00cc0010    0x00CC0010   MATCH
-  0x00c  PA_SC_SCREEN_SCISSOR x2     TL=0, BR      TL=0, BR     MATCH
-  0x200  DB_DEPTH_CONTROL            0x000072      per-pass     n/a
-  0x202  CB_COLOR_CONTROL (earlier)  0x00cc0020    -            see below
+The dual-path lookup added last round is KEPT, with ShadCube4 as primary and
+the other capitalisation as a fallback. The PS4 filesystem is case-sensitive,
+so this costs nothing and means a differently-cased folder still loads. Delete
+DATA_DIR_OLD if you want it gone.
 
-  And our #defines carry the same indices the game uses:
-      CTX_BLEND_CONTROL0     0x1E0
-      CTX_COLOR_TARGET_MASK  0x08E
-      CTX_COLOR_CONTROL      0x202
-  set in BOTH our passes.
-
-THE ONE DIFFERENCE, AND WHY IT IS CORRECT
-  CB_COLOR_CONTROL MODE is bits [6:4]:
-      0xCC0020 -> MODE 2 = ELIMINATE_FAST_CLEAR
-      0xCC0010 -> MODE 1 = CB_NORMAL
-  The game switches to ELIMINATE_FAST_CLEAR for one pass and back to NORMAL.
-  We use CB_NORMAL throughout. That is consistent, not a gap: the game uses
-  fast-clear / compressed colour targets - which is ALSO why it emits the
-  FlushAndInvCbMeta event resolved last round, and why we correctly do not.
-  Two independent observations pointing at the same difference in approach.
-
-SO THE PER-DRAW STREAM IS FULLY ACCOUNTED FOR
-  ACQUIRE_MEM . EVENT_WRITE(FlushAndInvCbMeta) . CB_COLOR0_BASE x14 .
-  CB_COLOR0_INFO . CB_BLEND0_CONTROL . CB_TARGET_MASK . CB_COLOR_CONTROL x2 .
-  DB_DEPTH_CONTROL . SCREEN_SCISSOR x2 . SET_UCONFIG . EOP . WAIT_REG_MEM
-  Every one either matches ours exactly, or is correctly absent because we
-  render uncompressed straight to the display buffer.
-
-  make
+TITLE_ID (SHAD00004) and CONTENT_ID were never touched, so the sandbox path and
+package identity are unchanged either way.
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***

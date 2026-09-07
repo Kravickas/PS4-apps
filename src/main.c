@@ -642,6 +642,22 @@ static int g_fence_timeouts = 0;    /* EOP fence waits that expired */
 static unsigned int g_fence_stuck_at = 0;  /* fence value when it stopped */
 static unsigned int g_fence_wanted = 0;    /* value we were waiting for */
 static void trace_msg(const char *s);
+
+/* Asset directory. /data/ShadCube4/ is the real one. The PS4 filesystem is
+   case-sensitive, so every asset lookup also tries the other capitalisation as
+   a fallback - it costs nothing and means a differently-cased folder still
+   loads. */
+#define DATA_DIR_NEW "/data/ShadCube4/"   /* primary */
+#define DATA_DIR_OLD "/data/Shadcube4/"   /* alternate capitalisation, harmless */
+static char g_path_buf[2][256];
+static const char *asset_path(int slot, const char *name) {
+    char *d = g_path_buf[slot & 1]; int i = 0;
+    const char *p = (slot & 2) ? DATA_DIR_OLD : DATA_DIR_NEW;
+    while (*p && i < 200) d[i++] = *p++;
+    while (*name && i < 250) d[i++] = *name++;
+    d[i] = 0;
+    return d;
+}
 static int lg_i64(char *o, long long v);
 /* Write a phase marker, but only for the batches around the observed crash
    (it dies during batch 34), so this costs nothing for the whole run before. */
@@ -745,7 +761,8 @@ static int lg_hex(char *o, unsigned long long v){
 /* trace_init: open the log once (WRONLY|CREAT|TRUNC = 0x601), trying several
    paths. Keeps the fd open for the whole run. */
 static void trace_init(void){
-    const char *paths[] = { "/data/trace.log", "/data/ShadCube4/trace.log",
+    const char *paths[] = { "/data/trace.log",
+                            DATA_DIR_NEW "trace.log", DATA_DIR_OLD "trace.log",
                             "trace.log", "/mnt/sandbox/SHAD00004/data/trace.log", 0 };
     for (int i=0; paths[i]; i++){
         int fd = sceKernelOpen(paths[i], 0x601, 0x1FF);
@@ -2287,7 +2304,8 @@ int main(void) {
     void *tex = 0; int tex_w = LOGO_WIDTH, tex_h = LOGO_HEIGHT;
     {
         BmpTexture bmp;
-        const char *bmp_paths[] = { "/data/ShadCube4/texture.bmp", "/data/ShadCube4/model.bmp", 0 };
+        const char *bmp_paths[] = { DATA_DIR_NEW "texture.bmp", DATA_DIR_NEW "model.bmp",
+                                    DATA_DIR_OLD "texture.bmp", DATA_DIR_OLD "model.bmp", 0 };
         for (int bi = 0; bmp_paths[bi]; bi++) {
             if (bmp_load(bmp_paths[bi], gpu_alloc, &bmp) == 0) {
                 tex = bmp.pixels; tex_w = bmp.width; tex_h = bmp.height;
@@ -2310,7 +2328,8 @@ int main(void) {
     int floor_tex_w = 1, floor_tex_h = 1;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/ShadCube4/floor_albedo.bmp", gpu_alloc, &bmp) == 0) {
+        if ((bmp_load(asset_path(0,"floor_albedo.bmp"), gpu_alloc, &bmp) == 0 ||
+            bmp_load(asset_path(2,"floor_albedo.bmp"), gpu_alloc, &bmp) == 0)) {
             floor_albedo_tex = bmp.pixels;
             floor_tex_w = bmp.width; floor_tex_h = bmp.height;
         }
@@ -2335,7 +2354,8 @@ int main(void) {
     int floor_nrm_w = 1, floor_nrm_h = 1;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/ShadCube4/floor_normal.bmp", gpu_alloc, &bmp) == 0) {
+        if ((bmp_load(asset_path(0,"floor_normal.bmp"), gpu_alloc, &bmp) == 0 ||
+            bmp_load(asset_path(2,"floor_normal.bmp"), gpu_alloc, &bmp) == 0)) {
             floor_normal_tex = bmp.pixels;
             floor_nrm_w = bmp.width; floor_nrm_h = bmp.height;
         }
@@ -2356,7 +2376,8 @@ int main(void) {
     int floor_disp_w = 0, floor_disp_h = 0;
     {
         BmpTexture bmp;
-        if (bmp_load("/data/ShadCube4/floor_displacement.bmp", gpu_alloc, &bmp) == 0) {
+        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), gpu_alloc, &bmp) == 0 ||
+            bmp_load(asset_path(2,"floor_displacement.bmp"), gpu_alloc, &bmp) == 0)) {
             floor_disp_tex = bmp.pixels;
             floor_disp_w = bmp.width; floor_disp_h = bmp.height;
             /* Auto-stretch the displacement range to span [0,255]. Many
@@ -2633,12 +2654,12 @@ int main(void) {
     /* --- Load 3D model using obj_loader.h --- */
     {
         static const char *obj_paths[] = {
-            "/data/ShadCube4/model.obj",
-            "/data/ShadCube4/mesh.obj",
-            "/data/ShadCube4/object.obj",
-            "/data/ShadCube4/scene.obj",
-            "/data/ShadCube4/bugatti.obj",
-            "/data/ShadCube4/car.obj",
+            DATA_DIR_NEW "model.obj",   DATA_DIR_OLD "model.obj",
+            DATA_DIR_NEW "mesh.obj",    DATA_DIR_OLD "mesh.obj",
+            DATA_DIR_NEW "object.obj",  DATA_DIR_OLD "object.obj",
+            DATA_DIR_NEW "scene.obj",   DATA_DIR_OLD "scene.obj",
+            DATA_DIR_NEW "bugatti.obj", DATA_DIR_OLD "bugatti.obj",
+            DATA_DIR_NEW "car.obj",     DATA_DIR_OLD "car.obj",
             0
         };
         struct LoadCtx load_ctx;
