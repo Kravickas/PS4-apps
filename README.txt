@@ -1,46 +1,59 @@
 ============================================================
-*** BUILD FIX — my error, sorry ***
+*** THE 1.75 FPS IS OUR OWN TIMEOUTS - and I caused the cascade ***
 ============================================================
-The build failed on two errors and nine warnings, all from one mistake:
+Your trace pins the whole chain:
 
-    src/pm4.h:107: call to undeclared function 'pm4_emit'
-    src/pm4.h:255: static declaration of 'pm4_emit' follows non-static
+  f=512   dt=17075  fence=513  labpre=0 labpost=1  flipit=1  fenceit=0   OK
+  f=521   dt=579007 fence=521  labpre=0 labpost=0  flipit=0  fenceit=250 BREAK
+  f=536   saf=0x80d11081
 
-I added pm4_write_data_dword (the GPU checkpoint helper) next to
-#define PM4_WRITE_DATA in the OPCODE section at line 104 - but
-struct PM4Builder is not defined until line 235 and pm4_emit until 255. So the
-helper referenced an incomplete struct and called pm4_emit implicitly, which
-then collided with the real static definition later. The nine
-"incompatible pointer types passing 'struct PM4Builder *' to parameter of type
-'struct PM4Builder *'" warnings were the same cause - two different incomplete
-struct types.
+0x80d11081 is confirmed in the firmware at gnm 0xdb6:
+      lea rdi, [rip+0x5eaf]   "GnmDriver Error: flip queue is full."
+      mov ebx, 0x80d11081
 
-FIXED: moved the checkpoint helper (and GPU_CHECKPOINTS) to sit immediately
-AFTER pm4_emit. Verified the ordering explicitly:
-    pm4_type3           offset  2269
-    PM4_WRITE_DATA      offset  4309
-    struct PM4Builder   offset 10444
-    pm4_emit            offset 11254
-    pm4_write_data_dword offset 12155     <- all dependencies precede it
+WHAT ACTUALLY HAPPENS
+  1. At fence 521 the GPU stops advancing the fence. Submits still return 0.
+  2. Our fence wait times out (fenceit=250) and - BY MY DESIGN - falls through
+     and FLIPS ANYWAY. That queues a flip for a frame the GPU never finished.
+  3. Those flips can never complete, so the buffer labels stay 1
+     (labpre=1 labpost=1 repeating across 2 of the 3 buffers).
+  4. After ~15 such frames the flip queue is FULL and every submit is rejected
+     with 0x80d11081.
+  5. Frame time becomes 250ms fence timeout + 100ms event timeout + overhead
+     = ~570ms = 1.75 FPS. Exactly the number on your counter. The sun keeps
+     moving because it is tied to frame count - we do complete frames, just
+     very slowly.
 
-ALSO FIXED, the two remaining warnings (pre-existing, not from this session):
-    sceKernelAllocateDirectMemory takes 'unsigned long*' as its out-param;
-    main.c passed &phys where phys was 'long', and obj_loader.h passed &ph
-    where ph was 'long'. Both changed to unsigned long. Checked their users:
-    obj_talloc still writes through a 'long *phys' (an assignment, not a
-    pointer conversion) and obj_tfree's 'if (phys >= 0)' is unaffected.
+  So the 1.75 fps is NOT the GPU running slowly. It is my bounded waits doing
+  what I designed them to do, on top of a GPU that has already stopped.
 
-PRE-BUILD CHECKS RUN (no compiler in my environment, so these stand in):
-    braces/parens/brackets balanced in all four sources
-    all 19 pm4_* helpers used by main.c are defined in pm4.h
-    no function in pm4.h references PM4Builder before the struct exists
-    no call to pm4_emit before pm4_emit is defined
-    all 51 register/opcode constants resolve (the two my scanner flagged,
-    CTX_DEPTH_CLEAR and VGT_GS_ONCHIP_CNTL, are matches inside COMMENTS - the
-    real identifiers CTX_VGT_GS_ONCHIP_CNTL and VGT_GS_ONCHIP_CNTL_SAFE are
-    defined, and CTX_DEPTH_CLEAR is only a comment on a literal 0x00B)
+TWO FIXES
+  1. DO NOT FLIP A FRAME THE GPU NEVER FINISHED. On a fence timeout the flip
+     is now SKIPPED (counted as fskip=). One stalled fence no longer cascades
+     into permanent flip-queue exhaustion.
+  2. TEARDOWN NO LONGER UNREGISTERS BUFFERS WHILE FLIPS ARE PENDING. If
+     td_pend != 0 we skip sceVideoOutUnregisterBuffers and just Close. Pulling
+     the registration out from under flips the display still holds is what
+     turns a stalled frame into a crash on close. This is also the reference
+     behaviour - the game never unregisters at all, its teardown is
+     SubmitDone / UnmapComputeQueue / VideoOutClose.
+     td_pend == -1 (GetFlipStatus failed) also skips, since we do not know.
+
+STILL UNSOLVED, AND I WILL NOT PRETEND OTHERWISE
+  Why the GPU stops advancing the fence at 521. cpm=0x1f says the command
+  processor retired our LAST checkpoint, so it executes the whole command
+  buffer - yet the fence, which gnm's marker patcher writes via WRITE_DATA,
+  never lands. These two fixes stop the cascade and the crash; they do not
+  stop the stall.
 
   make
+
+WHAT THE NEXT TRACE SHOULD SHOW
+  fskip=   climbing instead of saf=0x80d11081 appearing at all
+  dt=      still ~350ms while stalled (fence + event timeouts), but NO
+           flip-queue failure, and the app should close cleanly
+  fstuck=  the fence value it froze at - if it is 521 again, that number is
+           reproducible and worth attacking directly
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***

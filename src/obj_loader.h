@@ -331,12 +331,19 @@ static int obj_load_file(const char *path,
     out->num_verts=0;out->num_tris=0;out->num_indices=0;
     out->indexed=0;out->vb_size=0;out->ib_size=0;
 
-    if (progress) progress(0, "Opening file", progress_ud);
+    /* DO NOT report progress before we know the file exists.
+       progress() renders a full VBLANK-PACED FRAME (~16.6ms), and the caller
+       probes a list of candidate paths. Announcing "Opening file" before the
+       open meant every MISS cost a whole frame, so the probe list - not the
+       loading - dominated startup. Probe first, report only on a hit. */
 
     /* ==== PASS 1: count ==== */
     P1Ctx p1 = {0, 0, 0, 0};
     obj_stream_pass(path, p1_line, &p1);
     if (p1.nv == 0 || p1.nf_tri == 0) return -4;
+
+    /* The file exists and has geometry: now it is worth drawing a frame. */
+    if (progress) progress(0, "Opening file", progress_ud);
 
     /* ==== Alloc positions (162MB for 13.5M verts) ==== */
     unsigned long pos_sz = (unsigned long)p1.nv * 4;

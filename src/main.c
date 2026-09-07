@@ -631,6 +631,7 @@ static int g_keepalive = 0;     /* extra no-flip submits issued to keep the GPU 
 static int g_ka_fail = 0;       /* SubmitDone failures (0x80d110ff) */
 static int g_dcb_overflow = 0;  /* frames whose DCB overflowed and were skipped */
 static int g_evt_drained = 0;   /* surplus flip events drained (should stay 0) */
+static int g_flips_skipped = 0; /* flips NOT issued because the fence had stalled */
 /* GPU-side checkpoint slot. The CP writes a stage code here as it retires
    each part of the command buffer; after a hang the last value tells us
    which packet it stopped on. Set by main() once the allocation exists. */
@@ -3574,13 +3575,24 @@ int main(void) {
             fence_iters = 0;
             for (int sp = 0; sp < 20000 && *fence < fv+k; sp++) cpu_pause16();
             for (;fence_iters<250 && *fence < fv+k;fence_iters++) sceKernelUsleep(1000);
-            if (*fence < fv+k) {
+            int fence_ok = (*fence >= fv+k);
+            if (!fence_ok) {
                 g_fence_timeouts++;
                 g_fence_stuck_at = *fence;
                 g_fence_wanted   = fv+k;
                 phase("FENCE-TIMEOUT");
             }
             phase("fence-ok");
+            /* DO NOT FLIP A FRAME THE GPU NEVER FINISHED.
+               Measured on hardware: once the fence stalls, flipping anyway
+               queues a flip that the display can never complete, the buffer
+               label stays 1, and after ~15 frames the flip queue is FULL -
+               every submit then returns 0x80d11081 ("flip queue is full",
+               confirmed at gnm 0xdb6). That turns one stalled fence into a
+               permanent failure AND leaves teardown with a queue of flips that
+               will never retire, which is what crashes the app on close.
+               Skipping the flip keeps the queue drainable and the app alive. */
+            if (!fence_ok) { g_flips_skipped++; continue; }
             /* No CPU flip. sceGnmSubmitAndFlipCommandBuffers already registered
                it via the marker, so calling sceVideoOutSubmitFlip here would
                queue a SECOND flip for the same frame. */
@@ -3742,6 +3754,7 @@ int main(void) {
             LP(" cpm="); p+=lg_hex(L+p,(unsigned long long)(g_cp_mark?*g_cp_mark:0));
             LP(" ovf="); p+=lg_i64(L+p,g_dcb_overflow);
             LP(" evd="); p+=lg_i64(L+p,g_evt_drained);
+            LP(" fskip="); p+=lg_i64(L+p,g_flips_skipped);
             LP(" fnto="); p+=lg_i64(L+p,g_fence_timeouts);
             LP(" fstuck="); p+=lg_i64(L+p,(long long)g_fence_stuck_at);
             LP(" fwant="); p+=lg_i64(L+p,(long long)g_fence_wanted);
@@ -3833,7 +3846,18 @@ int main(void) {
        Unregistering first leaves an event pointing at freed display state. */
     if (flip_ev_ok) sceVideoOutDeleteFlipEvent(flip_eq, video);
     if (eq_created) sceKernelDeleteEqueue(flip_eq);
-    sceVideoOutUnregisterBuffers(video, 0);
+    /* Only unregister if the flips actually drained. If the GPU stalled, the
+       display still holds buffers for flips that will never complete, and
+       pulling the registration out from under them is what turns a stalled
+       frame into a crash on close. The game never unregisters at all - its
+       teardown is SubmitDone / UnmapComputeQueue / VideoOutClose, and Close
+       releases the buffers - so skipping this is the reference behaviour, not
+       a shortcut. td_pend is the pending-flip count we just measured. */
+    if (td_pend == 0) {
+        sceVideoOutUnregisterBuffers(video, 0);
+    } else {
+        trace_msg("teardown: flips still pending, skipping UnregisterBuffers\n");
+    }
     sceVideoOutClose(video);
     if (pad_handle >= 0) scePadClose(pad_handle);   /* scePadOpen had no match */
     trace_msg("teardown: closed\n");
