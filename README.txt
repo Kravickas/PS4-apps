@@ -1,47 +1,61 @@
 ============================================================
-*** BUILD FIX + THE CHECK THAT MAKES IT NOT HAPPEN AGAIN ***
+*** WE RE-EMITTED THE HARDWARE STATE TWICE PER FRAME. THE GAME NEVER DOES ***
 ============================================================
-    src/pm4.h:319: call to undeclared function 'pm4_have_space'
-    src/pm4.h:444: static declaration follows non-static declaration
+The trace is identical for the third run: cpm = 0x2231f, i.e. the command
+processor executed frame 547 up to stage 0x1F and stopped, while the CPU ran on
+to 693. Driver state stays perfectly healthy throughout - asb/asa/asd = 1,
+ifb/ifa/ifd = 0, sdret = 0, sret = 0, drn = 0, ovf = 0, evd = 0. The kernel
+believes it dispatched everything and that nothing is outstanding. The GPU just
+is not executing.
 
-pm4_leading_tag at 319 called pm4_have_space defined at 444. Same class of
-mistake as the pm4_write_data_dword / pm4_emit failure two builds ago: I added
-a helper next to related code instead of after its dependencies.
+The leading tag NOP did not change it. So I looked for what we still do that
+the game does not, and found something much larger than a tag.
 
-FIXED: pm4_have_space moved to sit immediately after pm4_init, which is right
-after the struct - it needs nothing else. Current order:
-    211 struct PM4Builder
-    218 pm4_init
-    232 pm4_have_space
-    243 pm4_emit
-    260 pm4_write_data_dword
-    329 pm4_leading_tag
-    450 pm4_event_write_eop
-    494 pm4_prepare_flip
+  Our DCB, EVERY frame:
+      build_shadow_dcb -> pm4_init_default_hw_state   ~127 dwords
+      build_dcb        -> pm4_init_default_hw_state   ~127 dwords
 
-AND A REAL CHECK, because catching this by hand twice is not a method.
-tools_ordercheck.py parses every static function in a header, walks its body,
-and reports any call to another static function - or use of a struct - that is
-defined LATER in the file. It does not depend on me guessing which pairs to
-inspect.
+  Each of those is sceGnmDrawInitDefaultHardwareState350, and it begins with
+      CONTEXT_CONTROL
+      CLEAR_STATE
+      ACQUIRE_MEM   coher_cntl 0x2ec47fc0, size 0xFFFFFFFF
+  So every frame carried TWO CLEAR_STATEs and TWO FULL-ADDRESS-RANGE cache
+  invalidates, plus ~254 redundant dwords out of a 480-dword buffer. Across 547
+  frames that is 1094 CLEAR_STATEs.
 
-  VERIFIED IT ACTUALLY CATCHES THE BUG: I re-injected the broken ordering into
-  a copy and ran it -
-      *** pm4_leading_tag (line ~112) uses pm4_have_space which is defined
-          LATER ***   exit=1
-  and on the fixed header it reports 24 static functions, no
-  use-before-definition, exit=0. A checker I had not falsified would be worth
-  no more than the assumption it replaced.
+  THE GAME CALLS DrawInitDefaultHardwareState350 ZERO TIMES. Verified directly:
+  it imports the symbol and has no call sites, and its frame path only sets the
+  state that actually changes. Context state persists between submits - that is
+  what CONTEXT_CONTROL exists for.
 
-  Also run: src/obj_loader.h clean (17 functions), no pm4_* used in main.c that
-  is missing from pm4.h, no header calling a function defined in main.c, and
-  brace/paren/bracket balance across all four sources.
+  CLEAR_STATE is a heavyweight context operation, not a register write. Issuing
+  it twice a frame forever is the largest remaining behavioural difference
+  between us and the reference, and it is the right shape for something that
+  exhausts a finite context resource after a few hundred frames.
 
-The build content is otherwise unchanged from the previous round: the game's
-leading tag NOP (0xc0031000 / 0x68753000 / 0xbadc0de), FORCE_NO_FLIP = 0, and
-g_cp_frame set outside the shadow conditional.
+NOW IMPLEMENTED: INIT_STATE_ONCE
+  The full hardware state is emitted on the FIRST main-loop frame and never
+  again. Sequence verified:
+      loading frames -> flag 0, init emitted (harmless, short phase)
+      main frame 0   -> flag 0, both passes emit it, then the flag is set
+                        after a successful submit
+      main frame 1+  -> flag 1, neither pass emits it
+  Per-frame DCBs now only set what changes, exactly as the game does.
+
+THE RISK, STATED PLAINLY
+  If some register we depend on does NOT actually persist between submits, the
+  very first frame after the change will show it - wrong colours, wrong depth,
+  a black screen. That is a loud, immediate failure rather than a subtle one,
+  which is the good case. Set INIT_STATE_ONCE to 0 in pm4.h to revert in one
+  line.
 
   make
+
+WHAT TO LOOK FOR
+  Frame 0 should look identical to before. If it does, the state persists.
+  Then the only question is whether it still dies at ~547 - and if it does not,
+  the per-frame CLEAR_STATE was the cause.
+  dcbsz= should drop by roughly 1000 bytes from frame 1 onward.
 
 ============================================================
 *** THE GAME'S PER-DRAW PACKET STREAM, DECODED ***

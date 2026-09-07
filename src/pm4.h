@@ -336,11 +336,37 @@ static inline void pm4_leading_tag(struct PM4Builder* b, uint32_t tag_id,
     pm4_emit(b, counter);
 }
 
-static inline void pm4_init_default_hw_state(struct PM4Builder* b) {
+static int g_hw_state_done = 0;
+
+/* INIT_STATE_ONCE: emit the full default hardware state only on the FIRST
+   frame, not every frame.
+
+   The game calls sceGnmDrawInitDefaultHardwareState350 ZERO times - verified,
+   it imports the symbol and never calls it - because context state PERSISTS
+   between submits. That is what CONTEXT_CONTROL is for.
+
+   We were emitting it TWICE per frame (once per pass), and each copy begins
+   with CONTEXT_CONTROL + CLEAR_STATE + a FULL-ADDRESS-RANGE ACQUIRE_MEM. So
+   every frame carried two CLEAR_STATEs, two whole-memory cache invalidates and
+   ~254 redundant dwords out of a 480-dword buffer.
+
+   Set to 0 to restore the old per-frame behaviour if anything renders wrong -
+   that is the risk here: if some register we rely on is NOT actually persisting,
+   the first frame after the change will show it immediately. */
+#define INIT_STATE_ONCE 1
+
+static inline void pm4_init_default_hw_state_always(struct PM4Builder* b) {
     uint32_t avail = b->cap - b->off;
     if (avail < 0x100) return;
     int written = sceGnmDrawInitDefaultHardwareState350(b->buf + b->off, avail);
     if (written > 0) b->off += (uint32_t)written;
+}
+
+static inline void pm4_init_default_hw_state(struct PM4Builder* b) {
+#if INIT_STATE_ONCE
+    if (g_hw_state_done) return;
+#endif
+    pm4_init_default_hw_state_always(b);
 }
 
 /* The previous hand-transcribed table, kept for reference and as a fallback if

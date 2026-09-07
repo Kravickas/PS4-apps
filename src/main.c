@@ -3743,6 +3743,11 @@ int main(void) {
            does exactly this: ~17 submits per frame, 971 SubmitDone calls for
            969 frames. Doing it per submit was ringing the DingDong doorbell
            four times a frame on a 64-entry ring we otherwise never use. */
+        /* The default hardware state has now been emitted and executed once.
+           From here the per-frame DCBs only set what changes, exactly as the
+           game does. */
+        if (saf_ret == 0) g_hw_state_done = 1;
+
         { uint64_t t_sd0 = sceKernelGetProcessTime();
           sdret = sceGnmSubmitDone();
           sdret2 = sdret;
