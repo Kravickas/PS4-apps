@@ -1,4 +1,16 @@
 ============================================================
+RESULT + NEXT: FULL SCENE
+============================================================
+WRITE_VGT_STAGES_DMA 0 on the real sky frame: 1744 frames, dt 16.4-16.8 ms,
+submit ioctl ~15 us, no fence timeout, cpf == f, fnum == f+1, fpend 0.
+No 512 stall, no 548 wedge. FIXED.
+
+THIS BUILD: DRAW_STOP_OFF (sky, floor, cube, shadow pass). Nothing else
+changed. The full scene writes the same 60 context registers as the clean sky
+frame (values differ) and no VGT_SHADER_STAGES_EN / VGT_DMA_SIZE anywhere.
+Header shows "DRAW_STOP_OFF(full scene+shadow) NO_VGT_STAGES_DMA".
+
+============================================================
 FIX: WRITE_VGT_STAGES_DMA 0
 ============================================================
 Bisection result: cut 3 + {PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN,
