@@ -280,12 +280,19 @@
 /* Skip only the sky draw packet; all state, shaders, checkpoints and the fence
    tail stay identical. Every run so far was sky-only (DRAW_STOP 1), so:
    survives past 547 -> the draw is implicated; still 547 -> it is not. */
-#define SKY_NO_DRAW     1
+#define SKY_NO_DRAW     0
 
 /* Leading tag + checkpoints + fence only: no context control, no state, no draw.
    SKY_NO_DRAW still wedged at 548 completed frames, so the draw is innocent.
    Still 548 here -> DCB content is irrelevant, it is the submit path itself. */
 #define EMPTY_FRAME     0
+
+/* 0 = do not write VGT_SHADER_STAGES_EN (0x2D5) or VGT_DMA_SIZE (0x29D).
+   Bisection: cut 3 + {PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, VGT_DMA_SIZE}
+   reproduces the 512 stall and 548 wedge. gnm writes PA_SC_MODE_CNTL_0 in its
+   own default tables; neither gnm nor the game writes the other two via
+   SET_CONTEXT_REG (CLEAR_STATE default / CP loads index sizes from draw packets). */
+#define WRITE_VGT_STAGES_DMA 0
 
 /* Bisect the state setup (SKY_NO_DRAW still on). EMPTY_FRAME ran 6560 frames
    clean; the full state (0) hits the 512 stall and the 548 wedge.
@@ -295,7 +302,7 @@
      3 after CB_COLOR0_BASE x14 + the size NOP
      4 after the CB/PA/SPI context regs, before UCONFIG
      5 after UCONFIG, before the SH user data */
-#define STATE_CUT       3
+#define STATE_CUT       0
 
 /* Size control ran clean: cut 3 + one 63-dword NOP (816 B) works. Not size. */
 #define STATE_PAD_DW    0
@@ -318,7 +325,7 @@
    0x1F990C FAILED (696 B): stall at 514, wedge at 548. Not an interaction.
    0x130000 = PA_SC_MODE_CNTL_0 (16), VGT_SHADER_STAGES_EN (17), VGT_DMA_SIZE (20).
    fails -> one of these 3; clean -> one of the other 8 (0x0C990C). */
-#define STATE_SEC4_MASK 0x130000
+#define STATE_SEC4_MASK 0
 
 #define CPU_FLIP        1
 
@@ -1727,10 +1734,14 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
     pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
+#if WRITE_VGT_STAGES_DMA
     pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
+#endif
     pm4_set_context_reg(b,CTX_AA_CONFIG,0);
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
+#if WRITE_VGT_STAGES_DMA
     pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
+#endif
     STATE_CUT_POINT(4);
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
@@ -2027,10 +2038,14 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
     pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
+#if WRITE_VGT_STAGES_DMA
     pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
+#endif
     pm4_set_context_reg(b,CTX_AA_CONFIG,0);
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
+#if WRITE_VGT_STAGES_DMA
     pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
+#endif
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
 
@@ -3335,6 +3350,9 @@ int main(void) {
 #endif
 #if defined(BG_SKY_CLEAN)
       { const char *m2 = " BG_SKY_CLEAN"; while (*m2) L[p++] = *m2++; }
+#endif
+#if !WRITE_VGT_STAGES_DMA
+      { const char *m7 = " NO_VGT_STAGES_DMA"; while (*m7) L[p++] = *m7++; }
 #endif
 #if EMPTY_FRAME
       { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }

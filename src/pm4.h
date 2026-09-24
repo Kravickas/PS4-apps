@@ -146,7 +146,7 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
                                      GS_PRIMS_PER_SUBGRP(4)
    Byte 0x028A44 -> context index (0xA44)/4 = 0x291. Liverpool is CIK-family,
    we do not use GS either, and NEITHER gnm init function sets this register -
-   the firmware writes 0x290 (VGT_SHADER_STAGES_EN) and stops. A documented
+   the firmware writes 0x290 (VGT_GS_MODE) and stops. A documented
    hardware hang from a register nobody initialises is worth closing.
    ES_VERTS_PER_SUBGRP is bits [10:0], GS_PRIMS_PER_SUBGRP bits [21:11]. */
 #define CTX_VGT_GS_ONCHIP_CNTL      0x291
@@ -178,9 +178,9 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define CTX_CLIPPER_CONTROL         0x204
 #define CTX_VIEWPORT_CONTROL        0x206
 #define CTX_VS_OUTPUT_CONTROL       0x207
-#define CTX_MODE_CONTROL            0x292
-#define CTX_INDEX_SIZE              0x29D
-#define CTX_STAGE_ENABLE            0x2D5
+#define CTX_MODE_CONTROL            0x292  // AMD: PA_SC_MODE_CNTL_0
+#define CTX_INDEX_SIZE              0x29D  // AMD: VGT_DMA_SIZE
+#define CTX_STAGE_ENABLE            0x2D5  // AMD: VGT_SHADER_STAGES_EN
 #define CTX_AA_CONFIG               0x2F8
 #define CTX_CB_COLOR0_BASE          0x318
 #define CTX_CB_COLOR0_PITCH         0x319

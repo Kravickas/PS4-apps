@@ -1,41 +1,31 @@
 ============================================================
-TEST: STATE_CUT 3 + SEC4 SUBSET 0x130000
+FIX: WRITE_VGT_STAGES_DMA 0
 ============================================================
-EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
-fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
-So OUR COMMAND BUFFER CONTENT causes both. The difference from SKY_NO_DRAW is
-only the state setup between checkpoint 0x11 and the (removed) draw.
+Bisection result: cut 3 + {PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN,
+VGT_DMA_SIZE} (SEC4 0x130000, 600 B) reproduces the 512 stall and the 548
+wedge. The 10 value-changing writes, the other 8 same-value writes, size and
+packet count were all clean.
 
-STATE_CUT emits the state up to a cut point, then the fence tail (draw still
-removed). Cut points, verified in the preprocessed active path:
-    1  CONTEXT_CONTROL only
-    2  + SH regs, scissor/vport, viewport, DB regs      CLEAN: 8896 frames, 60fps
-    3  + CB_COLOR0_BASE x14 (display framebuffer) + size NOP   CLEAN: 2368 frames
-    4  + CB/PA/SPI context regs (21 writes)        FAILS: stall at 513, wedge at 548
-    5  + UCONFIG (primitive type, instances)
-    0  full state (= the failing SKY_NO_DRAW frame)
+Static check against the reference binaries:
+  PA_SC_MODE_CNTL_0     gnm writes it = 0 via SET_CONTEXT_REG in its own
+                        default-state tables (0x7e08, 0x7fec, 0x81dc). Sanctioned.
+  VGT_SHADER_STAGES_EN  never written by gnm or the game via SET_CONTEXT_REG.
+                        The game's 55 "mov edx,0x2d5" sites all call one
+                        non-GPU function (0x2304c0).
+  VGT_DMA_SIZE          never written by gnm or the game. The CP loads index
+                        sizes from the draw packets (shadPS4 mirrors this:
+                        regs.max_index_size = draw_index->max_size).
+Our frame wrote both every frame because its state was modelled on shadPS4's
+register struct (index_size = 0xA29D, stage_enable = 0xA2D5).
 
-    Cut 3 is 564 B and clean; cut 4 is 816 B and fails. Before bisecting the
-    21 registers, rule out size: halves are smaller, so a size threshold would
-    make every half pass and point at a phantom register.
-    Size control (cut 3 + one 63-dword NOP = 816 B): CLEAN. Not size.
-    Packet-count control (cut 3 + 21 same-value rewrites, 816 B): CLEAN.
-    The cause is specific section-4 content.
-    0x66F3 (the 10 value-changing writes, 684 B): CLEAN.
-    0x1F990C (the 11 same-value writes, 696 B): FAILS - stall 514, wedge 548.
-    THIS BUILD: 0x130000 = PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, VGT_DMA_SIZE.
-    Header shows "SEC4=0x130000", dcbsz should be 600.
-      fails -> one of those 3
-      clean -> one of the other 8 (0x0C990C)
-      fails -> one of those 10: CB_TARGET_MASK, CB_SHADER_MASK,
-               SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR, SPI_PS_IN_CONTROL,
-               SPI_SHADER_POS_FORMAT, SPI_SHADER_COL_FORMAT, CB_COLOR_CONTROL,
-               PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL
-      clean -> the 11 same-value writes (0x1F990C), incl. VGT_SHADER_STAGES_EN,
-               PA_SC_MODE_CNTL_0, VGT_DMA_SIZE - or an interaction
+THIS BUILD: the real sky frame (SKY_NO_DRAW 0, STATE_CUT 0) without those two
+writes, in the main and shadow paths. PA_SC_MODE_CNTL_0 kept, as gnm does.
+Header shows "NO_VGT_STAGES_DMA".
+    runs past 548 at 60fps, ioctl ~15us -> fixed
+    still fails                          -> it is PA_SC_MODE_CNTL_0
 
-Each run: check whether the submit ioctl goes to ~510000us at frame 513, and
-whether cpf freezes at ~548. Screen black - expected.
+Also corrected: pm4.h said 0x290 is VGT_SHADER_STAGES_EN; it is VGT_GS_MODE.
+CTX_* names now carry the AMD register names.
 
 ============================================================
 AUDIT FIXES (this build)
