@@ -146,6 +146,11 @@
    -> DRAW_STOP_OFF +shadow. Full scene tried early: GPU hung in frame 0 at
    checkpoint 0x21 (shadow: hw state done). */
 #define DRAW_STOP 2
+
+/* Floor without depth test/write. The depth buffer was never cleared on hardware
+   (sky clear had writes off), so the floor's LESS test failed: no floor. The
+   first depth write (clear enabled) crashed in frame 0. Depth = separate step. */
+#define FLOOR_NO_DEPTH 1
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -1663,10 +1668,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_context_regs(b,CTX_DB_Z_READ_BASE,d,4); }
     pm4_set_context_reg(b,CTX_DB_DEPTH_SIZE,((DISPLAY_W/8)-1)|(((DISPLAY_H/8)-1)<<11));
     pm4_set_context_reg(b,CTX_DB_DEPTH_SLICE,(DISPLAY_W*DISPLAY_H/64)-1);
-    /* Clear-by-draw: DEPTH_CLEAR_ENABLE only writes DB_DEPTH_CLEAR through the depth
-       write path. Game clear: DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777 (Z write,
-       ALWAYS, + stencil). We have no stencil surface: Z enable | Z write | ALWAYS. */
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(7u<<4));
+    /* No depth write: the clear only writes through the depth write path (game
+       clear: DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777), but enabling it (0x76)
+       killed the app in frame 0 - first GPU write to this depth surface. Depth is
+       its own ladder step; until then nothing writes depth. */
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(7u<<4));
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
 #endif
@@ -1843,7 +1849,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2);
 
         /* Depth for floor: less-than, write enabled (so cube z-tests correctly against floor) */
+#if FLOOR_NO_DEPTH
+        pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
+#else
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
+#endif
         pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1<<1)); /* cull back */
 
         pm4_set_sh_regs(b,SH_VS_USER_DATA_0,floor_v,4);
@@ -3364,6 +3374,9 @@ int main(void) {
 #endif
 #if !WRITE_VGT_STAGES_DMA
       { const char *m7 = " NO_VGT_STAGES_DMA"; while (*m7) L[p++] = *m7++; }
+#endif
+#if FLOOR_NO_DEPTH
+      { const char *m8 = " FLOOR_NO_DEPTH"; while (*m8) L[p++] = *m8++; }
 #endif
 #if EMPTY_FRAME
       { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }

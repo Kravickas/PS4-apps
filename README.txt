@@ -1,24 +1,24 @@
 ============================================================
-LADDER: DRAW_STOP 2 (sky + floor) - two fixes
+LADDER: DRAW_STOP 2 (sky + floor), FLOOR_NO_DEPTH
 ============================================================
-First DRAW_STOP 2 run: 60 fps, no stall, no wedge, but no floor and the first
-frame at ptms=53095 (sky-only: ~2300).
+Previous build (sky clear with depth write 0x76 + displacement in ONION):
+the trace stopped after the header lines - no frame-0 line. The displacement
+map had already been loaded and consumed before the header was written, so
+ONION was fine. The app died inside frame 0, which is the first time the GPU
+ever wrote this depth surface (before, the sky had writes off and the floor's
+LESS test failed on every pixel). Most likely a write outside the depth
+allocation: it is exactly 1920x1080x4 bytes, while DB_Z_INFO=3 selects tile
+mode index 0 (depth, 2D tiled), whose footprint is padded to whole tiles.
+Not verified: the game builds its depth-target registers from struct fields,
+so the decompile does not show the correct layout.
 
-NO FLOOR - the depth buffer was never cleared on hardware.
-  The sky draw set DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE with DB_DEPTH_CONTROL
-  0x72 (Z enable, NO write, ALWAYS). shadPS4 turns the flag into a Vulkan
-  loadOp=Clear; on hardware the clear value is written through the depth write
-  path, so nothing was written and the floor's LESS test failed.
-  The game's clear (GoW decompile): DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777
-  (Z write on, ALWAYS, + stencil). 0x72 is the game's value for passes that must
-  NOT touch depth. Now 0x76: Z enable | Z write | ALWAYS (no stencil surface).
-
-SLOW LOADING - the displacement map was read back from GARLIC.
-  gpu_alloc() is GARLIC (write-combined, uncached CPU reads). The auto-stretch
-  pass reads all 4096x4096 pixels twice. The map is CPU-only (build_static_vb,
-  never in a descriptor), so it now loads into ONION via cpu_alloc().
-
-Both fixes are independent: the GPU never reads the displacement map.
+THIS BUILD:
+  sky   DB_DEPTH_CONTROL 0x72 (as in the run that went 1936 frames)
+  floor DB_DEPTH_CONTROL 0 (FLOOR_NO_DEPTH) - no depth test, no depth write
+  displacement map stays in ONION (cpu_alloc)
+Nothing writes depth. Header shows "... FLOOR_NO_DEPTH".
+    floor visible   -> floor draw is fine; depth becomes its own step
+    no floor        -> floor shader/vertices/descriptors, independent of depth
 
 ============================================================
 FIX: WRITE_VGT_STAGES_DMA 0
