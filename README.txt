@@ -1,13 +1,24 @@
 ============================================================
-LADDER: DRAW_STOP 2 (sky + floor)
+LADDER: DRAW_STOP 2 (sky + floor) - two fixes
 ============================================================
-DRAW_STOP 1 (sky) with WRITE_VGT_STAGES_DMA 0: 1744 frames clean, 60 fps.
-Full scene tried out of order: GPU hung in frame 0 at checkpoint 0x21
-(shadow: hw state done) - recorded for the shadow step.
+First DRAW_STOP 2 run: 60 fps, no stall, no wedge, but no floor and the first
+frame at ptms=53095 (sky-only: ~2300).
 
-THIS BUILD: DRAW_STOP 2 - sky + floor, no cube, no shadow pass.
-Header shows "DRAW_STOP2 BG_SKY_CLEAN NO_VGT_STAGES_DMA".
-Next rungs: 3 (+cube), then DRAW_STOP_OFF (+shadow).
+NO FLOOR - the depth buffer was never cleared on hardware.
+  The sky draw set DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE with DB_DEPTH_CONTROL
+  0x72 (Z enable, NO write, ALWAYS). shadPS4 turns the flag into a Vulkan
+  loadOp=Clear; on hardware the clear value is written through the depth write
+  path, so nothing was written and the floor's LESS test failed.
+  The game's clear (GoW decompile): DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777
+  (Z write on, ALWAYS, + stencil). 0x72 is the game's value for passes that must
+  NOT touch depth. Now 0x76: Z enable | Z write | ALWAYS (no stencil surface).
+
+SLOW LOADING - the displacement map was read back from GARLIC.
+  gpu_alloc() is GARLIC (write-combined, uncached CPU reads). The auto-stretch
+  pass reads all 4096x4096 pixels twice. The map is CPU-only (build_static_vb,
+  never in a descriptor), so it now loads into ONION via cpu_alloc().
+
+Both fixes are independent: the GPU never reads the displacement map.
 
 ============================================================
 FIX: WRITE_VGT_STAGES_DMA 0

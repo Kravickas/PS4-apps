@@ -1099,6 +1099,11 @@ static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtyp
 static void *gpu_alloc(unsigned long size, unsigned long align) {
     return gpu_alloc_typed(size, align, MEM_TYPE_GARLIC);
 }
+/* Cached memory for data the CPU reads back (GARLIC is write-combined: CPU reads
+   are uncached and very slow). */
+static void *cpu_alloc(unsigned long size, unsigned long align) {
+    return gpu_alloc_typed(size, align, MEM_TYPE_ONION);
+}
 
 static float my_sin(float x) {
     const float PI = 3.14159265358979f, TWO_PI = 6.28318530717959f;
@@ -1638,8 +1643,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
 
     pm4_set_context_reg(b,CTX_INDEX_OFFSET,0);
 
-    // Depth — request GPU clear of depth buffer to 1.0f via DB_RENDER_CONTROL.depth_clear_enable.
-    // shadPS4 translates this to Vulkan loadOp=Clear on the depth attachment.
+    // Depth — clear to 1.0f via DB_RENDER_CONTROL.depth_clear_enable on the sky draw.
 #ifdef SIMPLE_DRAW
     /* SIMPLE_DRAW (RT_TEST / VS_LOAD_TEST): depth fully disabled. */
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,0);
@@ -1659,7 +1663,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_context_regs(b,CTX_DB_Z_READ_BASE,d,4); }
     pm4_set_context_reg(b,CTX_DB_DEPTH_SIZE,((DISPLAY_W/8)-1)|(((DISPLAY_H/8)-1)<<11));
     pm4_set_context_reg(b,CTX_DB_DEPTH_SLICE,(DISPLAY_W*DISPLAY_H/64)-1);
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(7u<<4)); // Always test, NO WRITE
+    /* Clear-by-draw: DEPTH_CLEAR_ENABLE only writes DB_DEPTH_CLEAR through the depth
+       write path. Game clear: DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777 (Z write,
+       ALWAYS, + stencil). We have no stencil surface: Z enable | Z write | ALWAYS. */
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(7u<<4));
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
 #endif
@@ -2774,8 +2781,8 @@ int main(void) {
     int floor_disp_w = 0, floor_disp_h = 0;
     {
         BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), gpu_alloc, &bmp) == 0 ||
-            bmp_load(asset_path(2,"floor_displacement.bmp"), gpu_alloc, &bmp) == 0)) {
+        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), cpu_alloc, &bmp) == 0 ||
+            bmp_load(asset_path(2,"floor_displacement.bmp"), cpu_alloc, &bmp) == 0)) {
             floor_disp_tex = bmp.pixels;
             floor_disp_w = bmp.width; floor_disp_h = bmp.height;
             /* Auto-stretch the displacement range to span [0,255]. Many
