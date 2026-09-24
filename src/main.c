@@ -297,10 +297,13 @@
      5 after UCONFIG, before the SH user data */
 #define STATE_CUT       3
 
-/* Size control: pad the clean cut-3 frame (564 B) with one NOP to the failing
-   cut-4 size (816 B), no new registers. 63 dwords = 252 B.
-   fails -> DCB size, not register content; clean -> one of the 21 registers. */
-#define STATE_PAD_DW    63
+/* Size control ran clean: cut 3 + one 63-dword NOP (816 B) works. Not size. */
+#define STATE_PAD_DW    0
+
+/* Packet-count control: cut 3 + 21 rewrites of PA_SU_SC_MODE_CNTL = 0, the value
+   it already holds. Same 21 packets and 252 B as cut 4, no state change.
+   fails -> number of context-register writes; clean -> specific values. */
+#define STATE_REWRITE_N 21
 
 #define CPU_FLIP        1
 
@@ -1443,6 +1446,8 @@ static void build_ssharp_pcf(uint32_t *s) {
 // === DCB builder ===
 /* Return early with the frame's fence tail at bisection point k (STATE_CUT). */
 #define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { \
+    for (int rw_i = 0; rw_i < STATE_REWRITE_N; rw_i++) \
+        pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); \
     if (STATE_PAD_DW > 1) { pm4_emit(b, pm4_type3(PM4_NOP, STATE_PAD_DW - 1)); \
         for (int pad_i = 0; pad_i < STATE_PAD_DW - 1; pad_i++) pm4_emit(b, 0); } \
     CPMARK(b, 0x1F); \
@@ -3294,7 +3299,9 @@ int main(void) {
 #elif STATE_CUT
       { const char *m3 = " STATE_CUT="; while (*m3) L[p++] = *m3++; L[p++] = (char)('0' + STATE_CUT);
         if (STATE_PAD_DW) { const char *m4 = " PAD_DW="; while (*m4) L[p++] = *m4++;
-                            p += lg_i64(L+p, (long long)STATE_PAD_DW); } }
+                            p += lg_i64(L+p, (long long)STATE_PAD_DW); }
+        if (STATE_REWRITE_N) { const char *m5 = " REWRITE="; while (*m5) L[p++] = *m5++;
+                               p += lg_i64(L+p, (long long)STATE_REWRITE_N); } }
 #elif SKY_NO_DRAW
       { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif
