@@ -295,7 +295,12 @@
      3 after CB_COLOR0_BASE x14 + the size NOP
      4 after the CB/PA/SPI context regs, before UCONFIG
      5 after UCONFIG, before the SH user data */
-#define STATE_CUT       4
+#define STATE_CUT       3
+
+/* Size control: pad the clean cut-3 frame (564 B) with one NOP to the failing
+   cut-4 size (816 B), no new registers. 63 dwords = 252 B.
+   fails -> DCB size, not register content; clean -> one of the 21 registers. */
+#define STATE_PAD_DW    63
 
 #define CPU_FLIP        1
 
@@ -1437,7 +1442,10 @@ static void build_ssharp_pcf(uint32_t *s) {
 
 // === DCB builder ===
 /* Return early with the frame's fence tail at bisection point k (STATE_CUT). */
-#define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { CPMARK(b, 0x1F); \
+#define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { \
+    if (STATE_PAD_DW > 1) { pm4_emit(b, pm4_type3(PM4_NOP, STATE_PAD_DW - 1)); \
+        for (int pad_i = 0; pad_i < STATE_PAD_DW - 1; pad_i++) pm4_emit(b, 0); } \
+    CPMARK(b, 0x1F); \
     if (no_flip) pm4_event_write_eop(b, fence, fv); else pm4_prepare_flip(b, fence, fv); \
     return b->off * 4; } } while (0)
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -3284,7 +3292,9 @@ int main(void) {
 #if EMPTY_FRAME
       { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }
 #elif STATE_CUT
-      { const char *m3 = " STATE_CUT="; while (*m3) L[p++] = *m3++; L[p++] = (char)('0' + STATE_CUT); }
+      { const char *m3 = " STATE_CUT="; while (*m3) L[p++] = *m3++; L[p++] = (char)('0' + STATE_CUT);
+        if (STATE_PAD_DW) { const char *m4 = " PAD_DW="; while (*m4) L[p++] = *m4++;
+                            p += lg_i64(L+p, (long long)STATE_PAD_DW); } }
 #elif SKY_NO_DRAW
       { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif

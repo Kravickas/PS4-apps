@@ -1,5 +1,5 @@
 ============================================================
-TEST: STATE_CUT 4 (bisecting the state setup)
+TEST: STATE_CUT 3 + PAD (size control)
 ============================================================
 EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
 fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
@@ -11,13 +11,17 @@ removed). Cut points, verified in the preprocessed active path:
     1  CONTEXT_CONTROL only
     2  + SH regs, scissor/vport, viewport, DB regs      CLEAN: 8896 frames, 60fps
     3  + CB_COLOR0_BASE x14 (display framebuffer) + size NOP   CLEAN: 2368 frames
-    4  + CB/PA/SPI context regs (21 writes)        <- THIS BUILD
+    4  + CB/PA/SPI context regs (21 writes)        FAILS: stall at 513, wedge at 548
     5  + UCONFIG (primitive type, instances)
     0  full state (= the failing SKY_NO_DRAW frame)
 
-    (after 5 the full state still has 3 SH writes: PS program, PS and VS user data)
-    fails -> culprit is in the 21 context regs; bisect within them
-    clean -> culprit is UCONFIG (5) or the final SH writes; next run STATE_CUT 5
+    Cut 3 is 564 B and clean; cut 4 is 816 B and fails. Before bisecting the
+    21 registers, rule out size: halves are smaller, so a size threshold would
+    make every half pass and point at a phantom register.
+    THIS BUILD: cut 3 + one NOP of 63 dwords = 816 B, no new registers.
+    Check dcbsz=816 in the log.
+      fails -> DCB size/threshold, not register content
+      clean -> one of the 21 registers; bisect them next
 
 Each run: check whether the submit ioctl goes to ~510000us at frame 513, and
 whether cpf freezes at ~548. Screen black - expected.
