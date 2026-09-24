@@ -1,5 +1,5 @@
 ============================================================
-TEST: STATE_CUT 2 (bisecting the state setup)
+TEST: STATE_CUT 3 (bisecting the state setup)
 ============================================================
 EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
 fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
@@ -9,14 +9,14 @@ only the state setup between checkpoint 0x11 and the (removed) draw.
 STATE_CUT emits the state up to a cut point, then the fence tail (draw still
 removed). Cut points, verified in the preprocessed active path:
     1  CONTEXT_CONTROL only
-    2  + SH regs, scissor/vport, viewport, DB regs      <- THIS BUILD
-    3  + CB_COLOR0_BASE x14 (display framebuffer) + size NOP
+    2  + SH regs, scissor/vport, viewport, DB regs      CLEAN: 8896 frames, 60fps
+    3  + CB_COLOR0_BASE x14 (display framebuffer) + size NOP   <- THIS BUILD
     4  + CB/PA/SPI context regs
     5  + UCONFIG (primitive type, instances)
     0  full state (= the failing SKY_NO_DRAW frame)
 
-    clean (no 512, no 548) -> culprit is in 3..5; next run STATE_CUT 3
-    fails                  -> culprit is in 1..2; next run STATE_CUT 1
+    fails -> culprit is the CB_COLOR0 block or its size NOP
+    clean -> culprit is in 4..5; next run STATE_CUT 4
 
 Each run: check whether the submit ioctl goes to ~510000us at frame 513, and
 whether cpf freezes at ~548. Screen black - expected.
