@@ -1,4 +1,22 @@
 ============================================================
+TEST: SKY_NO_DRAW
+============================================================
+FENCE_SLOTS 256 result: still exactly 547 (cpf frozen at 547, fence timeouts
+every frame). Post-stall fence= values were the CPU seed, not GPU writes.
+Fence address innocent; FENCE_SLOTS back to 1.
+
+Trace header: "scene cfg=DRAW_STOP1 BG_SKY_CLEAN" - every hardware run has
+been sky-only. The frame is state setup plus ONE draw (pm4_draw_index_auto,
+BG_VERTS). SKY_NO_DRAW 1 skips only that packet; all state, shaders,
+checkpoints and the fence tail are unchanged. Screen will be black - expected.
+
+    survives past 547 -> the sky draw is implicated
+    still stops at 547 -> the draw is innocent; it is state/submit plumbing
+
+Also fixed: MINIMAL_TEST did not compile (1-arg pm4_prepare_flip) and ignored
+no_flip. All five configs now compile with 0 errors.
+
+============================================================
 AUDIT FIXES (this build)
 ============================================================
 - Header trace buffer char L[96] held 5 lines: 90 bytes with measured values,
@@ -16,35 +34,6 @@ Compile check (gcc -fsyntax-only -Wall -Wextra, freestanding): 0 errors in
 default, DRAW_STOP_OFF and DRAW_STOP=3. 92 warnings, all pre-existing:
 26 unused/set-but-unused variables, 66 misleading-indentation (one clamp macro
 plus loader one-liners, all semantically correct).
-
-============================================================
-*** NEXT TEST: FENCE_SLOTS 256 ***
-============================================================
-  The counts rule out the obvious:
-      the game       969 frames, 16296 submits, 971 SubmitDone, ~969 flips
-      us at failure  547 frames,   547 submits,  547 SubmitDone,  547 flips
-  It does MORE of every one of those than we reach before failing.
-
-  What we do differently, per submit:
-      OUR FENCE IS ONE FIXED ADDRESS reused for all 547 frames.
-      THE GAME CARVES A FRESH FENCE PER SUBMIT, inside the leading NOP of the
-      command buffer itself (spec 20.4: ctx->fence_addr = cur[pad+0x10]).
-
-  Identified early, never tested. FENCE_SLOTS 256 rotates through 256 distinct
-  fence addresses, one page apart so no two share a cache line, each seeded to
-  fv-1 before use so a stale value cannot pass the wait.
-
-      failure moves or disappears -> the fixed fence address is implicated and
-                                     matching the game's per-submit fence is
-                                     the fix
-      still exactly 547           -> the fence address is innocent, and the
-                                     limit is in the submit path itself
-
-  Costs 1MB of ONION. Set FENCE_SLOTS 1 to restore the single fixed fence.
-  CPU_FLIP stays 1 for this run - it keeps the display out of the command
-  stream so the result is about the fence alone.
-
-  make      (no .py in the build)
 
 ============================================================
 *** NEXT TEST: CPU_FLIP - EOP FLIP vs CPU FLIP ***

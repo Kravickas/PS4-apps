@@ -274,7 +274,13 @@
 
    Slots are one page apart so no two fences share a cache line - a stale line
    would otherwise confound the result. */
-#define FENCE_SLOTS     256
+/* 256 ran on hardware: still exactly 547, identical to 1. Fence address innocent. */
+#define FENCE_SLOTS     1
+
+/* Skip only the sky draw packet; all state, shaders, checkpoints and the fence
+   tail stay identical. Every run so far was sky-only (DRAW_STOP 1), so:
+   survives past 547 -> the draw is implicated; still 547 -> it is not. */
+#define SKY_NO_DRAW     1
 
 #define CPU_FLIP        1
 
@@ -1450,8 +1456,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
             pm4_dma_fill(b, (char*)color + off, (uint32_t)n, 0xFFFF00FFu /* magenta */);
             off += n;
         }
-        pm4_event_write_eop(b, fence, fv);
-        pm4_prepare_flip(b);   /* last 64 dwords (flip handshake) */
+        if (no_flip) pm4_event_write_eop(b, fence, fv);
+        else         pm4_prepare_flip(b, fence, fv);   /* last 64 dwords */
         return b->off * 4;
     }
 #endif
@@ -1690,7 +1696,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
 #else
     // VS s[0:3] = vertex/MVP V#. Sun read via s_buffer_load from V#+0x40
     pm4_set_sh_regs(b,SH_VS_USER_DATA_0,bg_v,4);
+#if !SKY_NO_DRAW
     pm4_draw_index_auto(b,BG_VERTS);
+#endif
 #endif
 
 #if defined(DRAW_STOP) && DRAW_STOP <= 1
@@ -3241,6 +3249,9 @@ int main(void) {
 #endif
 #if defined(BG_SKY_CLEAN)
       { const char *m2 = " BG_SKY_CLEAN"; while (*m2) L[p++] = *m2++; }
+#endif
+#if SKY_NO_DRAW
+      { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif
       L[p++] = '\n';
       const char *mq = "mapcomputequeue=";
