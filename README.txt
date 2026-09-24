@@ -1,5 +1,5 @@
 ============================================================
-TEST: STATE_CUT 3 + SEC4 SUBSET 0x1F990C
+TEST: STATE_CUT 3 + SEC4 SUBSET 0x130000
 ============================================================
 EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
 fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
@@ -22,8 +22,11 @@ removed). Cut points, verified in the preprocessed active path:
     Packet-count control (cut 3 + 21 same-value rewrites, 816 B): CLEAN.
     The cause is specific section-4 content.
     0x66F3 (the 10 value-changing writes, 684 B): CLEAN.
-    THIS BUILD: cut 3 + the 11 same-value writes (0x1F990C).
-    Header shows "SEC4=0x1f990c", dcbsz should be 696.
+    0x1F990C (the 11 same-value writes, 696 B): FAILS - stall 514, wedge 548.
+    THIS BUILD: 0x130000 = PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, VGT_DMA_SIZE.
+    Header shows "SEC4=0x130000", dcbsz should be 600.
+      fails -> one of those 3
+      clean -> one of the other 8 (0x0C990C)
       fails -> one of those 10: CB_TARGET_MASK, CB_SHADER_MASK,
                SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR, SPI_PS_IN_CONTROL,
                SPI_SHADER_POS_FORMAT, SPI_SHADER_COL_FORMAT, CB_COLOR_CONTROL,

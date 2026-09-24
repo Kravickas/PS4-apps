@@ -315,8 +315,10 @@
    SPI_VS_OUT_CONFIG, SPI_SHADER_Z_FORMAT, DB_SHADER_CONTROL, SPI_BARYC_CNTL,
    PA_CL_VS_OUT_CNTL, PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, PA_SC_AA_CONFIG,
    CB_BLEND0_CONTROL, VGT_DMA_SIZE (no CLEAR_STATE default).
-   fails -> one of these 11; clean -> needs both groups (an interaction). */
-#define STATE_SEC4_MASK 0x1F990C
+   0x1F990C FAILED (696 B): stall at 514, wedge at 548. Not an interaction.
+   0x130000 = PA_SC_MODE_CNTL_0 (16), VGT_SHADER_STAGES_EN (17), VGT_DMA_SIZE (20).
+   fails -> one of these 3; clean -> one of the other 8 (0x0C990C). */
+#define STATE_SEC4_MASK 0x130000
 
 #define CPU_FLIP        1
 
