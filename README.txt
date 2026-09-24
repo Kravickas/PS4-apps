@@ -1,5 +1,5 @@
 ============================================================
-TEST: STATE_CUT 3 + SEC4 SUBSET 0x66F3
+TEST: STATE_CUT 3 + SEC4 SUBSET 0x1F990C
 ============================================================
 EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
 fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
@@ -21,9 +21,9 @@ removed). Cut points, verified in the preprocessed active path:
     Size control (cut 3 + one 63-dword NOP = 816 B): CLEAN. Not size.
     Packet-count control (cut 3 + 21 same-value rewrites, 816 B): CLEAN.
     The cause is specific section-4 content.
-    THIS BUILD: cut 3 + the 10 section-4 writes that change a value vs
-    CLEAR_STATE (STATE_SEC4_MASK 0x66F3). Table g_sec4 was extracted from the
-    compiled cut-4 path. Header shows "SEC4=0x66f3", dcbsz should be 684.
+    0x66F3 (the 10 value-changing writes, 684 B): CLEAN.
+    THIS BUILD: cut 3 + the 11 same-value writes (0x1F990C).
+    Header shows "SEC4=0x1f990c", dcbsz should be 696.
       fails -> one of those 10: CB_TARGET_MASK, CB_SHADER_MASK,
                SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR, SPI_PS_IN_CONTROL,
                SPI_SHADER_POS_FORMAT, SPI_SHADER_COL_FORMAT, CB_COLOR_CONTROL,

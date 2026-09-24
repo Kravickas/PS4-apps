@@ -310,8 +310,13 @@
    (bit n = g_sec4[n]). 0x66F3 = the 10 writes that change a value vs CLEAR_STATE:
    CB_TARGET_MASK, CB_SHADER_MASK, SPI_PS_INPUT_ENA/ADDR, SPI_PS_IN_CONTROL,
    SPI_SHADER_POS/COL_FORMAT, CB_COLOR_CONTROL, PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL.
-   fails -> one of those 10; clean -> the 11 same-value writes (0x1F990C). */
-#define STATE_SEC4_MASK 0x66F3
+   0x66F3 ran clean (684 B): the 10 value-changing writes are innocent.
+   0x1F990C = the 11 writes that keep their CLEAR_STATE value: SPI_PS_INPUT_CNTL_0,
+   SPI_VS_OUT_CONFIG, SPI_SHADER_Z_FORMAT, DB_SHADER_CONTROL, SPI_BARYC_CNTL,
+   PA_CL_VS_OUT_CNTL, PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, PA_SC_AA_CONFIG,
+   CB_BLEND0_CONTROL, VGT_DMA_SIZE (no CLEAR_STATE default).
+   fails -> one of these 11; clean -> needs both groups (an interaction). */
+#define STATE_SEC4_MASK 0x1F990C
 
 #define CPU_FLIP        1
 
