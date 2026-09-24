@@ -303,7 +303,15 @@
 /* Packet-count control: cut 3 + 21 rewrites of PA_SU_SC_MODE_CNTL = 0, the value
    it already holds. Same 21 packets and 252 B as cut 4, no state change.
    fails -> number of context-register writes; clean -> specific values. */
-#define STATE_REWRITE_N 21
+#define STATE_REWRITE_N 0
+
+/* Packet-count control ran clean too: 21 same-value rewrites (816 B) work. The
+   cause is specific section-4 content. Emit a subset of the 21 at cut 3
+   (bit n = g_sec4[n]). 0x66F3 = the 10 writes that change a value vs CLEAR_STATE:
+   CB_TARGET_MASK, CB_SHADER_MASK, SPI_PS_INPUT_ENA/ADDR, SPI_PS_IN_CONTROL,
+   SPI_SHADER_POS/COL_FORMAT, CB_COLOR_CONTROL, PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL.
+   fails -> one of those 10; clean -> the 11 same-value writes (0x1F990C). */
+#define STATE_SEC4_MASK 0x66F3
 
 #define CPU_FLIP        1
 
@@ -1444,8 +1452,35 @@ static void build_ssharp_pcf(uint32_t *s) {
 }
 
 // === DCB builder ===
+/* Section-4 context writes, in emit order, extracted from the compiled cut-4 path. */
+static const uint32_t g_sec4[21][2] = {
+    {0x08e, 0x0000000fu}, /*  0 CB_TARGET_MASK */
+    {0x08f, 0x0000000fu}, /*  1 CB_SHADER_MASK */
+    {0x191, 0x00000000u}, /*  2 SPI_PS_INPUT_CNTL_0 */
+    {0x1b1, 0x00000000u}, /*  3 SPI_VS_OUT_CONFIG */
+    {0x1b3, 0x00000302u}, /*  4 SPI_PS_INPUT_ENA */
+    {0x1b4, 0x00000302u}, /*  5 SPI_PS_INPUT_ADDR */
+    {0x1b6, 0x00000000u}, /*  6 SPI_PS_IN_CONTROL */
+    {0x1c3, 0x00000004u}, /*  7 SPI_SHADER_POS_FORMAT */
+    {0x1c4, 0x00000000u}, /*  8 SPI_SHADER_Z_FORMAT */
+    {0x1c5, 0x00000009u}, /*  9 SPI_SHADER_COL_FORMAT */
+    {0x202, 0x00cc0010u}, /* 10 CB_COLOR_CONTROL */
+    {0x203, 0x00000000u}, /* 11 DB_SHADER_CONTROL */
+    {0x1b8, 0x00000000u}, /* 12 SPI_BARYC_CNTL */
+    {0x204, 0x00080000u}, /* 13 PA_CL_CLIP_CNTL */
+    {0x206, 0x0000043fu}, /* 14 PA_CL_VTE_CNTL */
+    {0x207, 0x00000000u}, /* 15 PA_CL_VS_OUT_CNTL */
+    {0x292, 0x00000000u}, /* 16 PA_SC_MODE_CNTL_0 */
+    {0x2d5, 0x00000000u}, /* 17 VGT_SHADER_STAGES_EN */
+    {0x2f8, 0x00000000u}, /* 18 PA_SC_AA_CONFIG */
+    {0x1e0, 0x00000000u}, /* 19 CB_BLEND0_CONTROL */
+    {0x29d, 0x00000000u}, /* 20 VGT_DMA_SIZE */
+};
+
 /* Return early with the frame's fence tail at bisection point k (STATE_CUT). */
 #define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { \
+    for (int s4_i = 0; s4_i < 21; s4_i++) \
+        if ((STATE_SEC4_MASK >> s4_i) & 1) pm4_set_context_reg(b, g_sec4[s4_i][0], g_sec4[s4_i][1]); \
     for (int rw_i = 0; rw_i < STATE_REWRITE_N; rw_i++) \
         pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); \
     if (STATE_PAD_DW > 1) { pm4_emit(b, pm4_type3(PM4_NOP, STATE_PAD_DW - 1)); \
@@ -3301,7 +3336,9 @@ int main(void) {
         if (STATE_PAD_DW) { const char *m4 = " PAD_DW="; while (*m4) L[p++] = *m4++;
                             p += lg_i64(L+p, (long long)STATE_PAD_DW); }
         if (STATE_REWRITE_N) { const char *m5 = " REWRITE="; while (*m5) L[p++] = *m5++;
-                               p += lg_i64(L+p, (long long)STATE_REWRITE_N); } }
+                               p += lg_i64(L+p, (long long)STATE_REWRITE_N); }
+        if (STATE_SEC4_MASK) { const char *m6 = " SEC4="; while (*m6) L[p++] = *m6++;
+                               p += lg_hex(L+p, (unsigned long long)STATE_SEC4_MASK); } }
 #elif SKY_NO_DRAW
       { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif

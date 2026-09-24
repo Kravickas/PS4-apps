@@ -1,5 +1,5 @@
 ============================================================
-TEST: STATE_CUT 3 + 21 REWRITES (packet-count control)
+TEST: STATE_CUT 3 + SEC4 SUBSET 0x66F3
 ============================================================
 EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
 fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
@@ -19,13 +19,17 @@ removed). Cut points, verified in the preprocessed active path:
     21 registers, rule out size: halves are smaller, so a size threshold would
     make every half pass and point at a phantom register.
     Size control (cut 3 + one 63-dword NOP = 816 B): CLEAN. Not size.
-    THIS BUILD: cut 3 + 21 x SET_CONTEXT_REG PA_SU_SC_MODE_CNTL = 0 (the value it
-    already holds). Same 21 packets and 816 B as cut 4, no state change.
-    Check dcbsz=816 and "REWRITE=21" in the header.
-      fails -> the number of context-register writes per frame
-      clean -> specific register values; bisect the 10 that differ from
-               CLEAR_STATE (CB/shader masks, PS input enables, export formats,
-               CB_COLOR_CONTROL, PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL)
+    Packet-count control (cut 3 + 21 same-value rewrites, 816 B): CLEAN.
+    The cause is specific section-4 content.
+    THIS BUILD: cut 3 + the 10 section-4 writes that change a value vs
+    CLEAR_STATE (STATE_SEC4_MASK 0x66F3). Table g_sec4 was extracted from the
+    compiled cut-4 path. Header shows "SEC4=0x66f3", dcbsz should be 684.
+      fails -> one of those 10: CB_TARGET_MASK, CB_SHADER_MASK,
+               SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR, SPI_PS_IN_CONTROL,
+               SPI_SHADER_POS_FORMAT, SPI_SHADER_COL_FORMAT, CB_COLOR_CONTROL,
+               PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL
+      clean -> the 11 same-value writes (0x1F990C), incl. VGT_SHADER_STAGES_EN,
+               PA_SC_MODE_CNTL_0, VGT_DMA_SIZE - or an interaction
 
 Each run: check whether the submit ioctl goes to ~510000us at frame 513, and
 whether cpf freezes at ~548. Screen black - expected.
