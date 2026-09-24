@@ -1,26 +1,50 @@
 ============================================================
-*** IT IS A GLOBAL FLIP LIMIT: EXACTLY 547, EVERY TIME ***
+AUDIT FIXES (this build)
 ============================================================
-The four-buffer test answered cleanly:
+- Header trace buffer char L[96] held 5 lines: 90 bytes with measured values,
+  ~193 worst case (any negative return). Overflowed the stack on error paths;
+  adding one more line overflowed it always. Now L[256].
+- Teardown fence wait compared against fv, which is already one past the last
+  submit, so it never passed and always burned 250ms; with FENCE_SLOTS it could
+  wait on an unsubmitted slot. Now waits on g_last_fence/g_last_fv recorded at
+  the accepted submit. Teardown log prints fence= and want= from those.
+- MapComputeQueue comments said 4/12; hardware returned 5/13. Corrected.
+- Trace header now prints "scene cfg=". With empty EXTRAFLAGS the build is
+  DRAW_STOP 1 + BG_SKY_CLEAN: sky only, no floor/cube/shadow.
 
-    NUM_FRAMES=3   fnum stops at 547, failing flip on buffer 1
-    NUM_FRAMES=4   fnum stops at 547, failing flip on buffer 3
+Compile check (gcc -fsyntax-only -Wall -Wextra, freestanding): 0 errors in
+default, DRAW_STOP_OFF and DRAW_STOP=3. 92 warnings, all pre-existing:
+26 unused/set-but-unused variables, 66 misleading-indentation (one clamp macro
+plus loader one-liners, all semantically correct).
 
-  Same count, different buffer, identical outcome. NOT per-buffer - the
-  183-flips-per-buffer idea was a red herring.
+============================================================
+*** NEXT TEST: FENCE_SLOTS 256 ***
+============================================================
+  The counts rule out the obvious:
+      the game       969 frames, 16296 submits, 971 SubmitDone, ~969 flips
+      us at failure  547 frames,   547 submits,  547 SubmitDone,  547 flips
+  It does MORE of every one of those than we reach before failing.
 
-AND IT IS FLIPS, NOT TIME OR VBLANKS - separable from data already collected:
-      wait-free runs   547 flips at 60fps throughout   -> ~600 vblanks
-      mode-0 runs      547 flips, 512 fast + 35 slow   -> ~2342 vblanks
-  Same flip count with the vblank count differing 4x and the wall clock 3x
-  (9s vs 27s). The only invariant across every run this session is the number
-  of COMPLETED FLIPS.
+  What we do differently, per submit:
+      OUR FENCE IS ONE FIXED ADDRESS reused for all 547 frames.
+      THE GAME CARVES A FRESH FENCE PER SUBMIT, inside the leading NOP of the
+      command buffer itself (spec 20.4: ctx->fence_addr = cur[pad+0x10]).
 
-  EXACTLY 547, then the 548th never retires: fnum freezes, fpend and fgpu stick
-  at 1, fcur stops moving, the vblank counter keeps ticking.
+  Identified early, never tested. FENCE_SLOTS 256 rotates through 256 distinct
+  fence addresses, one page apart so no two share a cache line, each seeded to
+  fv-1 before use so a stale value cannot pass the wait.
 
-  (547 is prime - an odd size for a fixed kernel table, so the limit is more
-  likely something about the 548th flip than a 547-entry pool.)
+      failure moves or disappears -> the fixed fence address is implicated and
+                                     matching the game's per-submit fence is
+                                     the fix
+      still exactly 547           -> the fence address is innocent, and the
+                                     limit is in the submit path itself
+
+  Costs 1MB of ONION. Set FENCE_SLOTS 1 to restore the single fixed fence.
+  CPU_FLIP stays 1 for this run - it keeps the display out of the command
+  stream so the result is about the fence alone.
+
+  make      (no .py in the build)
 
 ============================================================
 *** NEXT TEST: CPU_FLIP - EOP FLIP vs CPU FLIP ***

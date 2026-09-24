@@ -78,7 +78,7 @@
    doorbell we ring is the standard AMD doorbell - the "submit with no ioctl
    per submission" mechanism - and switch_buffer is a pipe queue-switch
    request. pipe <= 6 and queue <= 7 are the hardware bounds, and the
-   queue + pipe*8 return is the flattened HQD index.
+   return is the flattened queue id: measured 5 and 13 for pipe0/1 queue4.
    Set to 0 to revert. mcq= in the log carries both return codes. */
 /* 0 = mode 0, ioctl 0xc0108102, THE GAME'S PATH.
    1 = mode 1, ioctl 0xc020810c, the wait-free path the game never uses. */
@@ -255,6 +255,27 @@
    with plain sceGnmSubmitCommandBuffers, wait for the fence, then flip from the
    CPU. That is the path this app used before the marker protocol went in, so
    it is known to work. */
+/* FENCE_SLOTS: how many distinct fence addresses to rotate through.
+
+   THE NEXT TEST, and the counts justify it: the game does MORE submits, MORE
+   SubmitDone and MORE flips than we reach before failing, so none of those is
+   the limit. What we do differently is REUSE ONE FENCE ADDRESS for every
+   frame. The game carves a FRESH fence per submit, inside the leading NOP of
+   the command buffer itself (ctx->fence_addr = cur[pad+0x10], new every time).
+
+   1   = the current behaviour, one fixed address
+   256 = rotate through 256 distinct addresses, one page apart
+
+       failure moves or disappears -> the fixed fence address is implicated,
+                                      and matching the game's per-submit fence
+                                      is the fix
+       still exactly 547           -> the fence address is innocent and the
+                                      limit is in the submit path itself
+
+   Slots are one page apart so no two fences share a cache line - a stale line
+   would otherwise confound the result. */
+#define FENCE_SLOTS     256
+
 #define CPU_FLIP        1
 
 #define FORCE_NO_FLIP   0
@@ -824,6 +845,8 @@ static int g_mcq0 = -99, g_mcq1 = -99;   /* MapComputeQueue return codes */
 static long long g_fs_num = -1, g_fs_pend = -1, g_fs_gpu = -1, g_fs_cur = -1;
 static long long g_vbl = -1, g_dp_us = 0;
 static int g_cpuflip_fail = 0, g_last_cpuflip = 0;   /* CPU_FLIP diagnostics */
+static volatile uint32_t *g_last_fence = 0;   /* fence slot of the last accepted submit */
+static uint32_t g_last_fv = 0;                /* value that submit will write */
 
 /* Keep an angle in [0, 2pi). The rotation accumulators grow without bound -
    after an hour at 60fps cam_yaw reaches ~4320 rad, where float32 has only
@@ -2866,14 +2889,18 @@ int main(void) {
         shadow_dcb_mem[i]=0;   /* unused - the shadow pass shares the main DCB */
     }
     /* Fences in ONION: the GPU writes them and the CPU polls them. */
-    volatile uint32_t *fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
+    /* FENCE_SLOTS pages, one fence per page so no two share a cache line.
+       fence_base is the allocation; `fence` is re-pointed each frame when
+       FENCE_SLOTS > 1, mirroring the game carving a fresh fence per submit. */
+    volatile uint32_t *fence_base=(volatile uint32_t*)gpu_alloc_typed(0x1000*FENCE_SLOTS,0x1000,MEM_TYPE_ONION);
+    volatile uint32_t *fence = fence_base;
     /* Separate fence for the keep-alive submits so they never interfere with
        the frame fence the flip path writes. */
     volatile uint32_t *keepalive_fence=(volatile uint32_t*)gpu_alloc_typed(0x1000,0x1000,MEM_TYPE_ONION);
     uint32_t keepalive_fv = 0;
     /* The EOP packet writes through these addresses. A NULL fence would make
        the GPU write to address 0, which faults the command processor. */
-    if (!fence) FATAL_EXIT("fence alloc failed");
+    if (!fence_base) FATAL_EXIT("fence alloc failed");
     /* Checkpoint slot for the GPU-side stage markers. ONION so the CPU sees
        the CP's writes immediately. Optional: if it fails, CPMARK compiles to
        nothing at runtime and the rest of the app is unaffected. */
@@ -3121,8 +3148,8 @@ int main(void) {
        the note at MAP_COMPUTE_QUEUES for why they may still matter.
        PRX guards (gnm 0x3cf0): pipe <= 6, queue <= 7, ring 4-byte aligned.
        ONION so the read-pointer the kernel writes is CPU-visible.
-       Returns queue + pipe*8 on success (gnm 0x3dcf: lea eax,[r15+rbx*8]), so
-       pipe0/queue4 -> 4 and pipe1/queue4 -> 12. Errors are 0x80d170xx, which
+       Returns lea eax,[r15+rbx*8] (gnm 0x3dcf); measured 5 and 13 on hardware, so
+       r15 is not the raw queue index (queue+1 fits both). Errors are 0x80d170xx, which
        are negative as int32, so >= 0 separates id from failure cleanly and
        Unmap gets exactly the id Map returned. */
     {
@@ -3193,8 +3220,29 @@ int main(void) {
 #if WAITFREE_SUBMIT
             if (mode_set != 0) { mode_set = gnm_set_mode(1); mode_now = gnm_get_mode(); }
 #endif
-    { char L[96]; int p=0;
+    { char L[256];  /* 5 lines, worst ~193 bytes */ int p=0;
       g_hw_ok = sceGnmDebugHardwareStatus(0);   /* baseline while healthy */
+      const char *mc = "scene cfg="
+#if defined(DRAW_STOP_OFF)
+          "DRAW_STOP_OFF(full scene+shadow)"
+#elif defined(DRAW_STOP)
+          "DRAW_STOP"
+#elif defined(RT_TEST)
+          "RT_TEST"
+#elif defined(MINIMAL_TEST)
+          "MINIMAL_TEST"
+#else
+          "unknown"
+#endif
+          ;
+      while (*mc) L[p++] = *mc++;
+#if defined(DRAW_STOP) && !defined(DRAW_STOP_OFF)
+      p += lg_i64(L+p, (long long)DRAW_STOP);
+#endif
+#if defined(BG_SKY_CLEAN)
+      { const char *m2 = " BG_SKY_CLEAN"; while (*m2) L[p++] = *m2++; }
+#endif
+      L[p++] = '\n';
       const char *mq = "mapcomputequeue=";
       while (*mq) L[p++] = *mq++;
       p += lg_i64(L+p, (long long)g_mcq0); L[p++]=' ';
@@ -3243,6 +3291,15 @@ int main(void) {
     static unsigned char sysevent[8192];
     while (running) {
         int bi=frame%NUM_FRAMES;
+#if FENCE_SLOTS > 1
+        /* A FRESH FENCE ADDRESS THIS FRAME, as the game does per submit.
+           Each slot is its own page. The slot must be seeded BELOW the value
+           we are about to wait for, or the wait would pass instantly on a
+           stale value from 256 frames ago. */
+        fence = (volatile uint32_t*)((char*)fence_base
+                                     + (unsigned long)(frame % FENCE_SLOTS) * 0x1000);
+        *fence = fv - 1;
+#endif
 
         /* Section timing to locate the per-frame stall. */
         /* Decide NOW whether this frame will be logged, so the 14 timestamps
@@ -3902,6 +3959,10 @@ int main(void) {
                                                             video, bi, 1, (int64_t)frame);
             }
             }
+            if (saf_ret == 0) {
+                g_last_fence = fence;
+                g_last_fv = fv + BATCH_FRAMES - 1;
+            }
             t_saf = tstamp();
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
@@ -4384,9 +4445,11 @@ int main(void) {
 
     /* Our own EOP fence: the last submitted frame has actually retired.
        ~250 waits x ~1ms = ~250ms, then proceed regardless. */
+    /* Wait on the slot and value actually submitted last: fv is already one past
+       it, and with FENCE_SLOTS > 1 `fence` may point at an unsubmitted slot. */
     int td_fence=0;
-    if (!gpu_dead)
-        for (; td_fence<250 && *fence < fv; td_fence++) sceKernelUsleep(1000);
+    if (!gpu_dead && g_last_fence)
+        for (; td_fence<250 && *g_last_fence < g_last_fv; td_fence++) sceKernelUsleep(1000);
 
     /* Let queued flips drain before pulling the buffers out from under them.
        ~250ms, then proceed. */
@@ -4406,8 +4469,8 @@ int main(void) {
       LP(" flipwait="); p+=lg_i64(L+p,td_flip);
       LP(" gpudead="); p+=lg_i64(L+p,gpu_dead);
       LP(" pend="); p+=lg_i64(L+p,td_pend);
-      LP(" fence="); p+=lg_u64(L+p,(unsigned long long)*fence);
-      LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv); L[p++]='\n';
+      LP(" fence="); p+=lg_u64(L+p,(unsigned long long)(g_last_fence ? *g_last_fence : 0));
+      LP(" want="); p+=lg_u64(L+p,(unsigned long long)g_last_fv); L[p++]='\n';
       #undef LP
       trace_line(L,p); }
     /* Order matters: delete the flip event BEFORE unregistering the buffers it
