@@ -282,6 +282,11 @@
    survives past 547 -> the draw is implicated; still 547 -> it is not. */
 #define SKY_NO_DRAW     1
 
+/* Leading tag + checkpoints + fence only: no context control, no state, no draw.
+   SKY_NO_DRAW still wedged at 548 completed frames, so the draw is innocent.
+   Still 548 here -> DCB content is irrelevant, it is the submit path itself. */
+#define EMPTY_FRAME     1
+
 #define CPU_FLIP        1
 
 #define FORCE_NO_FLIP   0
@@ -1440,6 +1445,13 @@ static uint32_t build_dcb(struct PM4Builder *b,
     CPMARK(b, 0x10);   /* main: entered */
     pm4_init_default_hw_state(b);
     CPMARK(b, 0x11);   /* main: hw state done */
+
+#if EMPTY_FRAME
+    CPMARK(b, 0x1F);
+    if (no_flip) pm4_event_write_eop(b, fence, fv);
+    else         pm4_prepare_flip(b, fence, fv);
+    return b->off * 4;
+#endif
 
 #ifdef MINIMAL_TEST
     /* DIAGNOSTIC (opt-in: -DMINIMAL_TEST): skip ALL draws. GPU-DMA-fill the
@@ -3250,7 +3262,9 @@ int main(void) {
 #if defined(BG_SKY_CLEAN)
       { const char *m2 = " BG_SKY_CLEAN"; while (*m2) L[p++] = *m2++; }
 #endif
-#if SKY_NO_DRAW
+#if EMPTY_FRAME
+      { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }
+#elif SKY_NO_DRAW
       { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif
       L[p++] = '\n';

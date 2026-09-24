@@ -1,20 +1,23 @@
 ============================================================
-TEST: SKY_NO_DRAW
+TEST: EMPTY_FRAME
 ============================================================
-FENCE_SLOTS 256 result: still exactly 547 (cpf frozen at 547, fence timeouts
-every frame). Post-stall fence= values were the CPU seed, not GPU writes.
-Fence address innocent; FENCE_SLOTS back to 1.
+SKY_NO_DRAW result: zero draws, still wedged at 548 completed frames (cpf
+frozen at 548, fence timeouts). The sky draw is innocent.
 
-Trace header: "scene cfg=DRAW_STOP1 BG_SKY_CLEAN" - every hardware run has
-been sky-only. The frame is state setup plus ONE draw (pm4_draw_index_auto,
-BG_VERTS). SKY_NO_DRAW 1 skips only that packet; all state, shaders,
-checkpoints and the fence tail are unchanged. Screen will be black - expected.
+Drain probe (left over from an earlier session, fires after 5 slow submits,
+has run in every mode-0 log):
+    514-518   back-to-back        submit ioctl ~510000 us
+    519-530   after 10s idle, 600ms cadence   12-25 us, all 12 fast
+    531+      back-to-back        ~510000 us immediately
+Not "512 submits ever": after the first 512, one non-blocking submit per
+~500ms, and idle time does not bank more. Consumed with plain
+SubmitCommandBuffers (CPU_FLIP, no flip attached): per submit, not per flip.
+The 548 wedge is separate: same count with the 10s pause in between.
 
-    survives past 547 -> the sky draw is implicated
-    still stops at 547 -> the draw is innocent; it is state/submit plumbing
-
-Also fixed: MINIMAL_TEST did not compile (1-arg pm4_prepare_flip) and ignored
-no_flip. All five configs now compile with 0 errors.
+EMPTY_FRAME 1: leading tag + checkpoints + init state (frame 0 only) + fence.
+No context control, no state setup, no draw. Screen black - expected.
+    still 548 -> DCB content is irrelevant, it is the submit path
+    moves     -> something in the state setup is involved
 
 ============================================================
 AUDIT FIXES (this build)
