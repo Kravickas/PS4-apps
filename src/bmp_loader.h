@@ -6,6 +6,12 @@ typedef struct {
     unsigned long size; /* total bytes */
 } BmpTexture;
 
+/* Row scratch buffer in ordinary cached process memory. It used to come from
+   alloc_fn, i.e. GARLIC for GPU textures, and the conversion loop read it back
+   byte by byte - uncached CPU reads, ~3 per pixel. */
+#define BMP_MAX_W 8192
+static unsigned char g_bmp_row[BMP_MAX_W * 4 + 16];
+
 static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned long), BmpTexture *out) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return -1;
@@ -25,6 +31,7 @@ static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned 
     if (h < 0) { h = -h; flip = 0; } /* top-down BMP */
 
     if (compr != 0 || (bpp != 24 && bpp != 32)) { sceKernelClose(fd); return -4; }
+    if (w <= 0 || w > BMP_MAX_W || h <= 0) { sceKernelClose(fd); return -7; }
 
     /* Allocate RGBA8 output */
     unsigned long out_size = (unsigned long)w * h * 4;
@@ -38,8 +45,7 @@ static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned 
 
     /* Read row by row, convert BGR(A) → RGBA, flip if needed */
     /* Allocate row buffer on heap for large textures */
-    unsigned char *row_buf = (unsigned char*)alloc_fn(stride_bmp + 16, 64);
-    if (!row_buf) { sceKernelClose(fd); return -6; }
+    unsigned char *row_buf = g_bmp_row;
     unsigned char *dst = (unsigned char*)pixels;
 
     for (int y = 0; y < h; y++) {

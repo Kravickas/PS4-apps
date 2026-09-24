@@ -1,24 +1,64 @@
 ============================================================
-LADDER: DRAW_STOP 2 (sky + floor), FLOOR_NO_DEPTH
+SHADER DUMP REVIEW  (build=floor-mvp-vs+rsrc1-fix, printed in the trace header)
 ============================================================
-Previous build (sky clear with depth write 0x76 + displacement in ONION):
-the trace stopped after the header lines - no frame-0 line. The displacement
-map had already been loaded and consumed before the header was written, so
-ONION was fine. The app died inside frame 0, which is the first time the GPU
-ever wrote this depth surface (before, the sky had writes off and the floor's
-LESS test failed on every pixel). Most likely a write outside the depth
-allocation: it is exactly 1920x1080x4 bytes, while DB_Z_INFO=3 selects tile
-mode index 0 (depth, 2D tiled), whose footprint is padded to whole tiles.
-Not verified: the game builds its depth-target registers from struct fields,
-so the decompile does not show the correct layout.
+1. shadPS4 crash, explained. The dump folder has vs_..._0.spv and
+   fs_0xcafe00e3_0.spv (sky) but NO fs_0xcafe0119_0.spv (floor): shadPS4 died
+   emitting the floor PS's SPIR-V. That run drew the floor with the sky's state,
+   NUM_INTERP=0, while the floor PS reads Param0 and Param1. shadPS4's
+   input_params slots for undefined inputs stay default (id 0, component_type
+   0), and EmitGetAttribute emits OpLoad(0,0) with no assert - the log just
+   stops. The floor VS/interpolator fix in the previous build removes that
+   state; shadPS4 could also return 0 for an undefined input instead of
+   emitting invalid SPIR-V.
 
-THIS BUILD:
-  sky   DB_DEPTH_CONTROL 0x72 (as in the run that went 1936 frames)
-  floor DB_DEPTH_CONTROL 0 (FLOOR_NO_DEPTH) - no depth test, no depth write
-  displacement map stays in ONION (cpu_alloc)
-Nothing writes depth. Header shows "... FLOOR_NO_DEPTH".
-    floor visible   -> floor draw is fine; depth becomes its own step
-    no floor        -> floor shader/vertices/descriptors, independent of depth
+2. PGM_RSRC1 register allocations. LLVM 18 cannot disassemble CI, so a small
+   CI decoder measured each embedded shader's max VGPR/SGPR (validated: exact
+   match with shadPS4's IR for the floor PS, sky PS and BG VS). SGPR need
+   includes +2 for VCC (LLVM getNumExtraSGPRs, all GFX < 10). Five were short:
+     floor PS          0x28D  56 V / 88 S   uses 64 V / 90 S  -> 0x2CF
+     MVP VS (sky, floor, shadow)  0x4B  48/16  uses 48/31     -> 0xCB
+     shadow-clear PS   0x0A   44 / 8        uses 44/12        -> 0x4A
+     full-scene sky PS (ps_dark via ps_bg)  12/16  uses 43/31 -> 0xCA
+     shadow PS         0x14A  44 / 48       uses 44/50        -> 0x18A
+   The floor PS WROTE v60-v63 outside its allocation. The shadow-clear PS and
+   the MVP VS are the first draw after checkpoint 0x21, where the full scene
+   hung in frame 0. All 15 PGM_LO bindings now fit.
+
+3. Descriptors: every desc range the floor PS reads ([8..15], [32..35],
+   [40..83]) is written. The layout comment's "light color at desc[20..23]"
+   is stale - code and shaders use desc[32..35].
+
+Header buffer grew to L[384]: the build line took the worst case to ~263 B.
+
+============================================================
+LADDER: DRAW_STOP 2 (sky + floor) - floor VS + load time
+============================================================
+Last run (PS4 photo): sky + a thin ragged line at ~87% screen height, full
+width, 59.96 fps. That line is the floor drawn WITHOUT a camera transform.
+
+WHY: with BG_SKY_CLEAN the sky binds g_vs_bg_gpu, a pass-through VS (shadPS4
+dump vs_0xaabbee03: Position0 = raw vertex at VertexId*48+80, no MVP). The
+floor draw only switched the PIXEL shader, so it inherited the pass-through
+VS: world coordinates used as clip space. A floor at y~-0.5 with +-0.75
+displacement lands around 75-87% down the screen, ragged by the displacement.
+
+FIX: before the floor draw, bind the GPU-MVP VS (vs, RSRC1 0x4B, 4 user SGPRs)
+and the full-scene interpolator state. Diffing the compiled state at the floor
+draw, sky config vs full-scene config, gives exactly:
+    SPI_PS_INPUT_CNTL_1 1, SPI_VS_OUT_CONFIG 1, SPI_PS_INPUT_ENA/ADDR 0x02,
+    SPI_PS_IN_CONTROL 2   (the floor PS reads Param0 and Param1)
+After the fix there are no remaining context differences at the floor draw.
+The sky itself is unchanged.
+
+SLOW LOAD (100% CPU): bmp_load allocated its row scratch buffer with the
+caller's allocator - GARLIC for the albedo and normal maps - and the
+conversion loop read it back byte by byte: ~100M uncached reads for two
+4096x4096 files (it also leaked one direct-memory block per call). The row
+buffer is now a static buffer in normal cached memory (max width 8192; wider
+files return -7 and the fallback texture is used).
+
+Still true: nothing writes depth (sky 0x72, floor 0 via FLOOR_NO_DEPTH).
+Note: the build has no -O flag (clang default -O0), which slows every CPU loop.
 
 ============================================================
 FIX: WRITE_VGT_STAGES_DMA 0

@@ -151,6 +151,9 @@
    (sky clear had writes off), so the floor's LESS test failed: no floor. The
    first depth write (clear enabled) crashed in frame 0. Depth = separate step. */
 #define FLOOR_NO_DEPTH 1
+
+/* Printed in the trace header so logs from different builds can be told apart. */
+#define BUILD_TAG "floor-mvp-vs+rsrc1-fix"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -1571,8 +1574,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
        Rationale: testing if order of execution is the issue (user hint). */
 
     // VS: GPU-MVP, user_sgpr=4 (s[0:3]=V#). No sun in VS — PS handles lighting.
-    // PGM_RSRC1 = 0x4B: vgpr_field=11 (46 VGPRs — shader uses up to v45),
-    // sgpr_field=1 (16 SGPRs). RSRC1=4 (20 VGPRs) faults on real hardware
+    // PGM_RSRC1 = 0xCB: vgpr_field=11 (48 VGPRs),
+    // sgpr_field=3 (32 SGPRs: s0-s28 + VCC). RSRC1=4 (20 VGPRs) faults on real hardware
     // because the shader accesses v20-v45 beyond the allocation.
 #ifdef RT_TEST
     /* RT_TEST: minimal fullscreen-triangle VS — no vertex fetch, no V#.
@@ -1595,7 +1598,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
 #else
     { uint64_t a=(uint64_t)(uintptr_t)vs;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x4Bu,(4u<<1)};
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0xCBu,(4u<<1)};
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4);
       /* VS user data set per-draw below */ }
 #endif
@@ -1792,8 +1795,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
 #else
     { uint64_t a=(uint64_t)(uintptr_t)ps_bg;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(1u<<6)|2u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(3u<<6)|10u,(2u<<1)};
+      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); /* ps_dark: 43 VGPRs, s0-s28 + VCC -> 44 / 32 */
       /* Sky PS needs desc ptr for sun position */
       uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                       (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
@@ -1840,15 +1843,29 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Floor uses its own V# (floor_v) pointing at vb+FLOOR_MVP_OFF where MVP is mirrored
     // and floor verts are at V#+80.
     if (ps_floor && floor_v) {
-        /* Switch PS to floor PS CAFE0119. PGM_RSRC1 = 0x28D (88 SGPRs, 56 VGPRs). */
+        /* Floor PS CAFE0119: uses v0-v63, s0-s87 + VCC -> 64 VGPRs, 96 SGPRs (0x2CF). */
         uint64_t a=(uint64_t)(uintptr_t)ps_floor;
-        uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x28Du,(2u<<1)};
+        uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x2CFu,(2u<<1)};
         pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
         uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                         (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
         pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2);
 
         /* Depth for floor: less-than, write enabled (so cube z-tests correctly against floor) */
+#if defined(BG_CLEAN_VS) || defined(BG_CLEAN_SKY) || defined(BG_SKY_CLEAN)
+        /* The sky bound the pass-through BG VS (no MVP) and a 0-interpolant PS
+           setup. The floor needs the GPU-MVP VS and the full-scene interpolator
+           state - the same values the #else path of the VS/SPI setup writes. */
+        { uint64_t va=(uint64_t)(uintptr_t)vs;
+          uint32_t vr[4]={(uint32_t)(va>>8),(uint32_t)(va>>40),0xCBu,(4u<<1)};
+          pm4_set_sh_regs(b,SH_VS_PGM_LO,vr,4); }
+        pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
+        pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0+1,1);
+        pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,1);
+        pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
+        pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
+        pm4_set_context_reg(b,CTX_NUM_INTERP,2);
+#endif
 #if FLOOR_NO_DEPTH
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
 #else
@@ -1949,7 +1966,7 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     /* VS program — same as main pass. PGM_RSRC1=0x4B (46 VGPRs, 16 SGPRs);
        see main-pass note — the shader uses up to v45. */
     { uint64_t a=(uint64_t)(uintptr_t)vs;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x4Bu,(4u<<1)};
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0xCBu,(4u<<1)};
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
 
     /* Scissors/viewport — shadow map size */
@@ -2080,12 +2097,12 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0);   /* no culling for fullscreen quad */
     { uint64_t a=(uint64_t)(uintptr_t)ps_clear;
       /* Clear PS uses v40..v43 for output — needs 44 VGPRs allocated.
-         VGPR field = ceil(44/4) - 1 = 10. SGPR field = 0 (only s0, s1 = desc ptr).
-         PGM_RSRC1 = (0<<6) | 10 = 0x0A. user_sgpr=2 in RSRC2.
+         VGPR field = ceil(44/4) - 1 = 10. The binary uses s0-s9 + VCC = 12 SGPRs,
+         so SGPR field = 1 (16). PGM_RSRC1 = (1<<6) | 10 = 0x4A. user_sgpr=2 in RSRC2.
          (Previous version had PGM_RSRC1=0 = 4 VGPRs — writes to v40+ went nowhere,
          so EXP read uninitialized garbage → shadow map filled with 0, not 1.0,
          making everything inside the light frustum read as "shadowed".) */
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x0Au,(2u<<1)};
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x4Au,(2u<<1)};
       pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
       uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                       (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
@@ -2094,9 +2111,9 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_draw_index_auto(b, BG_VERTS);   /* 6 verts = 2 triangles = fullscreen quad */
 
     /* === Draw 2: cube with shadow PS that exports NDC.z ===
-       Switch PS to ps_shadow (NDC.z exporter). PGM_RSRC1 = 0x14A (48 SGPR / 44 VGPR). */
+       Switch PS to ps_shadow (NDC.z exporter). s0-s47 + VCC -> 56 SGPRs, 44 VGPRs (0x18A). */
     { uint64_t a=(uint64_t)(uintptr_t)ps_shadow;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x14Au,(2u<<1)};
+      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x18Au,(2u<<1)};
       pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
       uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                       (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
@@ -3350,8 +3367,9 @@ int main(void) {
 #if WAITFREE_SUBMIT
             if (mode_set != 0) { mode_set = gnm_set_mode(1); mode_now = gnm_get_mode(); }
 #endif
-    { char L[256];  /* 5 lines, worst ~193 bytes */ int p=0;
+    { char L[384];  /* build + scene + 5 lines, worst ~263 bytes */ int p=0;
       g_hw_ok = sceGnmDebugHardwareStatus(0);   /* baseline while healthy */
+      { const char *bt = "build=" BUILD_TAG "\n"; while (*bt) L[p++] = *bt++; }
       const char *mc = "scene cfg="
 #if defined(DRAW_STOP_OFF)
           "DRAW_STOP_OFF(full scene+shadow)"
