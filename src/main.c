@@ -285,7 +285,17 @@
 /* Leading tag + checkpoints + fence only: no context control, no state, no draw.
    SKY_NO_DRAW still wedged at 548 completed frames, so the draw is innocent.
    Still 548 here -> DCB content is irrelevant, it is the submit path itself. */
-#define EMPTY_FRAME     1
+#define EMPTY_FRAME     0
+
+/* Bisect the state setup (SKY_NO_DRAW still on). EMPTY_FRAME ran 6560 frames
+   clean; the full state (0) hits the 512 stall and the 548 wedge.
+   Cut points, emitting everything before them:
+     1 after CONTEXT_CONTROL
+     2 after SH/scissor/viewport/DB regs, before CB_COLOR0 (calls 1-31)
+     3 after CB_COLOR0_BASE x14 + the size NOP
+     4 after the CB/PA/SPI context regs, before UCONFIG
+     5 after UCONFIG, before the SH user data */
+#define STATE_CUT       2
 
 #define CPU_FLIP        1
 
@@ -1426,6 +1436,10 @@ static void build_ssharp_pcf(uint32_t *s) {
 }
 
 // === DCB builder ===
+/* Return early with the frame's fence tail at bisection point k (STATE_CUT). */
+#define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { CPMARK(b, 0x1F); \
+    if (no_flip) pm4_event_write_eop(b, fence, fv); else pm4_prepare_flip(b, fence, fv); \
+    return b->off * 4; } } while (0)
 static uint32_t build_dcb(struct PM4Builder *b,
     const void *vs, const void *ps, const void *ps_bg, const void *ps_null,
     const void *ps_floor,
@@ -1475,6 +1489,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
 #endif
 
     pm4_context_control(b);
+    STATE_CUT_POINT(1);
 
     /* Shadow pass moved to end of DCB — see after model draw below.
        Rationale: testing if order of execution is the issue (user hint). */
@@ -1582,6 +1597,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
 #endif
+    STATE_CUT_POINT(2);
 
     // Color — render directly to display FB (BGRA, sRGB).
     { uint32_t c=(uint32_t)((uint64_t)(uintptr_t)color>>8);
@@ -1589,6 +1605,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
         0x09A8u,0,0,0,0,0,0,0,0,0};
       pm4_set_context_regs(b,CTX_CB_COLOR0_BASE,r,14);
       pm4_emit(b,0xC0001000u); pm4_emit(b,DISPLAY_W|(DISPLAY_H<<16)); }
+    STATE_CUT_POINT(3);
 
     pm4_set_context_reg(b,CTX_COLOR_TARGET_MASK,0xF);
     pm4_set_context_reg(b,CTX_COLOR_SHADER_MASK,0xF);
@@ -1659,8 +1676,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_AA_CONFIG,0);
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
     pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
+    STATE_CUT_POINT(4);
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
+    STATE_CUT_POINT(5);
 
     // Draw 1: BG quad with sky PS (sun disc)
 #ifdef RT_TEST
@@ -3264,6 +3283,8 @@ int main(void) {
 #endif
 #if EMPTY_FRAME
       { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }
+#elif STATE_CUT
+      { const char *m3 = " STATE_CUT="; while (*m3) L[p++] = *m3++; L[p++] = (char)('0' + STATE_CUT); }
 #elif SKY_NO_DRAW
       { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
 #endif

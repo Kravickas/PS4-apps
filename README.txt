@@ -1,23 +1,25 @@
 ============================================================
-TEST: EMPTY_FRAME
+TEST: STATE_CUT 2 (bisecting the state setup)
 ============================================================
-SKY_NO_DRAW result: zero draws, still wedged at 548 completed frames (cpf
-frozen at 548, fence timeouts). The sky draw is innocent.
+EMPTY_FRAME result: 6560 frames at 60fps, submit ioctl ~15us throughout, no
+fence timeout, cpf == f, fnum 6561. NO 512 stall, NO 548 wedge.
+So OUR COMMAND BUFFER CONTENT causes both. The difference from SKY_NO_DRAW is
+only the state setup between checkpoint 0x11 and the (removed) draw.
 
-Drain probe (left over from an earlier session, fires after 5 slow submits,
-has run in every mode-0 log):
-    514-518   back-to-back        submit ioctl ~510000 us
-    519-530   after 10s idle, 600ms cadence   12-25 us, all 12 fast
-    531+      back-to-back        ~510000 us immediately
-Not "512 submits ever": after the first 512, one non-blocking submit per
-~500ms, and idle time does not bank more. Consumed with plain
-SubmitCommandBuffers (CPU_FLIP, no flip attached): per submit, not per flip.
-The 548 wedge is separate: same count with the 10s pause in between.
+STATE_CUT emits the state up to a cut point, then the fence tail (draw still
+removed). Cut points, verified in the preprocessed active path:
+    1  CONTEXT_CONTROL only
+    2  + SH regs, scissor/vport, viewport, DB regs      <- THIS BUILD
+    3  + CB_COLOR0_BASE x14 (display framebuffer) + size NOP
+    4  + CB/PA/SPI context regs
+    5  + UCONFIG (primitive type, instances)
+    0  full state (= the failing SKY_NO_DRAW frame)
 
-EMPTY_FRAME 1: leading tag + checkpoints + init state (frame 0 only) + fence.
-No context control, no state setup, no draw. Screen black - expected.
-    still 548 -> DCB content is irrelevant, it is the submit path
-    moves     -> something in the state setup is involved
+    clean (no 512, no 548) -> culprit is in 3..5; next run STATE_CUT 3
+    fails                  -> culprit is in 1..2; next run STATE_CUT 1
+
+Each run: check whether the submit ioctl goes to ~510000us at frame 513, and
+whether cpf freezes at ~548. Screen black - expected.
 
 ============================================================
 AUDIT FIXES (this build)
