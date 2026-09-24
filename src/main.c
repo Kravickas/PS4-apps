@@ -295,7 +295,7 @@
      3 after CB_COLOR0_BASE x14 + the size NOP
      4 after the CB/PA/SPI context regs, before UCONFIG
      5 after UCONFIG, before the SH user data */
-#define STATE_CUT       3
+#define STATE_CUT       4
 
 #define CPU_FLIP        1
 
