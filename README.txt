@@ -1,14 +1,13 @@
 ============================================================
-RESULT + NEXT: FULL SCENE
+LADDER: DRAW_STOP 2 (sky + floor)
 ============================================================
-WRITE_VGT_STAGES_DMA 0 on the real sky frame: 1744 frames, dt 16.4-16.8 ms,
-submit ioctl ~15 us, no fence timeout, cpf == f, fnum == f+1, fpend 0.
-No 512 stall, no 548 wedge. FIXED.
+DRAW_STOP 1 (sky) with WRITE_VGT_STAGES_DMA 0: 1744 frames clean, 60 fps.
+Full scene tried out of order: GPU hung in frame 0 at checkpoint 0x21
+(shadow: hw state done) - recorded for the shadow step.
 
-THIS BUILD: DRAW_STOP_OFF (sky, floor, cube, shadow pass). Nothing else
-changed. The full scene writes the same 60 context registers as the clean sky
-frame (values differ) and no VGT_SHADER_STAGES_EN / VGT_DMA_SIZE anywhere.
-Header shows "DRAW_STOP_OFF(full scene+shadow) NO_VGT_STAGES_DMA".
+THIS BUILD: DRAW_STOP 2 - sky + floor, no cube, no shadow pass.
+Header shows "DRAW_STOP2 BG_SKY_CLEAN NO_VGT_STAGES_DMA".
+Next rungs: 3 (+cube), then DRAW_STOP_OFF (+shadow).
 
 ============================================================
 FIX: WRITE_VGT_STAGES_DMA 0

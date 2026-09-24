@@ -142,10 +142,10 @@
      -DDRAW_STOP_OFF   full scene + shadow
      -DRT_TEST         back to the gradient/fulltri diagnostic
      -DMINIMAL_TEST    GPU-DMA magenta, no draws */
-/* Full scene: sky, floor, cube, shadow pass. The sky-only frame ran 1744 frames
-   clean with WRITE_VGT_STAGES_DMA 0; the full scene writes the same 60 context
-   registers. Remove this line to go back to sky-only. */
-#define DRAW_STOP_OFF 1
+/* Ladder, one step at a time: 1 sky (clean, 1744 frames) -> 2 +floor -> 3 +cube
+   -> DRAW_STOP_OFF +shadow. Full scene tried early: GPU hung in frame 0 at
+   checkpoint 0x21 (shadow: hw state done). */
+#define DRAW_STOP 2
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
