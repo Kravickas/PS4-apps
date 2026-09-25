@@ -1,4 +1,54 @@
 ============================================================
+SHADOW MAP PROBE  (build=shadowmap-probe)
+============================================================
+shadowmap-init did not remove the dark rectangle. From the floor PS IR:
+    light clip = light_MVP(desc[48..63]) x world_pos
+    uv = 0.5 + 0.5*xy/w,  ref = clamp(z/w, 0, 1)
+    stored = sample(desc[40..47] T#, uv).x        (plain sample, ALU compare)
+    shadow = stored < ref ? 0 : 1,  1 outside w>0,  factor = 0.5 + 0.5*shadow
+The IR also confirms the shadow sample's T# comes from desc[40..47] (albedo
+64, normal 72). With the map filled to R=1.0, "stored < ref" cannot be true,
+and the blocks inside the rectangle mean the sampled values vary per texel -
+a uniform fill cannot do that. So at runtime the sampled memory does not hold
+the fill (or the run was not this build: no trace was sent).
+
+This build logs, to trace.log:
+    "smap init f=-1 ..."   before the main loop
+    "smap f=60 ..."        and every 1024 frames
+  smap=     shadow map address (CPU)
+  t40base=  the address the desc[40] T# actually points at
+  t0/tmid/tlast  three texels of the map (expected 0xff0000ff)
+  alb/nrm   floor albedo / normal texture addresses
+Send trace.log with the screenshots.
+
+============================================================
+SHADOW MAP INIT  (build=shadowmap-init)
+============================================================
+vs-pos-done-fix result: floor renders in perspective, textured, 12310 frames
+at 60 fps, no slow submits, no fence timeouts.
+
+Dark rectangle with no caster: on DRAW_STOP rungs the shadow pass does not
+run, so the shadow map (RGBA8, desc[40..47]) kept gpu_alloc's zero fill. The
+floor PS compares with the PCF sampler (LessEqual, ClampBorder, white border):
+inside the light frustum every compare against 0 failed -> shadowed; outside it
+the white border (1.0) passed -> lit. A sharp moving rectangle = the light
+frustum footprint, drifting with the sun (auto_spin = 0: the camera is still,
+the sun is what moves each frame).
+Fix: fill the map with the shadow-clear value at allocation - ps_shadow_clear
+outputs (1,0,0,1) = 0xFF0000FF per texel - the same state the shadow pass's
+clear produces every frame.
+
+Known, not changed in this build:
+  - Floor textures have one mip level (T# LAST_LEVEL 0): distant floor aliases
+    and shimmers when the camera moves.
+  - FLOOR_NO_DEPTH: the displaced floor can overdraw itself in triangle order.
+    Fixed by the depth rung.
+  - build_static_vb comment says the displacement tiles "UV_MAX times (same
+    tile rate as albedo)", but DISP_TILES = 32 while UV_MAX = 100, on a 64x64
+    grid (6.25-unit cells vs 12.5-unit relief tiles): relief creases do not
+    line up with the albedo tiles.
+
+============================================================
 VS EXPORT FIX  (build=vs-pos-done-fix)
 ============================================================
 Last run: frame 0 never retired. cpm=0x1f (the CP reached the frame's LAST

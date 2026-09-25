@@ -153,7 +153,7 @@
 #define FLOOR_NO_DEPTH 1
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "vs-pos-done-fix"
+#define BUILD_TAG "shadowmap-probe"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -1089,6 +1089,35 @@ static void trace_line(const char *buf, unsigned long n){
 }
 /* trace_msg: write a plain string + fsync. */
 static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
+
+/* Runtime evidence for the shadow lookup: where the shadow map is, where the
+   desc[40] T# actually points, and what three of its texels hold. */
+static void trace_smap(const char *tag, long long f, const void *smap,
+                       unsigned long smap_bytes, const uint32_t *desc,
+                       const void *alb, const void *nrm) {
+    char L[320]; int p = 0;
+    #define SM(x) do { const char *_q = (x); while (*_q) L[p++] = *_q++; } while (0)
+    SM(tag); SM(" f="); p += lg_i64(L + p, f);
+    SM(" smap="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)smap);
+    if (desc) {
+        unsigned long long tb = ((unsigned long long)desc[40] << 8) |
+                                ((unsigned long long)(desc[41] & 0xFFu) << 40);
+        SM(" t40base="); p += lg_hex(L + p, tb);
+        SM(" t40w1="); p += lg_hex(L + p, desc[41]);
+    }
+    if (smap && smap_bytes >= 4) {
+        const volatile uint32_t *t = (const volatile uint32_t *)smap;
+        unsigned long n = smap_bytes / 4;
+        SM(" t0="); p += lg_hex(L + p, t[0]);
+        SM(" tmid="); p += lg_hex(L + p, t[n / 2 + SHADOW_W / 2]);
+        SM(" tlast="); p += lg_hex(L + p, t[n - 1]);
+    }
+    SM(" alb="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)alb);
+    SM(" nrm="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)nrm);
+    SM("\n");
+    #undef SM
+    trace_line(L, (unsigned long)p);
+}
 /* Allocate GPU-visible memory of an explicit PS4 direct-memory type.
      MEM_TYPE_ONION  (0) WB, CPU<->GPU coherent  - command buffers, fences,
                          anything the CP reads or the CPU polls.
@@ -2731,6 +2760,14 @@ int main(void) {
        so the 4K file-scope value applies consistently. ~64 MB allocation. */
     unsigned long shadow_size = (unsigned long)SHADOW_W * SHADOW_H * 4UL;
     void *shadow_depth = gpu_alloc(shadow_size, 0x100000);
+    /* Start from the shadow-clear value, not zeros: ps_shadow_clear writes
+       (1,0,0,1) = R 1.0 "nothing occluding" = 0xFF0000FF per RGBA8 texel. Without
+       the shadow pass (DRAW_STOP rungs) a zero map made every LessEqual compare
+       inside the light frustum fail - a dark rectangle with no caster. */
+    if (shadow_depth) {
+        uint32_t *sp = (uint32_t *)shadow_depth;
+        for (unsigned long i = 0; i < shadow_size / 4; i++) sp[i] = 0xFF0000FFu;
+    }
     /* GPU shadow pass writes to this buffer during rendering. */
     /* Light-space MVP will be written to vb+LIGHT_MVP_OFF each frame.
        Shadow VS reads from V# base + 0x00 (same as normal VS), but we swap
@@ -3460,6 +3497,7 @@ int main(void) {
     /* Event buffer for sceSystemServiceReceiveEvent. SDK struct is large; this
        is a safe over-allocation. We only read the first int32 (eventType). */
     static unsigned char sysevent[8192];
+    trace_smap("smap init", -1, shadow_depth, shadow_size, desc, floor_albedo_tex, floor_normal_tex);
     while (running) {
         int bi=frame%NUM_FRAMES;
 #if FENCE_SLOTS > 1
@@ -4566,6 +4604,8 @@ int main(void) {
             #undef LP
             trace_line(L,p);
         }
+        if (frame == 60 || (frame > 0 && (frame % 1024) == 0))
+            trace_smap("smap", (long long)frame, shadow_depth, shadow_size, desc, floor_albedo_tex, floor_normal_tex);
         frame++;
     }
 
