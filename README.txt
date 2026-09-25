@@ -1,4 +1,32 @@
 ============================================================
+VS EXPORT FIX  (build=vs-pos-done-fix)
+============================================================
+Last run: frame 0 never retired. cpm=0x1f (the CP reached the frame's LAST
+checkpoint) but fence=0 forever: the end-of-pipe event never fired, so a draw
+was stuck in the shader/raster pipeline, not in command processing.
+
+Cause: the MVP vertex shader's exports.
+    vs_bg_binary (works)     exp pos0 done=1 | exp param0
+    vs_shader_binary (hung)  exp pos0 done=0 | exp param0 | exp param1 done=1
+    vs_shadow_binary         same as vs_shader_binary
+radeonsi (si_shader.c, SI/CI): positions are exported first and done=1 is set
+on the LAST POSITION export; parameter exports never set it. Without a done
+position export the primitive assembler never proceeds. The floor now uses
+this VS (previous build), and the full scene's shadow pass uses vs_shadow -
+both hung in frame 0. shadPS4 does not model the bit, so it worked there.
+
+Patched both binaries (DONE is bit 11 of the export's first dword):
+    dword 51  0xf80000cf -> 0xf80008cf   pos0: set done
+    dword 56  0xf8000a1f -> 0xf800021f   param1: clear done
+Every embedded shader now follows the rule (VS: last pos done, no done on
+params; PS: last colour export done). ps_depthonly_binary has no export at
+all but is never uploaded or bound (dead).
+
+Not changed: all our PS colour exports use vm=0, while radeonsi sets
+valid_mask=1 on the last one. The sky PS runs on hardware with vm=0 and the
+source records a deliberate "VM=0 export fix", so it is left as is.
+
+============================================================
 SHADER DUMP REVIEW  (build=floor-mvp-vs+rsrc1-fix, printed in the trace header)
 ============================================================
 1. shadPS4 crash, explained. The dump folder has vs_..._0.spv and

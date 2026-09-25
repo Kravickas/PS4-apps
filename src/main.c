@@ -153,7 +153,7 @@
 #define FLOOR_NO_DEPTH 1
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "floor-mvp-vs+rsrc1-fix"
+#define BUILD_TAG "vs-pos-done-fix"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -525,6 +525,9 @@ static const uint32_t vs_fulltri_binary[] __attribute__((aligned(256))) = {
     0xCAFE0E02, 0x00000000,
 };
 
+/* Exports patched: pos0 now has DONE (was on param1). The last position export
+   must carry DONE for the primitive assembler to proceed (radeonsi: done=1 on the
+   last pos export, never on params). Without it frame 0 never retired on hardware. */
 static const uint32_t vs_shader_binary[] __attribute__((aligned(256))) = {
     0xBEEB03FF, 0x0000001C, 0x7E020280, 0xE0381000,
     0x80000C01, 0xE0381010, 0x80001001, 0xE0381020,
@@ -538,9 +541,9 @@ static const uint32_t vs_shader_binary[] __attribute__((aligned(256))) = {
     0x063A411D, 0x103C0514, 0x10400715, 0x063C411E,
     0x10400916, 0x063C411E, 0x10400B17, 0x063C411E,
     0x103E0518, 0x10400719, 0x063E411F, 0x1040091A,
-    0x063E411F, 0x10400B1B, 0x063E411F, 0xF80000CF,
+    0x063E411F, 0x10400B1B, 0x063E411F, 0xF80008CF,
     0x1F1E1D1C, 0x7E4602F2, 0xF800020F, 0x08072D2C,
-    0xF8000A1F, 0x06040302, 0xBF810000, 0xBF800000,
+    0xF800021F, 0x06040302, 0xBF810000, 0xBF800000,
     0x5362724F, 0x00726468, 0x0000F004, 0x00000000,
     0x47505508, 0xAABBEE02, 0x00000000,
 };
@@ -550,6 +553,7 @@ static const uint32_t vs_shader_binary[] __attribute__((aligned(256))) = {
 // compile and cache a distinct Vulkan pipeline for the shadow pass, so any
 // pipeline-cache collision between main-pass VS and shadow-pass VS — which could
 // produce double-rendering of the cube into shadow_depth — is eliminated.
+/* Same export DONE patch as vs_shader_binary. */
 static const uint32_t vs_shadow_binary[] __attribute__((aligned(256))) = {
     0xBEEB03FF, 0x0000001C, 0x7E020280, 0xE0381000,
     0x80000C01, 0xE0381010, 0x80001001, 0xE0381020,
@@ -563,9 +567,9 @@ static const uint32_t vs_shadow_binary[] __attribute__((aligned(256))) = {
     0x063A411D, 0x103C0514, 0x10400715, 0x063C411E,
     0x10400916, 0x063C411E, 0x10400B17, 0x063C411E,
     0x103E0518, 0x10400719, 0x063E411F, 0x1040091A,
-    0x063E411F, 0x10400B1B, 0x063E411F, 0xF80000CF,
+    0x063E411F, 0x10400B1B, 0x063E411F, 0xF80008CF,
     0x1F1E1D1C, 0x7E4602F2, 0xF800020F, 0x08072D2C,
-    0xF8000A1F, 0x05040302, 0xBF810000, 0xBF800000,
+    0xF800021F, 0x05040302, 0xBF810000, 0xBF800000,
     0x5362724F, 0x00726468, 0x0000F004, 0x00000000,
     0xCAFE5508, 0xBEEFEE02, 0x00000000,
 };
