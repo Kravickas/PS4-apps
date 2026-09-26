@@ -1,4 +1,26 @@
 ============================================================
+SUN AND MOON DISCS NONSTOP  (build=sun+moon-discs)
+============================================================
+Before: one disc = the active light (sun by day, anti-sun moon at night), so
+when the sun's centre crossed the horizon the half-visible sun vanished and
+the moon appeared half-risen (on the other side) - a pop.
+Now ps_dark (new source shaders/ps_dark.s, hash CAFE00E4, RSRC1 0xC2) draws
+both discs every frame at their true positions: sun desc[16..19] and moon
+desc[20..23] = (x, y, radius^2), colours x HDR in desc[84..87] / [88..91].
+The floor (drawn after the sky) hides whichever is below the horizon, so the
+sun sinks out of view. Sun disc colour follows its own elevation (amber held
+while it sets); moon disc stays cool blue.
+Lighting and shadows unchanged: the light (desc[12], shadow light MVP) is
+the body above the horizon, so a body below the horizon casts no shadow.
+Checks: float32 emulation of old vs new shader bit-exact for day (sun) and
+night (moon); CPU placement identical to the old disc at every angle by day
+and by night; through sunset the sun disc moves continuously (max 0.056 px
+per 2.5e-5 rad step) where the old one jumped to the moon. Loading screen and
+startup keep both discs off-screen with radius^2 > 0 (0 * inf = NaN).
+OpenOrbis build: 0 warnings, no import change, 13/13 shaders in the eboot
+match; changed functions: main, loading_progress, build_dcb.
+
+============================================================
 STARS: BLEND + NO FLICKER, OUTPUT DITHER  (build=stars-blend+dither)
 ============================================================
 Black stars during the fade: additive blending cannot darken, so the stars

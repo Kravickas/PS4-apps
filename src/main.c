@@ -137,14 +137,14 @@
 /* Linear HDR pipeline: the scene renders to RGBA16F, bloom runs at quarter
    resolution, the composite writes the sRGB display buffer (videoout format
    A8R8G8B8Srgb). Values are linear light; 1.0 = display white. */
-#define SUN_HDR 4.0f         /* sun disc colour = light colour x this (desc[19]) */
-#define MOON_HDR 2.0f        /* moon disc */
+#define SUN_HDR 4.0f         /* sun disc colour x this (desc[84]) */
+#define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
 #define BLOOM_INTENSITY 0.25f
 #define EXPOSURE 1.0f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "stars-blend+dither"
+#define BUILD_TAG "sun+moon-discs"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1438,13 +1438,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
 
     // Draw 1: BG quad with sky PS (sun disc)
-    { uint64_t a=(uint64_t)(uintptr_t)ps_bg;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(3u<<6)|10u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); /* ps_dark: 43 VGPRs, s0-s28 + VCC -> 44 / 32 */
-      /* Sky PS needs desc ptr for sun position */
-      uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
-                      (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
-      pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
+    {
+        uint64_t a = (uint64_t)(uintptr_t)ps_bg;
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (3u << 6) | 2u, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4); /* ps_dark: v0-v11, s0-s27 + VCC -> 12 / 32 */
+        /* Sky PS needs desc ptr for sun position */
+        uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
+                          (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
+        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 2);
+    }
     // VS s[0:3] = vertex/MVP V#. Sun read via s_buffer_load from V#+0x40
     pm4_set_sh_regs(b,SH_VS_USER_DATA_0,bg_v,4);
     pm4_draw_index_auto(b,BG_VERTS);
@@ -2157,12 +2159,16 @@ static void loading_progress(float frac, const char* msg, void* ud) {
         sh[1] = srgb_to_linear(0.20f);
         sh[2] = srgb_to_linear(0.55f);
         sh[3] = 0;
-        /* Sun NDC off-screen (no disc on loading screen) */
+        /* Sun and moon discs off-screen, radius^2 > 0 (no disc on the loading
+           screen), disc colours black. */
         float *snd = (float*)(c->desc + 16);
         snd[0]=10.0f; snd[1]=10.0f; snd[2]=0.0001f; snd[3]=0;
-        /* Sun color black so no bleed if anything samples it */
-        float *sc = (float*)(c->desc + 20);
-        sc[0]=0; sc[1]=0; sc[2]=0; sc[3]=0;
+        snd[4] = 10.0f;
+        snd[5] = 10.0f;
+        snd[6] = 0.0001f;
+        snd[7] = 0;
+        for (int q = 84; q < 92; q++)
+            c->desc[q] = 0;
     }
 
     /* BG quad: must cover full screen — keep normals any direction, shader just reads attr0 */
@@ -2506,7 +2512,18 @@ int main(void) {
       sun[0] = my_sin(3.14f)*0.766f; sun[1] = 0.643f; sun[2] = my_cos(3.14f)*0.766f; sun[3] = 0; }
     /* Initial sun screen pos (updated per frame in render loop) */
     { float *sd = (float*)(desc + 16);
-      sd[0] = 0.5f; sd[1] = 0.5f; sd[2] = 0.006f; sd[3] = 1.0f; }
+        sd[0] = 0.5f;
+        sd[1] = 0.5f;
+        sd[2] = 0.006f;
+        sd[3] = 0.0f;
+        /* moon disc off-screen, radius^2 > 0; disc colours zero until the loop */
+        sd[4] = 99.0f;
+        sd[5] = 99.0f;
+        sd[6] = 0.006f;
+        sd[7] = 0.0f;
+        for (int q = 84; q < 92; q++)
+            desc[q] = 0;
+    }
 
     /* Shadow map T# descriptor at desc[40:47] (byte offset 0xA0).
        DIAGNOSTIC: RGBA8 format (matches diagnostic CB_INFO=0x1A8).
@@ -3390,6 +3407,7 @@ int main(void) {
            for nearly all of the day. Darkening only kicks in during the
            final ~1-2 hours before sunset (or first 1-2 after sunrise). */
         float orig_sun_y = sun_y;
+        const float sun_dx = sun_x, sun_dy = sun_y, sun_dz = sun_z; /* unswapped, unit */
         int is_night = (sun_y < 0.0f);
         if (is_night) {
             sun_x = -sun_x;
@@ -3579,29 +3597,59 @@ int main(void) {
             g_stars_draw = fa > 0.0f;
         }
 
-        /* Project sun to NDC for sky disc rendering → desc[16:19] */
+        /* Sun and moon discs: desc[16..19] / desc[20..23] = (x, y, radius^2) and
+           colour x HDR in desc[84..87] / desc[88..91]. Both are drawn every
+           frame at their true positions; the floor (drawn after the sky) hides
+           whichever is below the horizon, so a setting sun sinks out of view
+           instead of vanishing when its centre crosses the horizon. Lighting
+           and shadows stay with the body above the horizon (desc[12], light
+           MVP). Placement as before: sun = direction x the day magnitude ramp,
+           moon = anti-sun x 0.69, both x 100. ps_dark: f = clamp(1 - d^2 /
+           radius^2, 0, 1)^2, d in aspect-corrected NDC (x * W/H, y). */
         {
             float *mvp = (float*)((char*)vb + MVP_OFF);
-            float *sun = (float*)(desc + 12);
-            float sx = sun[0]*100, sy2 = sun[1]*100, sz = sun[2]*100;
-            float cx = mvp[0]*sx + mvp[1]*sy2 + mvp[2]*sz + mvp[3];
-            float cy = mvp[4]*sx + mvp[5]*sy2 + mvp[6]*sz + mvp[7];
-            float cw = mvp[12]*sx + mvp[13]*sy2 + mvp[14]*sz + mvp[15];
-            float *sd = (float*)(desc + 16);
-            /* ps_dark: f = clamp(1 - d^2 / sd[2], 0, 1)^2 with d measured in
-               aspect-corrected NDC (x * W/H, y) - so sd[2] is the disc edge
-               radius SQUARED, in units of half the screen height. Moon keeps
-               the previous moon/sun ratio of this value (0.75). */
             const float sun_r = SUN_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
-            float disc_radius = sun_r * sun_r * (is_night ? 0.75f : 1.0f);
-            if (cw > 0.01f) {
-                sd[0] = (cx / cw) * ((float)DISPLAY_W / (float)DISPLAY_H); sd[1] = cy / cw;
-                sd[2] = disc_radius;
-                sd[3] = is_night ? MOON_HDR : SUN_HDR;
-            } else {
-                sd[0] = 99.0f; sd[1] = 99.0f;
-                sd[2] = disc_radius; sd[3] = 0.0f;
+            float mag = 0.98f + 0.40f * (orig_sun_y / 0.15f);
+            if (mag < 0.98f)
+                mag = 0.98f;
+            if (mag > 1.38f)
+                mag = 1.38f;
+            const float body[2][4] = {
+                {sun_dx * mag, sun_dy * mag, sun_dz * mag, sun_r * sun_r},
+                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, sun_r * sun_r * 0.75f}};
+            for (int k = 0; k < 2; k++) {
+                float bx = body[k][0] * 100, by = body[k][1] * 100, bz = body[k][2] * 100;
+                float cx = mvp[0] * bx + mvp[1] * by + mvp[2] * bz + mvp[3];
+                float cy = mvp[4] * bx + mvp[5] * by + mvp[6] * bz + mvp[7];
+                float cw = mvp[12] * bx + mvp[13] * by + mvp[14] * bz + mvp[15];
+                float* sd = (float*)(desc + 16 + 4 * k);
+                if (cw > 0.01f) {
+                    sd[0] = (cx / cw) * ((float)DISPLAY_W / (float)DISPLAY_H);
+                    sd[1] = cy / cw;
+                } else { /* behind the camera */
+                    sd[0] = 99.0f;
+                    sd[1] = 99.0f;
+                }
+                sd[2] = body[k][3];
+                sd[3] = 0.0f;
             }
+            /* Sun disc: amber at the horizon -> white at orig_sun_y 0.15 (the
+               light-colour ramp), held amber while it sets. Moon: cool blue. */
+            float kc = orig_sun_y / 0.15f;
+            if (kc < 0.0f)
+                kc = 0.0f;
+            if (kc > 1.0f)
+                kc = 1.0f;
+            float* sc = (float*)(desc + 84);
+            sc[0] = srgb_to_linear(1.00f) * SUN_HDR;
+            sc[1] = srgb_to_linear(0.64f + 0.36f * kc) * SUN_HDR;
+            sc[2] = srgb_to_linear(0.44f + 0.56f * kc) * SUN_HDR;
+            sc[3] = 0.0f;
+            float* mc = (float*)(desc + 88);
+            mc[0] = srgb_to_linear(0.52f) * MOON_HDR;
+            mc[1] = srgb_to_linear(0.64f) * MOON_HDR;
+            mc[2] = srgb_to_linear(0.84f) * MOON_HDR;
+            mc[3] = 0.0f;
         }
 
         /* Build main DCB (samples shadow_depth but doesn't write it).

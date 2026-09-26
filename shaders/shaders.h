@@ -1,6 +1,6 @@
 #pragma once
-/* GPU shader binaries (GCN2 / Sea Islands). The .s files next to the post
-   shaders and ps_stars are their llvm-mc sources (see README.txt). */
+/* GPU shader binaries (GCN2 / Sea Islands). The .s files next to the post,
+   ps_stars and ps_dark shaders are their llvm-mc sources (see README.txt). */
 #include "ps_blue.h"
 #include "ps_dark.h"
 #include "ps_floor.h"
