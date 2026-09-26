@@ -1,4 +1,30 @@
 ============================================================
+ANISO = RADEONSI, FULL SCENE  (build=aniso-radeonsi+full-scene)
+============================================================
+mips+fence-spin result: floor looks better.
+
+Aniso: the floor albedo/normal use the desc[8] sampler (MIMG SSAMP s12 <-
+desc[8..11]); it set only MAX_ANISO_RATIO. radeonsi si_create_sampler_state
+(GFX6/7, 16x = ratio 4 via si_tex_aniso_filter) also sets:
+    word0 ANISO_THRESHOLD = ratio>>1 = 2 @16, ANISO_BIAS = ratio = 4 @21
+    word1 PERF_MIP = ratio+6 = 10 @24
+    word2 DISABLE_LSB_CEIL = 1 @29 (<= VI), FILTER_PREC_FIX = 1 @30
+    (COMPAT_MODE / ANISO_OVERRIDE are VI+ only -> 0)
+Positions from gfx_7_2_sh_mask.h. New aniso sampler words:
+    w0 0x00820800  w1 0x0af00000  w2 0x68f00000
+PCF (shadow) sampler: + DISABLE_LSB_CEIL, FILTER_PREC_FIX (radeonsi sets
+them on every sampler for GFX6/7).
+
+Ladder, final rung: DRAW_STOP_OFF (full-scene sky path, shadow pass on).
+Compiled-frame diff vs DRAW_STOP 4 is exactly: sky VS g_vs_bg_gpu -> vs (MVP
+VS 0xCB with the identity MVP at vb+0), interpolators set once for 2 params
+(the floor's re-bind drops out), sky PS skyclean -> ps_dark (0xCA, M0 fixed,
+no textures). Depth still off for floor and cube (SCENE_NO_DEPTH).
+
+4K: not possible on this console - the original PS4 outputs at most 1080p;
+4K output is PS4 Pro only.
+
+============================================================
 FLOOR MIPMAPS + FENCE SPIN  (build=mips+fence-spin)
 ============================================================
 1) Floor albedo/normal mip chains (FLOOR_TEX_MIPS 9 -> 4096 down to 16x16).

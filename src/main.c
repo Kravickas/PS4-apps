@@ -145,7 +145,11 @@
 /* Ladder, one step at a time: 1 sky (clean, 1744 frames) -> 2 +floor -> 3 +cube
    -> 4 +shadow pass (same sky as 1-3) -> DRAW_STOP_OFF (full-scene sky path). Full scene tried early: GPU hung in frame 0 at
    checkpoint 0x21 (shadow: hw state done). */
-#define DRAW_STOP 4
+/* DRAW_STOP 4 (+shadow) confirmed on hardware. Final rung: the full-scene sky
+   path. Compiled-frame diff vs DRAW_STOP 4 is exactly: sky VS g_vs_bg_gpu ->
+   vs (MVP VS, identity MVP at vb+0), interpolators set once for 2 params, sky
+   PS skyclean -> ps_dark (0xCA, M0). Shadow pass unchanged. */
+#define DRAW_STOP_OFF 1
 
 /* Floor and cube without depth test/write. The depth buffer is never cleared
    on hardware (sky clear has writes off), so LESS fails against it; the first
@@ -158,7 +162,7 @@
 #define FLOOR_TEX_MIPS 9
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "mips+fence-spin"
+#define BUILD_TAG "aniso-radeonsi+full-scene"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -1491,16 +1495,20 @@ static void build_ssharp(uint32_t *s) {
    the dominant axis for best quality. */
 static void build_ssharp_aniso(uint32_t *s) {
     my_memset(s, 0, 16);
-    /* dword0: clamp_x/y/z=Wrap(0); MAX_ANISO_RATIO=4 (16:1) at bits[11:9] */
-    s[0] = (4u << 9);
-    /* dword1: max_lod=0xF00 (15.0) at bits[23:12] */
-    s[1] = (0xF00u << 12);
+    /* Field-for-field what radeonsi builds on GFX6/7 for 16x aniso
+       (si_create_sampler_state; positions from gfx_7_2_sh_mask.h):
+       dword0: clamp_x/y/z=Wrap(0); MAX_ANISO_RATIO=4 (16:1) @9;
+               ANISO_THRESHOLD = ratio>>1 = 2 @16; ANISO_BIAS = ratio = 4 @21 */
+    s[0] = (4u << 9) | (2u << 16) | (4u << 21);
+    /* dword1: max_lod=0xF00 (15.0) @12; PERF_MIP = ratio+6 = 10 @24 */
+    s[1] = (0xF00u << 12) | (10u << 24);
     /* dword2: xy_mag_filter=Aniso_Linear(3) at [21:20],
                xy_min_filter=Aniso_Linear(3) at [23:22],
                mip_filter=Linear(2) at [27:26] (SQ_TEX_Z_FILTER_LINEAR; radeonsi
                uses the Z_FILTER enum for MIP_FILTER). Single-level textures
                are unaffected: the T# bounds the levels. */
-    s[2] = (3u << 20) | (3u << 22) | (2u << 26);
+    /* + DISABLE_LSB_CEIL (<= VI) @29 and FILTER_PREC_FIX @30, as radeonsi. */
+    s[2] = (3u << 20) | (3u << 22) | (2u << 26) | (1u << 29) | (1u << 30);
 }
 
 /* Shadow-map sampler at desc[80..83] for the floor PS (CAFE100F).
@@ -1529,7 +1537,7 @@ static void build_ssharp_pcf(uint32_t *s) {
     /* raw0 high (dword1): max_lod=0xF00 (15.0) at bits [12..23] */
     s[1] = (0xF00u << 12);
     /* raw1 low (dword2): xy_mag=Bilinear(1) at [20..21], xy_min=Bilinear(1) at [22..23] */
-    s[2] = (1u << 20) | (1u << 22);
+    s[2] = (1u << 20) | (1u << 22) | (1u << 29) | (1u << 30); /* + DISABLE_LSB_CEIL, FILTER_PREC_FIX (radeonsi, GFX6/7) */
     /* raw1 high (dword3): border_color_type = White(2) at bits [30..31] */
     s[3] = (2u << 30);
 }
