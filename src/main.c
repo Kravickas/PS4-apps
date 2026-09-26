@@ -143,8 +143,14 @@
 #define BLOOM_INTENSITY 0.25f
 #define EXPOSURE 1.0f
 
+/* Floor surface (ps_floor): parallax occlusion mapping from the height map
+   and distance fog toward the sky gradient. */
+#define POM_DEPTH 0.1f       /* relief depth in world units (a texture tile is 4 units) */
+#define POM_FADE 30.0f       /* parallax fades to zero by this distance */
+#define FOG_EDGE_STOPS 6.64f /* fog transmittance at the floor edge = 2^-6.64 = 1% */
+
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "sun+moon-discs"
+#define BUILD_TAG "floor-pom+fog"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -321,6 +327,9 @@
 #define BG_VERTS        6
 #define CUBE_VERTS      36
 #define FLOOR_VERTS     24576 /* 64×64 grid of quads, 2 tris each = 8192 tris = 24576 verts */
+#define FLOOR_GRID 64
+#define FLOOR_HALF 200.0f   /* floor spans +-FLOOR_HALF in X and Z */
+#define FLOOR_UV_MAX 100.0f /* albedo / normal / height tiles across the floor */
 #define TOTAL_VERTS     (BG_VERTS + CUBE_VERTS + FLOOR_VERTS)
 #define VERT_STRIDE     48
 #define IDENT_OFF       0
@@ -638,11 +647,6 @@ static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtyp
 static void *gpu_alloc(unsigned long size, unsigned long align) {
     return gpu_alloc_typed(size, align, MEM_TYPE_GARLIC);
 }
-/* Cached memory for data the CPU reads back (GARLIC is write-combined: CPU reads
-   are uncached and very slow). */
-static void *cpu_alloc(unsigned long size, unsigned long align) {
-    return gpu_alloc_typed(size, align, MEM_TYPE_ONION);
-}
 
 static float my_sin(float x) {
     const float PI = 3.14159265358979f, TWO_PI = 6.28318530717959f;
@@ -653,12 +657,13 @@ static float my_sin(float x) {
 }
 static float my_cos(float x) { return my_sin(x + 1.57079632679490f); }
 
+/* Exact square root (sqrtss). The previous 6-step Newton from x/2 was only
+   accurate for roughly 0.1..1000 (1e6 -> 7855, 1e-6 -> 0.031). */
 static float my_sqrt(float x) {
-    if (x <= 0.0f) return 0.0f;
-    /* Newton-Raphson iteration for sqrt */
-    float g = x * 0.5f;
-    for (int i = 0; i < 6; i++) g = 0.5f * (g + x / g);
-    return g;
+    if (x <= 0.0f)
+        return 0.0f;
+    __asm__("sqrtss %1, %0" : "=x"(x) : "x"(x));
+    return x;
 }
 
 // === Geometry (static) ===
@@ -674,13 +679,8 @@ static const float uv_corners[4][2] = {{0,1},{1,1},{1,0},{0,0}};
 static const int tri_uv[2][3] = {{0,1,2},{0,2,3}};
 static const float face_shade[6] = {1.0f,0.5f,0.7f,0.8f,0.95f,0.55f};
 
-// Build vertex buffer per frame (CPU-side transform)
-// disp_tex/disp_w/disp_h: optional displacement texture (RGBA8, R = height [0,1]).
-//           NULL → no displacement (curve-only floor).
-//           Caller is responsible for stretching the texture's R range to
-//           [0, 255] before calling — keeps this function simple.
-static void build_static_vb(float *vb,
-                            const unsigned char *disp_tex, int disp_w, int disp_h) {
+// Build the static vertex buffer (sky quad, cube, floor).
+static void build_static_vb(float* vb) {
     // Identity matrix at offset 0
     float *id = (float*)((char*)vb + IDENT_OFF);
     my_memset(id, 0, 64);
@@ -723,130 +723,52 @@ static void build_static_vb(float *vb,
         }
     }
 
-    /* Floor plane: 32×32 grid of quads, ±200 world units in XZ.
-       Each vertex gets:
-         y = Y_BASE - (x²+z²)/(2R)         curve toward horizon
-           + (disp.r - 0.5) * DISP_SCALE   per-vertex displacement
-       Normals computed via finite differences of the displaced height field
-       so lighting matches the actual surface (not just the curve).
-       UV tiled 100× across full floor. */
+    /* Floor: FLOOR_GRID x FLOOR_GRID quads over +-FLOOR_HALF in XZ, curving
+       down toward the horizon: y = Y_BASE - (x^2 + z^2) / (2R), normal =
+       normalize(x/R, 1, z/R). UV = (x + HALF, z + HALF) * FLOOR_UV_MAX / (2 HALF),
+       so u runs along +x and v along +z (the tangent frame ps_floor uses). Surface
+       relief comes from parallax occlusion mapping in ps_floor: a 6.25-unit vertex
+       grid cannot carry texture-scale height detail (the old per-vertex sampling
+       read only 4 texels of the height map). */
     {
         float *fp = (float*)((char*)vb + FLOOR_DATA_OFF);
-        const int GRID = 64;
-        const float HALF = 200.0f;
-        const float UV_MAX = 100.0f;
         const float Y_BASE = -0.5f;
         const float R = 20000.0f;
-        const float DISP_SCALE = 1.5f;       /* ±0.75 world units of relief — clearly visible */
-        const float DISP_TILES = 32.0f;      /* 32 tiles across floor = 12.5 units per tile;
-                                                with 64×64 mesh = 2 verts per tile width */
-        const float STEP = (2.0f * HALF) / (float)GRID;
-        const float UV_STEP = UV_MAX / (float)GRID;
-
-        /* Inline helper: y(x, z) = curve + (sample - 0.5) * DISP_SCALE.
-           Displacement texture TILES UV_MAX times across the floor (same
-           tile rate as albedo) so each tile in the BMP becomes a real-world
-           tile on the floor. With UV_MAX=100 and 400-unit floor, each BMP
-           tile covers 4 world units. Texture R values are auto-stretched
-           to [0, 255] on load. */
-        #define COMPUTE_Y(out_y, xx, zz) do {                                  \
-            float _disp = 0.0f;                                                \
-            if (disp_tex && disp_w > 0 && disp_h > 0) {                        \
-                float _u = ((xx) + HALF) / (2.0f * HALF) * DISP_TILES;         \
-                float _v = ((zz) + HALF) / (2.0f * HALF) * DISP_TILES;         \
-                /* Wrap to [0, 1) — tile the texture */                        \
-                float _uf = _u - (float)((int)_u);                             \
-                float _vf = _v - (float)((int)_v);                             \
-                if (_uf < 0) _uf += 1.0f;                                      \
-                if (_vf < 0) _vf += 1.0f;                                      \
-                int _tx = (int)(_uf * (float)disp_w);                          \
-                int _tz = (int)(_vf * (float)disp_h);                          \
-                if (_tx < 0) _tx = 0; if (_tx >= disp_w) _tx = disp_w - 1;     \
-                if (_tz < 0) _tz = 0; if (_tz >= disp_h) _tz = disp_h - 1;    \
-                int _idx = (_tz * disp_w + _tx) * 4;                           \
-                _disp = ((float)disp_tex[_idx] / 255.0f - 0.5f) * DISP_SCALE;  \
-            }                                                                  \
-            (out_y) = Y_BASE - ((xx)*(xx) + (zz)*(zz)) / (2.0f * R) + _disp;   \
-        } while (0)
-
+        const float STEP = (2.0f * FLOOR_HALF) / (float)FLOOR_GRID;
+        const float UV_STEP = FLOOR_UV_MAX / (float)FLOOR_GRID;
         int v = 0;
-        for (int gz = 0; gz < GRID; gz++) {
-            for (int gx = 0; gx < GRID; gx++) {
-                float x0 = -HALF + (float)gx * STEP;
-                float x1 = x0 + STEP;
-                float z0 = -HALF + (float)gz * STEP;
-                float z1 = z0 + STEP;
-                float u0 = (float)gx * UV_STEP;
-                float u1 = u0 + UV_STEP;
-                float vt0 = (float)gz * UV_STEP;
-                float vt1 = vt0 + UV_STEP;
-
-                /* Compute Y at each corner */
-                float yA, yB, yC, yD;
-                COMPUTE_Y(yA, x0, z0);
-                COMPUTE_Y(yB, x1, z0);
-                COMPUTE_Y(yC, x1, z1);
-                COMPUTE_Y(yD, x0, z1);
-
-                /* Per-vertex normals via finite differences. Sample y at small
-                   offsets to estimate ∂y/∂x and ∂y/∂z. Normal = (-∂y/∂x, 1, -∂y/∂z)
-                   normalized. Epsilon = STEP/4 for smooth gradient. */
-                float eps = STEP * 0.25f;
-                #define COMPUTE_N(NX, NY, NZ, xx, zz) do {                     \
-                    float _yp_dx, _yn_dx, _yp_dz, _yn_dz;                      \
-                    COMPUTE_Y(_yp_dx, (xx) + eps, (zz));                       \
-                    COMPUTE_Y(_yn_dx, (xx) - eps, (zz));                       \
-                    COMPUTE_Y(_yp_dz, (xx),       (zz) + eps);                 \
-                    COMPUTE_Y(_yn_dz, (xx),       (zz) - eps);                 \
-                    float _dydx = (_yp_dx - _yn_dx) / (2.0f * eps);            \
-                    float _dydz = (_yp_dz - _yn_dz) / (2.0f * eps);            \
-                    float _nx = -_dydx;                                        \
-                    float _ny = 1.0f;                                          \
-                    float _nz = -_dydz;                                        \
-                    float _len = my_sqrt(_nx*_nx + _ny*_ny + _nz*_nz);         \
-                    if (_len < 0.001f) _len = 1.0f;                            \
-                    (NX) = _nx / _len;                                         \
-                    (NY) = _ny / _len;                                         \
-                    (NZ) = _nz / _len;                                         \
-                } while (0)
-
-                float NA[3], NB[3], NC[3], ND[3];
-                COMPUTE_N(NA[0], NA[1], NA[2], x0, z0);
-                COMPUTE_N(NB[0], NB[1], NB[2], x1, z0);
-                COMPUTE_N(NC[0], NC[1], NC[2], x1, z1);
-                COMPUTE_N(ND[0], ND[1], ND[2], x0, z1);
-
-                float verts[6][8] = {
-                    /* tri 1: A, C, B — pos.xyz, uv.xy, normal.xyz */
-                    {x0, yA, z0,  u0, vt0,   NA[0], NA[1], NA[2]},
-                    {x1, yC, z1,  u1, vt1,   NC[0], NC[1], NC[2]},
-                    {x1, yB, z0,  u1, vt0,   NB[0], NB[1], NB[2]},
-                    /* tri 2: A, D, C */
-                    {x0, yA, z0,  u0, vt0,   NA[0], NA[1], NA[2]},
-                    {x0, yD, z1,  u0, vt1,   ND[0], ND[1], ND[2]},
-                    {x1, yC, z1,  u1, vt1,   NC[0], NC[1], NC[2]},
-                };
+        for (int gz = 0; gz < FLOOR_GRID; gz++) {
+            for (int gx = 0; gx < FLOOR_GRID; gx++) {
+                float x0 = -FLOOR_HALF + (float)gx * STEP, x1 = x0 + STEP;
+                float z0 = -FLOOR_HALF + (float)gz * STEP, z1 = z0 + STEP;
+                float u0 = (float)gx * UV_STEP, u1 = u0 + UV_STEP;
+                float t0 = (float)gz * UV_STEP, t1 = t0 + UV_STEP;
+                /* corners A (x0,z0), B (x1,z0), C (x1,z1), D (x0,z1); tris A C B, A D C */
+                const float cx[4] = {x0, x1, x1, x0}, cz[4] = {z0, z0, z1, z1};
+                const float cu[4] = {u0, u1, u1, u0}, cv[4] = {t0, t0, t1, t1};
+                static const int order[6] = {0, 2, 1, 0, 3, 2};
                 for (int i = 0; i < 6; i++) {
-                    int idx = v * 12;
-                    fp[idx+0] = verts[i][0];
-                    fp[idx+1] = verts[i][1];
-                    fp[idx+2] = verts[i][2];
-                    fp[idx+3] = 1.0f;
-                    fp[idx+4] = verts[i][5];
-                    fp[idx+5] = verts[i][6];
-                    fp[idx+6] = verts[i][7];
-                    fp[idx+7] = 0.0f;
-                    fp[idx+8] = verts[i][3];
-                    fp[idx+9] = verts[i][4];
-                    fp[idx+10] = 0.0f; fp[idx+11] = 0.0f;
+                    int k = order[i];
+                    float x = cx[k], z = cz[k];
+                    float nx = x / R, nz = z / R;
+                    float nl = my_sqrt(nx * nx + 1.0f + nz * nz);
+                    float* o = fp + (unsigned long)v * 12;
+                    o[0] = x;
+                    o[1] = Y_BASE - (x * x + z * z) / (2.0f * R);
+                    o[2] = z;
+                    o[3] = 1.0f;
+                    o[4] = nx / nl;
+                    o[5] = 1.0f / nl;
+                    o[6] = nz / nl;
+                    o[7] = 0.0f;
+                    o[8] = cu[k];
+                    o[9] = cv[k];
+                    o[10] = 0.0f;
+                    o[11] = 0.0f;
                     v++;
                 }
-
-                #undef COMPUTE_N
             }
         }
-
-        #undef COMPUTE_Y
     }
 }
 
@@ -1100,6 +1022,53 @@ static float srgb_to_linear(float c) {
     for (int i = 0; i < 8; i++)
         y -= (y * y * y * y * y - x) / (5.0f * y * y * y * y);
     return x * x * y * y;
+}
+
+/* Normal-map channel convention, from the data: a tangent-space normal tilts
+   away from rising height, n ~ (-dH/du, -dH/dv, 1) with u along texel columns
+   and v along texel rows (both textures load rows in file order). Correlate
+   the normal map's red / green with the height map's slopes at 4096 pseudo-
+   random points of level 0 (a regular grid can alias with regular features,
+   e.g. miss every mortar line of a tile pattern); a negative correlation means
+   that channel points the other way (e.g. green = -v). +1 when the
+   correlation is too weak to decide. */
+static void normal_map_convention(const unsigned char* nrm, int nw, int nh,
+                                  const unsigned char* hgt, int hw, int hh, float* sx, float* sy,
+                                  float* cx, float* cy) {
+    float xy = 0, yy = 0, nxx = 0, nyy = 0, huu = 0, hvv = 0;
+    uint32_t seed = 0x2545F491u;
+    for (int k = 0; k < 4096; k++) {
+        seed = seed * 1664525u + 1013904223u;
+        int x = (int)((uint64_t)(seed >> 8) * (uint64_t)hw >> 24);
+        seed = seed * 1664525u + 1013904223u;
+        int y = (int)((uint64_t)(seed >> 8) * (uint64_t)hh >> 24);
+        int xm = (x + hw - 1) % hw, xp = (x + 1) % hw, ym = (y + hh - 1) % hh, yp = (y + 1) % hh;
+        float du = ((float)hgt[((unsigned long)y * hw + xp) * 4] -
+                    (float)hgt[((unsigned long)y * hw + xm) * 4]) *
+                   0.5f;
+        float dv = ((float)hgt[((unsigned long)yp * hw + x) * 4] -
+                    (float)hgt[((unsigned long)ym * hw + x) * 4]) *
+                   0.5f;
+        const unsigned char* t = nrm + ((unsigned long)(y * nh / hh) * nw + (x * nw / hw)) * 4;
+        float nx = (float)t[0] / 127.5f - 1.0f, ny = (float)t[1] / 127.5f - 1.0f;
+        xy += nx * -du;
+        yy += ny * -dv;
+        nxx += nx * nx;
+        nyy += ny * ny;
+        huu += du * du;
+        hvv += dv * dv;
+    }
+    *cx = (nxx > 0 && huu > 0) ? xy / my_sqrt(nxx * huu) : 0.0f;
+    *cy = (nyy > 0 && hvv > 0) ? yy / my_sqrt(nyy * hvv) : 0.0f;
+    *sx = (*cx < -0.1f) ? -1.0f : 1.0f;
+    *sy = (*cy < -0.1f) ? -1.0f : 1.0f;
+}
+
+/* Height-map sampler: wrap, bilinear, linear mips (MIP_FILTER 2 @ word2[27:26]). */
+static void build_ssharp_height(uint32_t* s) {
+    my_memset(s, 0, 16);
+    s[1] = 0xF00u << 12; /* MAX_LOD 15.0 */
+    s[2] = (1u << 20) | (1u << 22) | (2u << 26);
 }
 
 /* RGBA16F render target as a texture: 16_16_16_16 / FLOAT, linear aligned
@@ -1489,9 +1458,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Floor uses its own V# (floor_v) pointing at vb+FLOOR_MVP_OFF where MVP is mirrored
     // and floor verts are at V#+80.
     if (ps_floor && floor_v) {
-        /* Floor PS CAFE0119: uses v0-v63, s0-s87 + VCC -> 64 VGPRs, 96 SGPRs (0x2CF). */
+        /* ps_floor (parallax + fog): v0-v83, s0-s87 + VCC -> 84 VGPRs, 96 SGPRs.
+           It reads POS_Y (v2) for the fog colour: PERSP_CENTER | POS_Y_FLOAT. */
         uint64_t a=(uint64_t)(uintptr_t)ps_floor;
-        uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0x2CFu,(2u<<1)};
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (11u << 6) | 20u, (2u << 1)};
         pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
         uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                         (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
@@ -1501,8 +1471,12 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
         pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1<<1)); /* cull back */
 
+        pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x202);
+        pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x202);
         pm4_set_sh_regs(b,SH_VS_USER_DATA_0,floor_v,4);
         pm4_draw_index_auto(b, FLOOR_VERTS);
+        pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
+        pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
         GPU_TS(3);
     }
 
@@ -2437,43 +2411,34 @@ int main(void) {
         floor_nrm_w = 1; floor_nrm_h = 1;
     }
 
-    /* Floor displacement texture (height map) — sampled per-vertex during
-       floor mesh generation in build_static_vb. R channel is the height
-       value [0,1]; final Y offset = (sample - 0.5) * DISP_SCALE so it
-       displaces both up and down from the curve. NULL if missing → no
-       displacement applied (curve-only floor). */
-    void *floor_disp_tex = 0;
-    int floor_disp_w = 0, floor_disp_h = 0;
+    /* Floor height map (floor_displacement.bmp, R = height) for parallax
+       occlusion mapping in ps_floor, on the same UVs as the albedo / normal map.
+       GPU texture with mips; the loader records the R range and ps_floor
+       normalises with (h - lo) / (hi - lo). Missing: 1x1 white, no parallax. */
+    void* floor_height_tex = 0;
+    int floor_hgt_w = 1, floor_hgt_h = 1, floor_hgt_levels = 1;
+    int floor_hgt_lo = 0, floor_hgt_hi = 0;
     {
         BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), cpu_alloc, &bmp, 1) == 0 ||
-            bmp_load(asset_path(2,"floor_displacement.bmp"), cpu_alloc, &bmp, 1) == 0)) {
-            floor_disp_tex = bmp.pixels;
-            floor_disp_w = bmp.width; floor_disp_h = bmp.height;
-            /* Auto-stretch the displacement range to span [0,255]. Many
-               displacement BMPs use a compressed value range (e.g. only
-               100-130 out of 0-255), which produces imperceptible
-               displacement. Scan ALL pixels for the actual R range, then
-               remap each pixel in-place. After this, the texture has full
-               dynamic range and build_static_vb sees the proper variation. */
-            unsigned char *px = (unsigned char*)bmp.pixels;
-            unsigned long total = (unsigned long)bmp.width * (unsigned long)bmp.height;
-            int min_r = 255, max_r = 0;
-            for (unsigned long i = 0; i < total; i++) {
-                int r = px[i * 4];   /* RGBA8 after bmp_load conversion */
-                if (r < min_r) min_r = r;
-                if (r > max_r) max_r = r;
-            }
-            int range = max_r - min_r;
-            if (range > 0 && range < 240) {
-                /* Compressed range — stretch to full [0,255]. */
-                for (unsigned long i = 0; i < total; i++) {
-                    int v = ((int)px[i * 4] - min_r) * 255 / range;
-                    if (v < 0) v = 0; else if (v > 255) v = 255;
-                    px[i * 4] = (unsigned char)v;
-                }
-            }
+        if (bmp_load(asset_path(0, "floor_displacement.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) ==
+                0 ||
+            bmp_load(asset_path(2, "floor_displacement.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) ==
+                0) {
+            floor_height_tex = bmp.pixels;
+            floor_hgt_w = bmp.width;
+            floor_hgt_h = bmp.height;
+            floor_hgt_levels = bmp.levels;
+            floor_hgt_lo = bmp.rmin;
+            floor_hgt_hi = bmp.rmax;
         }
+    }
+    if (!floor_height_tex) {
+        floor_height_tex = gpu_alloc(4, 0x1000);
+        unsigned char* p = (unsigned char*)floor_height_tex;
+        p[0] = 255;
+        p[1] = 255;
+        p[2] = 255;
+        p[3] = 255;
     }
 
     /* desc buffer layout:
@@ -2556,6 +2521,32 @@ int main(void) {
     desc[65] |= 9u << 26; /* albedo: NUM_FORMAT SRGB (the normal map stays UNORM data) */
     /* Floor normal map at desc[72..79] — procedural 64x64 tangent-space normals */
     build_tsharp_levels(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h, floor_nrm_levels);
+    /* ps_floor parallax + fog: height T# desc[92], S# desc[100], camera desc[104]
+       (per frame), then (pom_scale, fog -stops/half^2, h_scale, h_bias) desc[108]
+       and (normal sign x, sign y, 1/POM_FADE, 1/DISPLAY_H) desc[112]. */
+    build_tsharp_levels(desc + 92, floor_height_tex, floor_hgt_w, floor_hgt_h, floor_hgt_levels);
+    build_ssharp_height(desc + 100);
+    float nrm_sx = 1.0f, nrm_sy = 1.0f, nrm_cx = 0.0f, nrm_cy = 0.0f;
+    if (floor_hgt_hi > floor_hgt_lo && floor_nrm_w > 1 && floor_hgt_w > 1)
+        normal_map_convention((const unsigned char*)floor_normal_tex, floor_nrm_w, floor_nrm_h,
+                              (const unsigned char*)floor_height_tex, floor_hgt_w, floor_hgt_h,
+                              &nrm_sx, &nrm_sy, &nrm_cx, &nrm_cy);
+    {
+        float* fc = (float*)(desc + 104);
+        fc[0] = 0.0f;
+        fc[1] = 0.0f;
+        fc[2] = 0.0f;
+        fc[3] = 0.0f;
+        int range = floor_hgt_hi - floor_hgt_lo;
+        fc[4] = (range > 0) ? POM_DEPTH * (FLOOR_UV_MAX / (2.0f * FLOOR_HALF)) : 0.0f;
+        fc[5] = -FOG_EDGE_STOPS / (FLOOR_HALF * FLOOR_HALF);
+        fc[6] = (range > 0) ? 255.0f / (float)range : 0.0f;
+        fc[7] = (range > 0) ? -(float)floor_hgt_lo / (float)range : 1.0f;
+        fc[8] = nrm_sx;
+        fc[9] = nrm_sy;
+        fc[10] = 1.0f / POM_FADE;
+        fc[11] = 1.0f / (float)DISPLAY_H;
+    }
 
     /* VB layout:
        - Main region: [ident][BG sun][BG verts][MVP][sun dir][cube verts]
@@ -2589,9 +2580,7 @@ int main(void) {
        OBJ load vb switches to the model's buffer, whose vertices start at
        OBJ_DATA_OFF (448) == CUBE_DATA_OFF; the floor's V# keeps pointing here. */
     char* vb_static = (char*)vb;
-    build_static_vb((float*)vb,
-                    (const unsigned char*)floor_disp_tex,
-                    floor_disp_w, floor_disp_h);  // uploaded ONCE
+    build_static_vb((float*)vb); // uploaded ONCE
     uint32_t vb_v[4], bg_v[4], shadow_vb_v[4], shadow_floor_v[4], floor_v[4];
     build_vsharp(vb_v, vb, VERT_BUF_SIZE);
     build_vsharp(bg_v, vb, VERT_BUF_SIZE);
@@ -2876,9 +2865,7 @@ int main(void) {
             /* Restore cube verts and BG — loading_progress may have overwritten them
                during failed OBJ attempts (progress-bar geometry written at CUBE_DATA_OFF
                plus BG tweaks). Rebuild the static VB to recover the original cube. */
-            build_static_vb((float*)vb,
-                            (const unsigned char*)floor_disp_tex,
-                            floor_disp_w, floor_disp_h);
+            build_static_vb((float*)vb);
             printf("No model found, using built-in cube.\n");
         }
     }
@@ -3103,14 +3090,49 @@ int main(void) {
     /* Event buffer for sceSystemServiceReceiveEvent. SDK struct is large; this
        is a safe over-allocation. We only read the first int32 (eventType). */
     static unsigned char sysevent[8192];
-    { char T[128]; int p = 0;
-      #define TP(x) do { const char *_q = (x); while (*_q) T[p++] = *_q++; } while (0)
-      TP("floor tex alb="); p += lg_i64(T + p, floor_tex_w); TP("x"); p += lg_i64(T + p, floor_tex_h);
-      TP(" levels="); p += lg_i64(T + p, floor_tex_levels);
-      TP(" nrm="); p += lg_i64(T + p, floor_nrm_w); TP("x"); p += lg_i64(T + p, floor_nrm_h);
-      TP(" levels="); p += lg_i64(T + p, floor_nrm_levels); TP("\n");
-      #undef TP
-      trace_line(T, (unsigned long)p); }
+    {
+        char T[256];
+        int p = 0;
+#define TP(x)                                                                                      \
+    do {                                                                                           \
+        const char* _q = (x);                                                                      \
+        while (*_q)                                                                                \
+            T[p++] = *_q++;                                                                        \
+    } while (0)
+        TP("floor tex alb=");
+        p += lg_i64(T + p, floor_tex_w);
+        TP("x");
+        p += lg_i64(T + p, floor_tex_h);
+        TP(" levels=");
+        p += lg_i64(T + p, floor_tex_levels);
+        TP(" nrm=");
+        p += lg_i64(T + p, floor_nrm_w);
+        TP("x");
+        p += lg_i64(T + p, floor_nrm_h);
+        TP(" levels=");
+        p += lg_i64(T + p, floor_nrm_levels);
+        TP(" hgt=");
+        p += lg_i64(T + p, floor_hgt_w);
+        TP("x");
+        p += lg_i64(T + p, floor_hgt_h);
+        TP(" levels=");
+        p += lg_i64(T + p, floor_hgt_levels);
+        TP(" range=");
+        p += lg_i64(T + p, floor_hgt_lo);
+        TP("..");
+        p += lg_i64(T + p, floor_hgt_hi);
+        TP(" nrm_sign=");
+        p += lg_i64(T + p, (long long)nrm_sx);
+        TP(",");
+        p += lg_i64(T + p, (long long)nrm_sy);
+        TP(" corr_x1000=");
+        p += lg_i64(T + p, (long long)(nrm_cx * 1000.0f));
+        TP(",");
+        p += lg_i64(T + p, (long long)(nrm_cy * 1000.0f));
+        TP("\n");
+#undef TP
+        trace_line(T, (unsigned long)p);
+    }
     while (running) {
         int bi=frame%NUM_FRAMES;
 #if FENCE_SLOTS > 1
@@ -3335,6 +3357,12 @@ int main(void) {
         }
 
         build_mvp((float*)((char*)vb+MVP_OFF), cam_yaw, cam_pitch, cam_x, cam_y, cam_z);
+        {
+            float* cp = (float*)(desc + 104); /* ps_floor: view vector for parallax + fog */
+            cp[0] = cam_x;
+            cp[1] = cam_y;
+            cp[2] = cam_z;
+        }
 
         /* Mirror MVP to FLOOR_MVP_OFF so the floor draw (V#-base = vb+FLOOR_MVP_OFF)
            can read MVP at V#+0 and floor vertex data at V#+80, matching VS convention.

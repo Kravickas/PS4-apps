@@ -9,6 +9,7 @@ typedef struct {
     int width, height;  /* level 0 */
     int levels;         /* mip levels stored; 1 = level 0 only */
     unsigned long size; /* total bytes, all levels */
+    int rmin, rmax;     /* R channel range over level 0 (height maps) */
 } BmpTexture;
 
 /* Row scratch buffers in ordinary cached process memory. The row buffer used to
@@ -116,6 +117,7 @@ static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned 
 
     int stride_bmp = ((w * (bpp / 8) + 3) & ~3); /* BMP rows are 4-byte aligned */
     unsigned char *dst = (unsigned char *)pixels;
+    int rmin = 255, rmax = 0;
     for (int y = 0; y < h; y++) {
         sceKernelLseek(fd, data_off + (long)y * stride_bmp, 0);
         int rd = sceKernelRead(fd, g_bmp_row, (unsigned long)stride_bmp);
@@ -134,6 +136,13 @@ static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned 
                 g_bmp_rgba[x*4+3] = g_bmp_row[x*4+3];
             }
         }
+        for (int x = 0; x < w; x++) {
+            int r = g_bmp_rgba[x * 4];
+            if (r < rmin)
+                rmin = r;
+            if (r > rmax)
+                rmax = r;
+        }
         bmp_copy_row(dst + (unsigned long)y * (unsigned long)w * 4UL, g_bmp_rgba, w * 4);
         bmp_mip_feed(&m, 0, y, g_bmp_rgba);
     }
@@ -144,5 +153,7 @@ static int bmp_load(const char *path, void *(*alloc_fn)(unsigned long, unsigned 
     out->height = h;
     out->levels = levels;
     out->size = out_size;
+    out->rmin = rmin;
+    out->rmax = rmax;
     return 0;
 }

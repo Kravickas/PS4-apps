@@ -1,4 +1,45 @@
 ============================================================
+FLOOR: PARALLAX OCCLUSION MAPPING + DISTANCE FOG  (build=floor-pom+fog)
+============================================================
+Old floor relief was per-vertex: the grid is 6.25 units per vertex and the
+height map tiles every 4 units, so the vertices only ever read 4 texels of
+it - random bumps, not the texture's shape. That displacement is removed; the
+mesh is the plain curve (bit-identical to the old mesh without a height map).
+Relief now comes from parallax occlusion mapping in ps_floor.
+
+ps_floor (new source shaders/ps_floor.s, hash CAFE0120, RSRC1 0x2D4):
+- Tangent frame on the UV axes: T = +x projected on the surface (u), B = +z
+  (v). The old frame, normalize(cross(up, N)), turned around the floor centre
+  (normal-map detail rotated with position) and was NaN at the centre.
+- Normal-map channel signs measured at load from the height map (correlation
+  of red/green with the height slopes, 4096 points); printed in the trace.
+- 16-layer POM on the height map (desc[92], sampler desc[100]), height
+  normalised with the loader's R range, linear refinement between the last
+  two layers, fades out by POM_FADE. Depth knob POM_DEPTH (world units).
+- Fog: colour = the sky gradient at the same screen row (as ps_dark), weight
+  1 - 2^(-FOG_EDGE_STOPS * (d / FLOOR_HALF)^2): clear near, 99% at the edge,
+  so the floor edge melts into the sky.
+- Lighting and shadow unchanged. Floor draw enables POS_Y (PS_INPUT 0x202),
+  restored to 0x02 after it.
+Height map: floor_displacement.bmp is now a GPU texture with mips (the CPU
+copy and its in-place stretch are gone; the loader records the R range).
+Fixed on the way: my_sqrt (6 Newton steps) was only right for ~0.1..1000;
+now sqrtss (stars near the zenith are back on the sphere).
+Checks (float32 emulation of the instruction streams):
+- parallax + fog off and sign_y = -1: bit-identical to the old floor shader;
+- parallax vs exact float64 ray-march: median UV error ~1e-5, 99% <= 4.7% of
+  the offset (steep, oblique, grazing);
+- fog: floor at the far edge within 0.0062 of the sky colour at that row;
+- normal-sign estimator: 14/14 synthetic cases (smooth, tiles, bricks, all
+  four sign combinations, different resolutions).
+OpenOrbis build: 0 warnings, no import change, 13/13 shaders in the eboot
+match; changed functions: main, bmp_load, build_static_vb, build_dcb,
+my_sqrt; added normal_map_convention, build_ssharp_height; removed the now
+unused cpu_alloc.
+Trace line: "floor tex ... hgt=WxH levels=N range=lo..hi nrm_sign=x,y
+corr_x1000=..".
+
+============================================================
 SUN AND MOON DISCS NONSTOP  (build=sun+moon-discs)
 ============================================================
 Before: one disc = the active light (sun by day, anti-sun moon at night), so
