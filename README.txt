@@ -1,4 +1,35 @@
 ============================================================
+STARS, MODEL FIXES, LOADING SCREEN  (build=stars+model+loading)
+============================================================
+Model loaded -> cube still drawn: the model's VB puts vertices at
+OBJ_DATA_OFF = 448 = CUBE_DATA_OFF, and the per-frame cube rotation kept
+writing 36 cube verts there (+ into the model's shadow VB). Also the floor
+MVP mirror went to vb + FLOOR_MVP_OFF (2176 = model verts 36-37) while the
+floor's V# still points at the static VB, so the floor kept the load-time
+camera. Fix: model_loaded skips the cube update; vb_static keeps the static
+buffer and receives the floor mirror.
+
+Loading screen:
+  - frame ended with the flip MARKER but was sent with a plain
+    sceGnmSubmitCommandBuffers (no patcher) -> fence never written, each
+    update waited out its >1 s timeout. Now no_flip=1 (EOP fence), like the
+    main loop's CPU flip.
+  - first frame only after pass 1 had streamed the whole file; progress was
+    pass/3. Now: open+lseek existence check (a miss still costs no frame),
+    frame at 0.0 immediately, then per 64 MB chunk in all 4 passes,
+    frac = (pass + bytes/size)/4. Callback is (float frac, msg, ud); STL/PLY
+    use 0, 1/3, 2/3. Host test (104 MB OBJ): 0, .16, .25, .41 ... 1.0;
+    vertex buffer byte-identical to the old loader.
+
+Stars: 2500 world-fixed quads on a sphere r=400 (upper hemisphere), drawn
+after the sky with the MVP VS and new ps_stars (outputs desc[36..39]; llvm-mc
+bonaire; RSRC1 0x40), additive blend CB_BLEND0_CONTROL 0x40000101, depth
+LESS no write (floor covers below the horizon). Fade: smoothstep over
+orig_sun_y in [+0.12, -0.12] -> in from 0.87 s before moonrise to 0.87 s
+after, out mirrored around moonset. Default view: ~112 stars, 1.5-3.9 px.
+Changed lines clang-format clean (shadPS4 src/.clang-format, 18.1.8).
+
+============================================================
 CLEANUP: DIAGNOSTICS REMOVED  (build=cleanup-diagnostics)
 ============================================================
 round-sun+start-of-day confirmed on hardware: 13456 frames, 0 dropped

@@ -25,8 +25,8 @@ static int stl_is_binary(const char *path) {
     return 0;
 }
 
-static int stl_load_binary(const char *path, void *(*alloc_fn)(unsigned long,unsigned long),
-                           ObjMesh *out, void (*cb)(int,const char*,void*), void *cb_ud) {
+static int stl_load_binary(const char* path, void* (*alloc_fn)(unsigned long, unsigned long),
+                           ObjMesh* out, void (*cb)(float, const char*, void*), void* cb_ud) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return -1;
 
@@ -36,7 +36,8 @@ static int stl_load_binary(const char *path, void *(*alloc_fn)(unsigned long,uns
     unsigned int ntri = *(unsigned int*)(hdr + 80);
     if (ntri == 0 || ntri > 50000000) { sceKernelClose(fd); return -2; }
 
-    if (cb) cb(0, "Reading STL", cb_ud);
+    if (cb)
+        cb(0.0f, "Reading STL", cb_ud);
 
     /* Read all triangle data */
     unsigned long data_sz = (unsigned long)ntri * STL_TRI_SIZE;
@@ -54,7 +55,8 @@ static int stl_load_binary(const char *path, void *(*alloc_fn)(unsigned long,uns
 
     /* Extract positions: 3 verts per tri, find unique by hashing */
     unsigned int nverts = ntri * 3;
-    if (cb) cb(1, "Computing normals", cb_ud);
+    if (cb)
+        cb(1.0f / 3.0f, "Computing normals", cb_ud);
 
     /* Alloc VB */
     unsigned long vb_size = OBJ_DATA_OFF + (unsigned long)nverts * OBJ_STRIDE * 4;
@@ -98,7 +100,8 @@ static int stl_load_binary(const char *path, void *(*alloc_fn)(unsigned long,uns
     obj_tfree(data, data_ph, data_sz);
 
     /* Auto-scale to ±0.9 */
-    if (cb) cb(2, "Scaling", cb_ud);
+    if (cb)
+        cb(2.0f / 3.0f, "Scaling", cb_ud);
     float cx=(minx+maxx)*0.5f, cy=(miny+maxy)*0.5f, cz=(minz+maxz)*0.5f;
     float dx=maxx-minx, dy=maxy-miny, dz=maxz-minz;
     float maxd=dx>dy?dx:dy; if(dz>maxd)maxd=dz;
@@ -119,4 +122,3 @@ static int stl_load_binary(const char *path, void *(*alloc_fn)(unsigned long,uns
     out->vb_size = vb_size; out->indexed = 0;
     return 0;
 }
-

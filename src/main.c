@@ -136,7 +136,7 @@
 #define SUN_DISC_RADIUS_PX 110.0f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "cleanup-diagnostics"
+#define BUILD_TAG "stars+model+loading"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -346,6 +346,12 @@
 /* Per-pass GPU timestamps (64-bit GPU clock, EOP): [0] frame start, [1] after
    the shadow pass, [2] after the sky, [3] after the floor, [4] after the cube. */
 static volatile uint64_t *g_gpu_ts = 0;
+/* Stars: world-fixed quads on a sphere (see build_stars), drawn after the sky
+   with additive blending; colour x fade comes from desc[36..39] per frame. */
+static void* g_ps_stars_gpu = 0;
+static uint32_t g_stars_v[4];
+static int g_stars_n = 0;    /* star quads in the buffer */
+static int g_stars_draw = 0; /* 0 while fully faded out (or on the loading screen) */
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 
@@ -626,6 +632,23 @@ static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
     0xBEFE0458 /* s_mov_b64 exec, s[88:89]: exact mode for the export */, 0xF800180F /* exp: vm=1 */, 0x35343332, 0xBF810000, 0x5362724F,
     0x00726468, 0x0001FC00, 0x00000000, 0xDEADBEEF,
     0xCAFE0119, 0x00000000,
+};
+
+// Stars PS: outputs desc[36..39] (star colour x fade), no interpolants, no
+// textures. Assembled with llvm-mc -mcpu=bonaire; header token + OrbShdr
+// trailer as the other shaders (literal 5 -> trailer at dword 12). Uses s0-s7
+// + VCC (header writes vcc_hi) and v0-v3 -> PGM_RSRC1 0x40 (16 SGPR, 4 VGPR).
+static const uint32_t ps_stars_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x00000005, /* s_mov_b32 vcc_hi, 5 (SDK header token)      */
+    0xC0820124,             /* s_load_dwordx4 s[4:7], s[0:1], 0x24 (desc[36]) */
+    0xBF8C007F,             /* s_waitcnt lgkmcnt(0)                          */
+    0x7E000204, 0x7E020205, /* v_mov_b32 v0, s4 ; v_mov_b32 v1, s5           */
+    0x7E040206, 0x7E060207, /* v_mov_b32 v2, s6 ; v_mov_b32 v3, s7           */
+    0xF800180F, 0x03020100, /* exp mrt0 v0, v1, v2, v3 done vm               */
+    0xBF810000,             /* s_endpgm                                      */
+    0xBF800000,             /* s_nop 0 (pad: trailer at an even dword)       */
+    0x5362724F, 0x00726468, 0x00003000, 0x00000000, /* OrbShdr, length 48 B   */
+    0xDEADBEEF, 0xCAFE0200, 0x00000000,
 };
 
 // White PS for loading bar — solid (1, 1, 1, 1) output, no texture sampling
@@ -1180,6 +1203,56 @@ static void build_vsharp_strided(uint32_t *v, void *base, uint32_t size,
     v[2]=num_records;
     v[3]=(1u<<3)|(2u<<6)|(3u<<9)|(4u<<12)|(4u<<15);
 }
+/* Stars: STARS_N quads on a sphere of STARS_RADIUS around the origin, upper
+   hemisphere only (height 0.03..1, uniform in area), each quad facing the
+   origin, 1.5-3.5 px wide at 1080p (1 px = 0.233 units at 400). Vertex layout
+   = the MVP VS's: pos(x,y,z,1), normal 0, uv 0 - 48 bytes. Fixed seed. */
+#define STARS_N 2500
+#define STARS_RADIUS 400.0f
+/* Fade band in orig_sun_y (sun height factor): stars start fading in when the
+   sun drops below +STARS_FADE (just before sunset = moonrise), are full at
+   -STARS_FADE, and fade out mirrored around sunrise (= moonset). */
+#define STARS_FADE 0.12f
+static int build_stars(float* out) {
+    uint32_t seed = 0x9E3779B9u;
+#define STAR_RND() (seed = seed * 1664525u + 1013904223u, (float)(seed >> 8) * (1.0f / 16777216.0f))
+    static const int tri[6] = {0, 1, 2, 0, 2, 3};
+    for (int i = 0; i < STARS_N; i++) {
+        float dy = 0.03f + 0.97f * STAR_RND();
+        float ph = 6.28318531f * STAR_RND();
+        float rr = my_sqrt(1.0f - dy * dy);
+        float dx = rr * my_cos(ph), dz = rr * my_sin(ph);
+        float t1x = 1.0f, t1z = 0.0f; /* t1 = cross(up, d), t1y = 0 */
+        if (dy < 0.99f) {
+            float l = my_sqrt(dz * dz + dx * dx);
+            t1x = dz / l;
+            t1z = -dx / l;
+        }
+        float t2x = dy * t1z, t2y = dz * t1x - dx * t1z, t2z = -dy * t1x; /* cross(d, t1) */
+        float u = STAR_RND();
+        float sz = 0.18f + 0.20f * u * u * u; /* mostly small, a few bright */
+        float cx = dx * STARS_RADIUS, cy = dy * STARS_RADIUS, cz = dz * STARS_RADIUS;
+        float c[4][3];
+        for (int k = 0; k < 4; k++) {
+            float a = (k == 1 || k == 2) ? sz : -sz, bb = (k >= 2) ? sz : -sz;
+            c[k][0] = cx + t1x * a + t2x * bb;
+            c[k][1] = cy + t2y * bb;
+            c[k][2] = cz + t1z * a + t2z * bb;
+        }
+        for (int v = 0; v < 6; v++) {
+            float* o = out + (i * 6 + v) * 12;
+            o[0] = c[tri[v]][0];
+            o[1] = c[tri[v]][1];
+            o[2] = c[tri[v]][2];
+            o[3] = 1.0f;
+            for (int q = 4; q < 12; q++)
+                o[q] = 0.0f;
+        }
+    }
+#undef STAR_RND
+    return STARS_N;
+}
+
 static void build_vsharp(uint32_t *v, void *base, uint32_t size) {
     build_vsharp_strided(v, base, size, 0);
 }
@@ -1461,6 +1534,28 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Sky draw performed the one-shot depth clear. Disable clear flag so subsequent
        draws (floor, cube) render normally against the now-cleared depth buffer. */
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,0);
+
+    /* Stars: after the sky, before the floor. Depth test LESS against the cleared
+       1.0 without writing, so the floor drawn next covers anything below the
+       horizon. Additive blend (CB_BLEND0_CONTROL: SRC ONE @0, DST ONE @8,
+       COMB dst+src, ENABLE @30 - gfx_7_2_sh_mask.h / enum.h), reset to 0 after. */
+    if (g_stars_n > 0 && g_stars_draw && g_ps_stars_gpu) {
+        {
+            uint64_t a = (uint64_t)(uintptr_t)g_ps_stars_gpu;
+            uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (1u << 6) | 0u, (2u << 1)};
+            pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
+            uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
+                              (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
+            pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 2);
+        }
+        pm4_set_context_reg(b, CTX_DEPTH_CONTROL,
+                            (1u << 1) | (1u << 4));     /* Z test LESS, no write */
+        pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); /* no culling */
+        pm4_set_context_reg(b, CTX_BLEND_CONTROL0, (1u << 0) | (1u << 8) | (1u << 30));
+        pm4_set_sh_regs(b, SH_VS_USER_DATA_0, g_stars_v, 4);
+        pm4_draw_index_auto(b, (uint32_t)g_stars_n * 6u);
+        pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
+    }
 
     // === Floor draw: between sky and cube ===
     // Depth test Less so cube draws on top, but floor is drawn first so cube occludes it.
@@ -2118,9 +2213,9 @@ struct LoadCtx {
     const void *ps_dark;
 };
 
-static void loading_progress(int pass, const char *msg, void *ud) {
+static void loading_progress(float frac, const char* msg, void* ud) {
     struct LoadCtx *c = (struct LoadCtx*)ud;
-    float progress = (float)pass / 3.0f; /* 0.0 → 1.0 */
+    float progress = frac < 0.0f ? 0.0f : (frac > 1.0f ? 1.0f : frac); /* 0..1 */
 
     /* Loading sky: SOLID blue (both zenith and horizon = blue) to cover behind rendering */
     {
@@ -2175,7 +2270,10 @@ static void loading_progress(int pass, const char *msg, void *ud) {
     uint32_t sz = build_dcb(&pm4, c->vs, c->ps_blue, c->ps_dark, 0, 0,
                             c->vb_v, c->bg_v, 0, 0,
                             c->vb, c->desc, 6, VERT_BUF_SIZE, 0, 0, 0,
-                            bi ? c->fb1 : c->fb0, c->depth, 0, c->fence, fv, 0);
+                            bi ? c->fb1 : c->fb0, c->depth, 0, c->fence, fv,
+                            1 /* EOP fence: a plain submit never runs gnm's marker
+                                 patcher, so with the marker tail the fence was never
+                                 written and every update waited out its timeout */);
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
@@ -2534,6 +2632,10 @@ int main(void) {
        needs sceGnmFlushGarlic. GARLIC stays correct for write-once, GPU-read
        data: render targets, textures, static geometry. */
     void *vb=gpu_alloc_typed(VERT_BUF_SIZE + 256, 0x1000, MEM_TYPE_ONION);
+    /* The static layout (sky, cube, floor) lives here for the whole run. After an
+       OBJ load vb switches to the model's buffer, whose vertices start at
+       OBJ_DATA_OFF (448) == CUBE_DATA_OFF; the floor's V# keeps pointing here. */
+    char* vb_static = (char*)vb;
     build_static_vb((float*)vb,
                     (const unsigned char*)floor_disp_tex,
                     floor_disp_w, floor_disp_h);  // uploaded ONCE
@@ -2568,6 +2670,16 @@ int main(void) {
        Must be >= 80 + FLOOR_VERTS*VERT_STRIDE = 80 + 384*48 = 18512 bytes. */
     build_vsharp(floor_v, (char*)vb + FLOOR_MVP_OFF,
                  (uint32_t)(VERT_BUF_SIZE - FLOOR_MVP_OFF));
+    /* Star buffer: MVP mirrored at +0 each frame (MVP VS convention), sun slot
+       at +64 unused, vertices at +80. */
+    unsigned long stars_size = 80UL + (unsigned long)STARS_N * 6UL * VERT_STRIDE;
+    char* stars_vb = (char*)gpu_alloc_typed(stars_size + 256, 0x1000, MEM_TYPE_ONION);
+    if (stars_vb) {
+        for (int q = 0; q < 20; q++)
+            ((float*)stars_vb)[q] = 0.0f;
+        g_stars_n = build_stars((float*)(stars_vb + 80));
+        build_vsharp(g_stars_v, stars_vb, (uint32_t)stars_size);
+    }
     /* Copy cube verts into shadow VB at offset 0x50 */
     if (shadow_vb) {
         my_memcpy((char*)shadow_vb + 0x50,
@@ -2610,7 +2722,9 @@ int main(void) {
     UPLOAD_SHADER(ps_shadow_gpu,        ps_shadow_binary);
     UPLOAD_SHADER(ps_shadow_clear_gpu,  ps_shadow_clear_binary);
     UPLOAD_SHADER(ps_blue_gpu,          ps_blue_binary);
-    #undef UPLOAD_SHADER
+    UPLOAD_SHADER(ps_stars_gpu, ps_stars_binary);
+    g_ps_stars_gpu = ps_stars_gpu;
+#undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];
     /* NOT ALLOCATED. The shadow pass shares the main pm4 builder and its
@@ -2666,6 +2780,7 @@ int main(void) {
 
 
     int model_verts = CUBE_VERTS;
+    int model_loaded = 0; /* 1 once an OBJ/STL/PLY replaced the built-in cube */
     uint32_t *g_ib = 0;
     int g_num_idx = 0;
     int g_indexed = 0;
@@ -2779,6 +2894,7 @@ int main(void) {
                     if (g_model_radius < 0.1f) g_model_radius = 0.1f;
                 }
                 loaded = 1;
+                model_loaded = 1;
             }
         }
         if (!loaded) {
@@ -3199,7 +3315,10 @@ int main(void) {
                clear of the floor. */
             const float cube_world_y = 0.4f;
             float *cb = (float*)((char*)vb + CUBE_DATA_OFF);
-            for (int tri = 0; tri < 12; tri++) {
+            /* Only the built-in cube: with a model loaded, vb + CUBE_DATA_OFF is the
+               model's first 36 vertices, and rewriting them drew the cube inside
+               the model every frame. */
+            for (int tri = 0; tri < 12 && !model_loaded; tri++) {
                 int face = tri / 2;
                 int t = tri % 2;
                 /* Pre-rotate this face's normal once for all 3 verts of the tri */
@@ -3231,13 +3350,13 @@ int main(void) {
 
             /* Mirror the rotated cube data into the shadow VB so the shadow pass
                draws the SAME geometry. shadow_vb layout: [light_MVP @ 0][pad][cube verts @ 0x50]. */
-            if (shadow_vb && g_shadow_ready) {
+            if (shadow_vb && g_shadow_ready && !model_loaded) {
                 my_memcpy((char*)shadow_vb + 0x50,
                           (char*)vb + CUBE_DATA_OFF,
                           CUBE_VERTS * VERT_STRIDE);
             }
 
-            #undef ROTATE_XY
+#undef ROTATE_XY
         }
 
         build_mvp((float*)((char*)vb+MVP_OFF), cam_yaw, cam_pitch, cam_x, cam_y, cam_z);
@@ -3245,8 +3364,12 @@ int main(void) {
         /* Mirror MVP to FLOOR_MVP_OFF so the floor draw (V#-base = vb+FLOOR_MVP_OFF)
            can read MVP at V#+0 and floor vertex data at V#+80, matching VS convention.
            Copy 64 bytes (16 floats = 4x4 matrix). */
-        my_memcpy((char*)vb + FLOOR_MVP_OFF,
-                  (char*)vb + MVP_OFF, 64);
+        /* Into the STATIC buffer the floor's V# points at. Writing vb +
+           FLOOR_MVP_OFF after a model load put matrix floats into model vertices
+           36-37 and left the floor with the camera from load time. */
+        my_memcpy(vb_static + FLOOR_MVP_OFF, (char*)vb + MVP_OFF, 64);
+        if (stars_vb)
+            my_memcpy(stars_vb, (char*)vb + MVP_OFF, 64);
 
         /* Build light-space MVP at LIGHT_MVP_OFF for shadow pass.
            Orthographic projection from sun looking at origin.
@@ -3472,6 +3595,21 @@ int main(void) {
             sz[0] = zr; sz[1] = zg; sz[2] = zb; sz[3] = 0;
             float *sh = (float*)(desc + 28);
             sh[0] = hr; sh[1] = hg; sh[2] = hb; sh[3] = 0;
+        }
+        { /* Star fade (smoothstep over the STARS_FADE band) -> desc[36..39].
+             Alpha 0: additive blend leaves the destination alpha alone. */
+            float fa = (STARS_FADE - orig_sun_y) / (2.0f * STARS_FADE);
+            if (fa < 0.0f)
+                fa = 0.0f;
+            if (fa > 1.0f)
+                fa = 1.0f;
+            fa = fa * fa * (3.0f - 2.0f * fa);
+            float* st = (float*)(desc + 36);
+            st[0] = 0.85f * fa;
+            st[1] = 0.88f * fa;
+            st[2] = 1.0f * fa;
+            st[3] = 0.0f;
+            g_stars_draw = fa > 0.0f;
         }
 
         /* Project sun to NDC for sky disc rendering → desc[16:19] */

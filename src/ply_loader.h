@@ -3,8 +3,8 @@
  *           element face M (property list uchar int vertex_index/vertex_indices)
  */
 
-static int ply_load_file(const char *path, void *(*alloc_fn)(unsigned long,unsigned long),
-                         ObjMesh *out, void (*cb)(int,const char*,void*), void *cb_ud) {
+static int ply_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned long),
+                         ObjMesh* out, void (*cb)(float, const char*, void*), void* cb_ud) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return -1;
 
@@ -71,7 +71,8 @@ static int ply_load_file(const char *path, void *(*alloc_fn)(unsigned long,unsig
         /* Binary PLY not supported yet */
         return is_binary ? -10 : -3;
     }
-    if (cb) cb(0, "Reading PLY", cb_ud);
+    if (cb)
+        cb(0.0f, "Reading PLY", cb_ud);
 
     /* Re-read file from after header */
     fd = sceKernelOpen(path, 0, 0);
@@ -114,7 +115,8 @@ static int ply_load_file(const char *path, void *(*alloc_fn)(unsigned long,unsig
     data[total] = 0;
     sceKernelClose(fd);
 
-    if (cb) cb(1, "Parsing vertices", cb_ud);
+    if (cb)
+        cb(1.0f / 3.0f, "Parsing vertices", cb_ud);
 
     /* Parse vertices */
     const char *dp = data, *de = data + total;
@@ -144,7 +146,8 @@ static int ply_load_file(const char *path, void *(*alloc_fn)(unsigned long,unsig
         if (tp < de) tp++;
     }
 
-    if (cb) cb(2, "Emitting triangles", cb_ud);
+    if (cb)
+        cb(2.0f / 3.0f, "Emitting triangles", cb_ud);
 
     /* Alloc VB */
     unsigned int nverts_out = nf_tri * 3;
@@ -244,4 +247,3 @@ static int ply_load_file(const char *path, void *(*alloc_fn)(unsigned long,unsig
     out->vb_size=vb_size; out->indexed=0;
     return 0;
 }
-

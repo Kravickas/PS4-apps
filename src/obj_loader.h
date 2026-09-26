@@ -171,13 +171,24 @@ static int obj_emit_face(const char *p, const char *end,
 /* Stream a file pass: calls line_fn for each complete line.
  * line_fn(line_start, line_end, user_data). Returns 0 to continue. */
 typedef int (*obj_line_fn)(const char*, const char*, void*);
-static void obj_stream_pass(const char *path, obj_line_fn fn, void *ud) {
+/* Per-chunk progress for one streaming pass: reports
+   (pass + bytes_done / fsize) / npass after every chunk. fn may be 0. */
+typedef struct {
+    void (*fn)(float frac, const char* msg, void* ud);
+    void* ud;
+    const char* msg;
+    int pass, npass;
+    unsigned long fsize;
+} ObjProg;
+
+static void obj_stream_pass(const char* path, obj_line_fn fn, void* ud, const ObjProg* pg) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return;
     long ck_ph; unsigned long ck_sz = OBJ_CHUNK + 65536;
     char *ck = (char*)obj_talloc(ck_sz, &ck_ph);
     if (!ck) { sceKernelClose(fd); return; }
     int left = 0;
+    unsigned long done = 0;
     for (;;) {
         long r = sceKernelRead(fd, ck + left, OBJ_CHUNK);
         if (r <= 0) {
@@ -195,6 +206,13 @@ static void obj_stream_pass(const char *path, obj_line_fn fn, void *ud) {
             }
             fn(cp, eol, ud);
             cp = eol + 1; left = 0;
+        }
+        done += (unsigned long)r;
+        if (pg && pg->fn && pg->fsize) {
+            float f = (float)done / (float)pg->fsize;
+            if (f > 1.0f)
+                f = 1.0f;
+            pg->fn(((float)pg->pass + f) / (float)pg->npass, pg->msg, pg->ud);
         }
         if (r < OBJ_CHUNK) break;
     }
@@ -294,8 +312,7 @@ static int p3_line(const char *s, const char *e, void *ud) {
 
 /* ================================================================ */
 /* Progress callback: called between passes with (pass 1-3, detail string, user_data) */
-typedef void (*obj_progress_fn)(int pass, const char *msg, void *ud);
-
+typedef void (*obj_progress_fn)(float frac, const char* msg, void* ud); /* frac 0..1 */
 
 /* Smooth normal accumulation callback */
 typedef struct { const float *px,*py,*pz; float *snx,*sny,*snz; int nv; } SNCtx;
@@ -331,19 +348,24 @@ static int obj_load_file(const char *path,
     out->num_verts=0;out->num_tris=0;out->num_indices=0;
     out->indexed=0;out->vb_size=0;out->ib_size=0;
 
-    /* DO NOT report progress before we know the file exists.
-       progress() renders a full VBLANK-PACED FRAME (~16.6ms), and the caller
-       probes a list of candidate paths. Announcing "Opening file" before the
-       open meant every MISS cost a whole frame, so the probe list - not the
-       loading - dominated startup. Probe first, report only on a hit. */
+    /* progress() renders a vblank-paced frame and the caller probes a list of
+       candidate paths, so a MISS must not cost a frame: check the file exists
+       (and get its size) with a plain open first. On a hit, show the first
+       frame immediately - pass 1 over a 2 GB file used to run before the first
+       frame - and report per 64 MB chunk in each of the 4 streaming passes. */
+    int efd = sceKernelOpen(path, 0, 0);
+    if (efd < 0)
+        return -1;
+    long fsz = sceKernelLseek(efd, 0, 2); /* SEEK_END */
+    sceKernelClose(efd);
+    ObjProg pg = {progress, progress_ud, "Counting", 0, 4, fsz > 0 ? (unsigned long)fsz : 0};
+    if (progress)
+        progress(0.0f, "Counting", progress_ud);
 
     /* ==== PASS 1: count ==== */
     P1Ctx p1 = {0, 0, 0, 0};
-    obj_stream_pass(path, p1_line, &p1);
+    obj_stream_pass(path, p1_line, &p1, &pg);
     if (p1.nv == 0 || p1.nf_tri == 0) return -4;
-
-    /* The file exists and has geometry: now it is worth drawing a frame. */
-    if (progress) progress(0, "Opening file", progress_ud);
 
     /* ==== Alloc positions (162MB for 13.5M verts) ==== */
     unsigned long pos_sz = (unsigned long)p1.nv * 4;
@@ -364,7 +386,6 @@ static int obj_load_file(const char *path,
         nnz = (float*)obj_talloc(nrm_sz, &nnz_ph);
     }
 
-    if (progress) progress(1, "Counting done", progress_ud);
 
     /* Alloc UVs */
     int nti = p1.nt > 0 ? p1.nt : 1;
@@ -375,7 +396,9 @@ static int obj_load_file(const char *path,
 
     /* ==== PASS 2: read positions + UVs ==== */
     P2Ctx p2 = { px, py, pz, nnx, nny, nnz, tu, tv, 0, 0, 0, p1.nv, nn, nti };
-    obj_stream_pass(path, p2_line, &p2);
+    pg.pass = 1;
+    pg.msg = "Reading positions";
+    obj_stream_pass(path, p2_line, &p2, &pg);
 
     /* Auto-scale */
     int vi = p2.vi;
@@ -399,7 +422,6 @@ static int obj_load_file(const char *path,
     }
     float *verts = (float*)((char*)vb + OBJ_DATA_OFF);
 
-    if (progress) progress(2, "Positions loaded", progress_ud);
 
     /* ==== Compute smooth vertex normals ==== */
     unsigned long snrm_sz = (unsigned long)vi * 4;
@@ -411,7 +433,10 @@ static int obj_load_file(const char *path,
     for(int i=0;i<vi;i++){snx[i]=0;sny[i]=0;snz[i]=0;}
     /* Pass 3a: accumulate via obj_stream_pass */
     { SNCtx snctx = { px, py, pz, snx, sny, snz, vi };
-      obj_stream_pass(path, sn_line, &snctx); }
+        pg.pass = 2;
+        pg.msg = "Smoothing normals";
+        obj_stream_pass(path, sn_line, &snctx, &pg);
+    }
     for(int i=0;i<vi;i++){
         float l=obj_sqrtf(snx[i]*snx[i]+sny[i]*sny[i]+snz[i]*snz[i]);
         if(l>1e-6f){snx[i]/=l;sny[i]/=l;snz[i]/=l;}
@@ -444,7 +469,9 @@ static int obj_load_file(const char *path,
         }
     }
     P3Ctx p3 = { px, py, pz, snx, sny, snz, tu, tv, vi, nti, verts, 0, 0.8f, 0.8f, 0.8f, &mtl_table };
-    obj_stream_pass(path, p3_line, &p3);
+    pg.pass = 3;
+    pg.msg = "Building triangles";
+    obj_stream_pass(path, p3_line, &p3, &pg);
 
     /* Free positions */
     obj_tfree(tu, tu_ph, nti*4); obj_tfree(tv, tv_ph, nti*4);
@@ -458,7 +485,8 @@ static int obj_load_file(const char *path,
     obj_tfree(sny, sny_ph, snrm_sz);
     obj_tfree(snz, snz_ph, snrm_sz);
 
-    if (progress) progress(3, "Faces done", progress_ud);
+    if (progress)
+        progress(1.0f, "Done", progress_ud);
 
     out->vb_base = vb; out->verts = verts; out->ib_base = 0;
     out->num_verts = p3.nout; out->num_tris = p3.nout / 3;
