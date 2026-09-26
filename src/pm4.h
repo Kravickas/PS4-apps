@@ -512,6 +512,21 @@ static inline void pm4_event_write_eop(struct PM4Builder* b,
     pm4_emit(b, 0);                                     // data_hi
 }
 
+/* GPU timestamp: EVENT_WRITE_EOP, BOTTOM_OF_PIPE_TS (40, shadPS4 BottomOfPipeTs),
+   EVENT_INDEX 5, DATA_SEL 3 = "send 64bit GPU counter value" (cikd.h), INT_SEL 0.
+   The GPU writes its 64-bit clock to addr once all prior work has completed.
+   addr must be 8-byte aligned. */
+static inline void pm4_gpu_timestamp(struct PM4Builder* b, volatile uint64_t* ts_addr) {
+    uint64_t addr = (uint64_t)(uintptr_t)ts_addr;
+    if (!pm4_have_space(b, 6)) { b->overflow++; return; }
+    pm4_emit(b, pm4_type3(PM4_EVENT_WRITE_EOP, 5));
+    pm4_emit(b, 40u | (5u << 8));
+    pm4_emit(b, (uint32_t)(addr & 0xFFFFFFF8u));
+    pm4_emit(b, (uint32_t)(addr >> 32) | (3u << 29));
+    pm4_emit(b, 0);
+    pm4_emit(b, 0);
+}
+
 static inline void pm4_nop(struct PM4Builder* b, uint32_t count) {
     if (count == 0) return;
     pm4_emit(b, pm4_type3(PM4_NOP, count));

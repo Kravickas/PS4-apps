@@ -153,8 +153,12 @@
    cube is convex, back-face culled and drawn after the floor. */
 #define SCENE_NO_DEPTH 1
 
+/* Mip levels for the floor albedo/normal maps (power-of-two sizes only, down to
+   16x16; see bmp_loader.h). 1 = no mips, as before. */
+#define FLOOR_TEX_MIPS 9
+
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "shadow-pass"
+#define BUILD_TAG "mips+fence-spin"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -465,6 +469,10 @@ static const uint32_t ps_grad_binary[] __attribute__((aligned(256))) = {
 // build_dcb's RT_TEST path binds these instead of the raw .rodata arrays,
 // which aren't GPU-accessible.
 static void *g_vs_fulltri_gpu = 0;
+/* Per-pass GPU timestamps (64-bit GPU clock, EOP): [0] frame start, [1] after
+   the shadow pass, [2] after the sky, [3] after the floor, [4] after the cube. */
+static volatile uint64_t *g_gpu_ts = 0;
+#define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 static void *g_vs_bg_gpu = 0;
 static void *g_vs_ftload_gpu = 0;
 static void *g_ps_magenta_gpu = 0;
@@ -1425,13 +1433,20 @@ static void build_vsharp_strided(uint32_t *v, void *base, uint32_t size,
 static void build_vsharp(uint32_t *v, void *base, uint32_t size) {
     build_vsharp_strided(v, base, size, 0);
 }
-static void build_tsharp(uint32_t *t, void *tex, int w, int h) {
+/* levels > 1: a mip chain laid out by bmp_load (LINEAR_ALIGNED, see
+   bmp_loader.h). SQ_IMG_RSRC_WORD3 (gfx_7_2_sh_mask.h): LAST_LEVEL @16,
+   POW2_PAD @25 - radeonsi sets POW2_PAD(last_level > 0) on GFX6-8. */
+static void build_tsharp_levels(uint32_t *t, void *tex, int w, int h, int levels) {
     uint64_t a=(uint64_t)(uintptr_t)tex;
     my_memset(t,0,32);
     t[0]=(uint32_t)(a>>8); t[1]=(uint32_t)(a>>40)|(10u<<20);
     t[2]=(uint32_t)(w-1)|((uint32_t)(h-1)<<14);
     t[3]=4u|(5u<<3)|(6u<<6)|(7u<<9)|(8u<<20)|(9u<<28);
+    if (levels > 1) t[3] |= ((uint32_t)(levels - 1) << 16) | (1u << 25);
     t[4]=(uint32_t)(w-1)<<13;
+}
+static void build_tsharp(uint32_t *t, void *tex, int w, int h) {
+    build_tsharp_levels(t, tex, w, h, 1);
 }
 
 /* Depth T#: R32_FLOAT, Depth2DThin64 tile mode. For sampling shadow_depth
@@ -1481,8 +1496,11 @@ static void build_ssharp_aniso(uint32_t *s) {
     /* dword1: max_lod=0xF00 (15.0) at bits[23:12] */
     s[1] = (0xF00u << 12);
     /* dword2: xy_mag_filter=Aniso_Linear(3) at [21:20],
-               xy_min_filter=Aniso_Linear(3) at [23:22] */
-    s[2] = (3u << 20) | (3u << 22);
+               xy_min_filter=Aniso_Linear(3) at [23:22],
+               mip_filter=Linear(2) at [27:26] (SQ_TEX_Z_FILTER_LINEAR; radeonsi
+               uses the Z_FILTER enum for MIP_FILTER). Single-level textures
+               are unaffected: the T# bounds the levels. */
+    s[2] = (3u << 20) | (3u << 22) | (2u << 26);
 }
 
 /* Shadow-map sampler at desc[80..83] for the floor PS (CAFE100F).
@@ -1851,6 +1869,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_draw_index_auto(b,BG_VERTS);
 #endif
 #endif
+    GPU_TS(2);
 
 #if defined(DRAW_STOP) && DRAW_STOP <= 1
     /* Bisect: stop after BG/sky draw. If the sky gradient renders, the
@@ -1909,6 +1928,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
 
         pm4_set_sh_regs(b,SH_VS_USER_DATA_0,floor_v,4);
         pm4_draw_index_auto(b, FLOOR_VERTS);
+        GPU_TS(3);
     }
 
 #if defined(DRAW_STOP) && DRAW_STOP <= 2
@@ -1953,6 +1973,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     } else {
         pm4_draw_index_auto(b, model_verts);
     }
+    GPU_TS(4);
 
     /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
          flip     -> marker block carrying the fence addr+value, NO EOP.
@@ -2785,7 +2806,7 @@ int main(void) {
         const char *bmp_paths[] = { DATA_DIR_NEW "texture.bmp", DATA_DIR_NEW "model.bmp",
                                     DATA_DIR_OLD "texture.bmp", DATA_DIR_OLD "model.bmp", 0 };
         for (int bi = 0; bmp_paths[bi]; bi++) {
-            if (bmp_load(bmp_paths[bi], gpu_alloc, &bmp) == 0) {
+            if (bmp_load(bmp_paths[bi], gpu_alloc, &bmp, 1) == 0) {
                 tex = bmp.pixels; tex_w = bmp.width; tex_h = bmp.height;
                 break;
             }
@@ -2803,13 +2824,13 @@ int main(void) {
 
     /* Floor albedo texture. */
     void *floor_albedo_tex = 0;
-    int floor_tex_w = 1, floor_tex_h = 1;
+    int floor_tex_w = 1, floor_tex_h = 1, floor_tex_levels = 1;
     {
         BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_albedo.bmp"), gpu_alloc, &bmp) == 0 ||
-            bmp_load(asset_path(2,"floor_albedo.bmp"), gpu_alloc, &bmp) == 0)) {
+        if ((bmp_load(asset_path(0,"floor_albedo.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0 ||
+            bmp_load(asset_path(2,"floor_albedo.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0)) {
             floor_albedo_tex = bmp.pixels;
-            floor_tex_w = bmp.width; floor_tex_h = bmp.height;
+            floor_tex_w = bmp.width; floor_tex_h = bmp.height; floor_tex_levels = bmp.levels;
         }
     }
     if (!floor_albedo_tex) {
@@ -2829,13 +2850,13 @@ int main(void) {
        (0.5, 0.5, 1.0 → byte (128, 128, 255)) so floor still renders if
        the BMP file is missing. */
     void *floor_normal_tex = 0;
-    int floor_nrm_w = 1, floor_nrm_h = 1;
+    int floor_nrm_w = 1, floor_nrm_h = 1, floor_nrm_levels = 1;
     {
         BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_normal.bmp"), gpu_alloc, &bmp) == 0 ||
-            bmp_load(asset_path(2,"floor_normal.bmp"), gpu_alloc, &bmp) == 0)) {
+        if ((bmp_load(asset_path(0,"floor_normal.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0 ||
+            bmp_load(asset_path(2,"floor_normal.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0)) {
             floor_normal_tex = bmp.pixels;
-            floor_nrm_w = bmp.width; floor_nrm_h = bmp.height;
+            floor_nrm_w = bmp.width; floor_nrm_h = bmp.height; floor_nrm_levels = bmp.levels;
         }
     }
     if (!floor_normal_tex) {
@@ -2854,8 +2875,8 @@ int main(void) {
     int floor_disp_w = 0, floor_disp_h = 0;
     {
         BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), cpu_alloc, &bmp) == 0 ||
-            bmp_load(asset_path(2,"floor_displacement.bmp"), cpu_alloc, &bmp) == 0)) {
+        if ((bmp_load(asset_path(0,"floor_displacement.bmp"), cpu_alloc, &bmp, 1) == 0 ||
+            bmp_load(asset_path(2,"floor_displacement.bmp"), cpu_alloc, &bmp, 1) == 0)) {
             floor_disp_tex = bmp.pixels;
             floor_disp_w = bmp.width; floor_disp_h = bmp.height;
             /* Auto-stretch the displacement range to span [0,255]. Many
@@ -2901,6 +2922,7 @@ int main(void) {
        GPU in the same frame. */
     uint32_t *desc=(uint32_t*)gpu_alloc_typed(512,0x100,MEM_TYPE_ONION);
     if (!desc) FATAL_EXIT("descriptor alloc failed");
+    g_gpu_ts = (volatile uint64_t *)gpu_alloc_typed(0x1000, 0x100, MEM_TYPE_ONION);
     build_tsharp(desc,tex,tex_w,tex_h);
     build_ssharp_aniso(desc+8);   /* 16× anisotropic — used by cube + floor */
     /* Second sampler at desc[80..83]: PCF depth-compare sampler for the floor
@@ -2947,9 +2969,9 @@ int main(void) {
        TILED layout) which caused shadPS4 to de-tile nonexistent tiles — that's
        why the texture looked streaked/washed.
        build_tsharp already sets 8 so no patching needed. */
-    build_tsharp(desc + 64, floor_albedo_tex, floor_tex_w, floor_tex_h);
+    build_tsharp_levels(desc + 64, floor_albedo_tex, floor_tex_w, floor_tex_h, floor_tex_levels);
     /* Floor normal map at desc[72..79] — procedural 64x64 tangent-space normals */
-    build_tsharp(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h);
+    build_tsharp_levels(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h, floor_nrm_levels);
 
     /* VB layout:
        - Main region: [ident][BG sun][BG verts][MVP][sun dir][cube verts]
@@ -3503,6 +3525,14 @@ int main(void) {
        is a safe over-allocation. We only read the first int32 (eventType). */
     static unsigned char sysevent[8192];
     trace_smap("smap init", -1, shadow_depth, shadow_size, desc, floor_albedo_tex, floor_normal_tex);
+    { char T[128]; int p = 0;
+      #define TP(x) do { const char *_q = (x); while (*_q) T[p++] = *_q++; } while (0)
+      TP("floor tex alb="); p += lg_i64(T + p, floor_tex_w); TP("x"); p += lg_i64(T + p, floor_tex_h);
+      TP(" levels="); p += lg_i64(T + p, floor_tex_levels);
+      TP(" nrm="); p += lg_i64(T + p, floor_nrm_w); TP("x"); p += lg_i64(T + p, floor_nrm_h);
+      TP(" levels="); p += lg_i64(T + p, floor_nrm_levels); TP("\n");
+      #undef TP
+      trace_line(T, (unsigned long)p); }
     while (running) {
         int bi=frame%NUM_FRAMES;
 #if FENCE_SLOTS > 1
@@ -4032,6 +4062,7 @@ int main(void) {
         if (batch_pos == 0) {
             phase("batch-start");
             pm4_init(&pm4, dcb_mem[dcb_slot], DCB_SIZE/4);
+            if (g_gpu_ts) pm4_gpu_timestamp(&pm4, &g_gpu_ts[0]);
             batch_frame0 = frame;
         }
 
@@ -4106,6 +4137,7 @@ int main(void) {
                                          shadow_depth);
         }
 #endif
+        if (g_gpu_ts) pm4_gpu_timestamp(&pm4, &g_gpu_ts[1]);
 
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
@@ -4126,6 +4158,7 @@ int main(void) {
            trace shows exactly which call (if any) still blocks. */
         int saf_ret; uint64_t t_saf; uint64_t t_submit; uint64_t t_ioctl0;
         int fence_iters = 0; int flip_iters = 0;
+        uint64_t gts[5] = {0, 0, 0, 0, 0};
         int asb, asa, asd;   /* AreSubmitsAllowed: before / after submit / after done */
         int ifb, ifa, ifd;   /* raw gnm in-flight submit count at the same points */
         int drn = 0;         /* drain-spin iterations needed to reach submits-allowed */
@@ -4249,19 +4282,24 @@ int main(void) {
                So: spin like the game for the common case, then fall back to
                sleeping so a genuinely stalled fence cannot burn a core, and
                keep the bounded timeout the game does not have. */
-            fence_iters = 0;
-            for (int sp = 0; sp < 20000 && *fence < fv+k; sp++) cpu_pause16();
-            /* Once the fence has demonstrably stopped, STOP PAYING FOR IT.
-               After a handful of timeouts we know it is not coming, and
-               250 x 1ms every frame is what makes the app unresponsive: with
-               ~570ms frames it can take that long to even notice the system's
-               quit event, and the OS kills us instead of letting us exit.
-               That is the crash on close. Keep a token wait so a recovery is
-               still detectable. */
+            /* Bounded hot spin, like the game's own fence wait (eboot 0x132370
+               spins with no sleep). The previous 1 ms usleep steps noticed GPU
+               completion up to ~1 ms late, and in this serial loop that delay
+               sits directly before SubmitFlip and the vblank deadline. The
+               clock is read every 32 pause16 batches; fence_iters is now the
+               wait in microseconds (trace field fwait).
+               Once the fence has demonstrably stopped, STOP PAYING FOR IT:
+               after a handful of timeouts the budget drops to 2 ms so a dead
+               GPU cannot make the app miss the system's quit event (the crash
+               on close), while a recovery is still detectable. */
             {
-                int budget = (g_fence_timeouts > 5) ? 2 : 250;
-                for (;fence_iters<budget && *fence < fv+k;fence_iters++)
-                    sceKernelUsleep(1000);
+                uint64_t fw0 = sceKernelGetProcessTime();
+                uint64_t budget_us = (g_fence_timeouts > 5) ? 2000 : 250000;
+                while (*fence < fv+k) {
+                    for (int sp = 0; sp < 32 && *fence < fv+k; sp++) cpu_pause16();
+                    if (sceKernelGetProcessTime() - fw0 >= budget_us) break;
+                }
+                fence_iters = (int)(sceKernelGetProcessTime() - fw0);
             }
             int fence_ok = (*fence >= fv+k);
             if (!fence_ok) {
@@ -4291,6 +4329,8 @@ int main(void) {
                 g_display_stalled = 0; g_stall_recoveries++;
             }
             phase("fence-ok");
+            if (g_gpu_ts && fence_ok)
+                for (int q = 0; q < 5; q++) { gts[q] = g_gpu_ts[q]; g_gpu_ts[q] = 0; }
             /* DO NOT FLIP A FRAME THE GPU NEVER FINISHED.
                Measured on hardware: once the fence stalls, flipping anyway
                queues a flip that the display can never complete, the buffer
@@ -4596,7 +4636,7 @@ int main(void) {
             LP(" subc="); p+=lg_i64(L+p,g_submit_count);
             LP(" ptms="); p+=lg_i64(L+p,(long long)(now/1000));
             LP(" evc="); p+=lg_i64(L+p,g_event_count);
-            LP(" fenceit="); p+=lg_i64(L+p,fence_iters);
+            LP(" fwait="); p+=lg_i64(L+p,fence_iters);
             LP(" flipit="); p+=lg_i64(L+p,flip_iters);
             LP(" wfd="); p+=lg_i64(L+p,wfd);
             LP(" labpre="); p+=lg_hex(L+p,(unsigned long long)lab_pre);
@@ -4604,6 +4644,15 @@ int main(void) {
                 ((volatile uint32_t*)flip_label_base)[bi*2] : 0xffffffffu));
             LP(" saf="); p+=lg_hex(L+p,(unsigned long long)(unsigned int)saf_ret);
             LP(" fence="); p+=lg_u64(L+p,(unsigned long long)*fence);
+            /* GPU pass times in GPU-clock ticks; -1 = stamp missing */
+            #define GTD(a,b_) ((gts[a] && gts[b_] && gts[b_] >= gts[a]) ? (long long)(gts[b_] - gts[a]) : -1LL)
+            LP(" gts0="); p+=lg_u64(L+p,(unsigned long long)gts[0]);
+            LP(" gsh="); p+=lg_i64(L+p,GTD(0,1));
+            LP(" gsk="); p+=lg_i64(L+p,GTD(1,2));
+            LP(" gfl="); p+=lg_i64(L+p,GTD(2,3));
+            LP(" gcu="); p+=lg_i64(L+p,GTD(3,4));
+            LP(" gtot="); p+=lg_i64(L+p,GTD(0,4));
+            #undef GTD
             LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv);
             L[p++]='\n';
             #undef LP

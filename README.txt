@@ -1,4 +1,61 @@
 ============================================================
+FLOOR MIPMAPS + FENCE SPIN  (build=mips+fence-spin)
+============================================================
+1) Floor albedo/normal mip chains (FLOOR_TEX_MIPS 9 -> 4096 down to 16x16).
+   Layout from AMD sources, not assumed:
+     addrlib (PAL releases/amd-18.40, r800/siaddrlib.cpp):
+       HwlComputeMipLevel     level width = max(1, basePitch >> level)
+       HwlGetPitchAlignmentLinear  pitch align = max(8, 64/4) = 16 texels
+       HwlGetSizeAdjustmentLinear  pitch*height padded to max(64, PI/4) texels
+     PAL addrMgr1.cpp: level offset = running size aligned to baseAlign
+       (= pipe interleave); pow2Pad = (mipLevels > 1)
+   Built only for power-of-two sizes, down to 16x16: there pitch == width,
+   every level is a multiple of 512 B, so the layout is a plain running sum
+   whether the pipe interleave is 256 or 512.
+   T#: LAST_LEVEL @16, POW2_PAD @25 (gfx_7_2_sh_mask.h; radeonsi sets
+   POW2_PAD(last_level > 0) on GFX6-8). word3 0x90800fac -> 0x92880fac.
+   Sampler (floor albedo/normal + cube): MIP_FILTER = LINEAR (2) @26
+   (SQ_TEX_Z_FILTER_LINEAR). Single-level textures are unaffected.
+   Loader: mips are generated while the rows stream in (2x2 box filter,
+   rounded), each level written sequentially; nothing is read back from
+   GARLIC. Host test with the real floor_displacement.bmp: all 9 levels
+   byte-identical to an independent numpy reference; max_levels=1 is
+   byte-identical to the old loader; a 300x200 BMP stays single-level.
+   Trace line: "floor tex alb=WxH levels=N nrm=WxH levels=M".
+
+2) Fence wait: the 1 ms usleep loop is now a bounded hot spin (the game's
+   own wait at 0x132370 spins with no sleep), clock checked every 32 pause16
+   batches; budget 250 ms, 2 ms after repeated timeouts (unchanged policy).
+   Trace field fenceit (1 ms sleeps) is now fwait (microseconds).
+
+GPU pass timestamps (gsh gsk gfl gcu gtot, gts0) are still logged, so the
+effect of the mips on the floor pass is measured, not guessed.
+
+============================================================
+GPU PASS TIMESTAMPS  (build=gpu-pass-timestamps)
+============================================================
+shadow-pass result: works (cube shadow). Slow frames 238 -> 754 of 5737.
+CPU is NOT the cost - medians, fast vs slow frames (us):
+    build 11/11  submit 26/26  pad 14/18  untimed (camera, cube, copies) ~725/~740
+    flip loop wB 15888 / 32561   <- all of the difference
+The loop is serial: wait fence -> SubmitFlip -> wait flip event -> next frame.
+A frame = ceil((~0.8 ms CPU + GPU time + fence-notice delay) / 16.7 ms) vblanks.
+The shadow pass added only GPU work and tripled the slow frames.
+
+Confirmed extra delay on the critical path: after a short spin the fence wait
+sleeps in 1 ms steps (sceKernelUsleep(1000)); fenceit = 2-3 on normal frames,
+so the GPU's completion is noticed up to ~1 ms late before the flip is queued.
+
+This build measures GPU time per pass with EOP timestamps:
+  EVENT_WRITE_EOP, BOTTOM_OF_PIPE_TS (40), EVENT_INDEX 5, DATA_SEL 3 = 64-bit
+  GPU counter (cikd.h; shadPS4 BottomOfPipeTs=40 / GpuClock64=3), INT_SEL 0.
+  Host-run encoding: c0044700 00000528 <lo> 60000020 0 0 - same packet as the
+  proven fence (c0044700 00000504 <lo> 20000020 <v> 0) except event/data_sel.
+  Stamps: [0] frame start [1] after shadow pass [2] after sky [3] after floor
+  [4] after cube. Trace fields (GPU ticks): gsh gsk gfl gcu gtot, and gts0 raw
+  to calibrate the counter frequency against ptms (not assumed).
+
+============================================================
 LADDER STEP: DRAW_STOP 4 (+shadow pass)  (build=shadow-pass)
 ============================================================
 DRAW_STOP 3 result: good (lines gone, cube drawn). 9812 frames, no stalls or
