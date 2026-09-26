@@ -145,15 +145,16 @@
 /* Ladder, one step at a time: 1 sky (clean, 1744 frames) -> 2 +floor -> 3 +cube
    -> DRAW_STOP_OFF +shadow. Full scene tried early: GPU hung in frame 0 at
    checkpoint 0x21 (shadow: hw state done). */
-#define DRAW_STOP 2
+#define DRAW_STOP 3
 
-/* Floor without depth test/write. The depth buffer was never cleared on hardware
-   (sky clear had writes off), so the floor's LESS test failed: no floor. The
-   first depth write (clear enabled) crashed in frame 0. Depth = separate step. */
-#define FLOOR_NO_DEPTH 1
+/* Floor and cube without depth test/write. The depth buffer is never cleared
+   on hardware (sky clear has writes off), so LESS fails against it; the first
+   depth write (clear enabled) crashed in frame 0. Depth = separate step. The
+   cube is convex, back-face culled and drawn after the floor. */
+#define SCENE_NO_DEPTH 1
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ps-m0-primmask"
+#define BUILD_TAG "wqm-exact-export+cube"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -621,7 +622,7 @@ static const uint32_t vs_shadow_binary[] __attribute__((aligned(256))) = {
 //   v21      = lit factor = 0.3 + 0.7*max(0, dot)
 //   v40-v43  = output RGBA = albedo * lit * light_color (alpha forced to 1)
 static const uint32_t ps_shader_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0C80100, 0xC0860108,
+    0xBEEB03FF, 0x00000009, 0xBEFC0302, 0xBEA0047E /* s_mov_b64 s[32:33], exec: live mask */, 0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0C80100, 0xC0860108,
     0xC08C010C, 0xC08E0120, 0xBF8C007F, 0xC80C0000,
     0xC80D0001, 0xC8100100, 0xC8110101, 0xC8280200,
     0xC8290201, 0xC82C0300, 0xC82D0301, 0xC8300700,
@@ -630,10 +631,10 @@ static const uint32_t ps_shader_binary[] __attribute__((aligned(256))) = {
     0x06282B14, 0x20282880, 0x102A28FF, 0x3F333333,
     0x062A2AFF, 0x3E99999A, 0x10502B10, 0x10522B11,
     0x10542B12, 0x1050501C, 0x1052521D, 0x1054541E,
-    0x7E5602F2, 0xF800080F, 0x2B2A2928, 0xBF810000,
+    0x7E5602F2, 0xBEFE0420 /* s_mov_b64 exec, s[32:33]: exact mode for the export */, 0xF800180F /* exp: vm=1 */, 0x2B2A2928, 0xBF810000,
     /* OrbShdr footer: 40 dwords = 160 bytes = 0xA0 */
     0x5362724F, 0x00726468,
-    0x0000A400, 0x00000000, 0xDEADBEEF,
+    0x0000B000, 0x00000000, 0xDEADBEEF,
     0xCAFE0114, 0x00000000,
 };
 
@@ -806,7 +807,7 @@ static const uint32_t ps_shadow_binary[] __attribute__((aligned(256))) = {
 //
 // PGM_RSRC1 = 0x28D (88 SGPRs, 56 VGPRs).
 static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0860108, 0xC0C80140,
+    0xBEEB03FF, 0x00000009, 0xBEFC0302, 0xBED8047E /* s_mov_b64 s[88:89], exec: live mask */, 0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0860108, 0xC0C80140,
     0xC0CC0148, 0xC0D40128, 0xC1180130, 0xC0A0010C,
     0xC0A20150, 0xC0AA0120, 0xBF8C007F, 0xC8280000,
     0xC8290001, 0xC82C0100, 0xC82D0101, 0xC8640200,
@@ -836,8 +837,8 @@ static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
     0x7C025E80, 0x004646F2, 0x104A46F0, 0x064A4AF0,
     0x103C3D25, 0x1064211E, 0x1066231E, 0x1068251E,
     0x10646454, 0x10666655, 0x10686856, 0x7E6A02F2,
-    0xF800080F, 0x35343332, 0xBF810000, 0x5362724F,
-    0x00726468, 0x0001F000, 0x00000000, 0xDEADBEEF,
+    0xBEFE0458 /* s_mov_b64 exec, s[88:89]: exact mode for the export */, 0xF800180F /* exp: vm=1 */, 0x35343332, 0xBF810000, 0x5362724F,
+    0x00726468, 0x0001FC00, 0x00000000, 0xDEADBEEF,
     0xCAFE0119, 0x00000000,
 };
 
@@ -1899,7 +1900,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
         pm4_set_context_reg(b,CTX_NUM_INTERP,2);
 #endif
-#if FLOOR_NO_DEPTH
+#if SCENE_NO_DEPTH
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
 #else
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
@@ -1934,7 +1935,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
 
     // Switch to depth=Less for cube
+#if SCENE_NO_DEPTH
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
+#else
     pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
+#endif
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1<<1)); /* cull back, CW front */
 
     // Draw 2: Model with real MVP. Sun at V#+0x40 read via s_buffer_load
@@ -3434,8 +3439,8 @@ int main(void) {
 #if !WRITE_VGT_STAGES_DMA
       { const char *m7 = " NO_VGT_STAGES_DMA"; while (*m7) L[p++] = *m7++; }
 #endif
-#if FLOOR_NO_DEPTH
-      { const char *m8 = " FLOOR_NO_DEPTH"; while (*m8) L[p++] = *m8++; }
+#if SCENE_NO_DEPTH
+      { const char *m8 = " SCENE_NO_DEPTH"; while (*m8) L[p++] = *m8++; }
 #endif
 #if EMPTY_FRAME
       { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }

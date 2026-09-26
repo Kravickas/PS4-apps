@@ -1,4 +1,42 @@
 ============================================================
+WQM + EXACT EXPORT, and LADDER STEP: DRAW_STOP 3 (+cube)
+(build=wqm-exact-export+cube)
+============================================================
+ps-m0-primmask result: speckles and half-screen flicker gone, floor smooth.
+Remaining: 1-2 px lines exactly on triangle edges (a full-width row at y=779
+in 1920x1080 = a grid edge; faint diagonals = quad diagonals). Pixel values:
+neutral grey 28-36 inside grey 48-52 floor - floor shading, not sky through a
+crack.
+
+Cause: the floor PS samples 3 textures with implicit LOD (derivatives from
+the 2x2 quad, 16x aniso sampler) but never enables whole-quad mode, so at
+triangle edges the helper lanes never ran v_interp and their coordinates are
+stale -> wrong derivatives -> wrong filter footprint on edge pixels.
+LLVM SIWholeQuadMode.cpp: "Whole quad mode is required for derivative
+computations"; prolog "S_MOV_B64 LiveMask, EXEC / S_WQM_B64 EXEC, EXEC".
+LLVM EXPInstructions.td: EXP has DisableWQM = 1 -> exports run in exact mode.
+radeonsi: last colour export sets valid_mask=1 (vm) and done=1.
+
+Patched (encodings from llvm-mc -mcpu=bonaire):
+  ps_floor_binary   s_mov_b64 s[88:89],exec  0xBED8047E | s_wqm_b64 exec,exec
+                    0xBEFE0A7E ... s_mov_b64 exec,s[88:89] 0xBEFE0458 before
+                    the export; export vm=1; OrbShdr length 496 -> 508
+  ps_shader_binary  (cube) same with s[32:33]: 0xBEA0047E / 0xBEFE0420;
+                    length 164 -> 176
+  Only these two PS sample textures. Registers fit (floor 64/91 of 64/96,
+  cube 44/35 of 44/48). Verified: each new binary == original + exactly these
+  dwords; all other binaries unchanged.
+  NOTE vm=1: an earlier session recorded full-screen noise with vm=1 on a
+  hand-encoded magenta PS and switched everything to vm=0. The rule ("set at
+  least once per PS") and radeonsi say vm=1. If the floor/cube turn into
+  noise, that bit is the suspect.
+
+Ladder: DRAW_STOP 3 = sky + floor + cube (no shadow pass). FLOOR_NO_DEPTH is
+now SCENE_NO_DEPTH and also covers the cube: the cube set LESS + write, which
+would fail against the never-cleared depth buffer exactly as the floor did.
+The cube is convex, back-face culled and drawn after the floor.
+
+============================================================
 PS M0 / PRIM_MASK FIX  (build=ps-m0-primmask)
 ============================================================
 Probe result (shadowmap-probe): desc[40] T# base == shadow map address
