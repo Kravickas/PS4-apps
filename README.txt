@@ -1,4 +1,34 @@
 ============================================================
+LADDER STEP: DRAW_STOP 4 (+shadow pass)  (build=shadow-pass)
+============================================================
+DRAW_STOP 3 result: good (lines gone, cube drawn). 9812 frames, no stalls or
+fence timeouts; 238 frames at 33 ms (one missed vblank), clustered while the
+camera moved. The trace has no GPU timestamps, so this is not proven GPU time.
+Likely cost: floor textures are 4096x4096 with NO mip levels (T# LAST_LEVEL
+0) sampled 3x per pixel with a 16x anisotropic sampler - looking toward the
+horizon, distant pixels fetch texels scattered over 64 MB textures. Fix =
+mip chains in the exact CI layout (addrlib rules): its own step.
+
+DRAW_STOP 4 = rung 3 + the shadow pass, keeping the BG_SKY_CLEAN sky
+(DRAW_STOP_OFF would ALSO switch to the full-scene sky path - two changes).
+Gate changed: #if !MINIMAL_TEST && (!DRAW_STOP || DRAW_STOP >= 4).
+
+Checked before enabling:
+  - shaders: vs_shadow (pos done + 0xCB), shadow-clear PS 0x4A, shadow PS
+    0x18A with M0; neither PS samples a texture (no WQM needed)
+  - own interpolator state, VGT_SHADER_STAGES_EN / VGT_DMA_SIZE gated off,
+    DB_Z_INFO=0 and no depth writes, 4096x4096 viewport/scissors,
+    ACQUIRE_MEM RT->texture barrier at its end
+  - state leak: the shadow pass shares the command buffer with the main pass
+    (no CLEAR_STATE between). Compiled-code analysis: all 57 context, 4 SH and
+    2 UCONFIG registers it writes are rewritten by the main pass - nothing
+    leaks.
+  - order: pm4_init -> build_shadow_dcb -> build_dcb appends (no reset).
+Expected: the cube casts a shadow on the floor (8-bit NDC.z in RGBA8 R).
+Last time this pass ran (before the VS done-bit / RSRC1 fixes) the GPU hung
+in frame 0 after checkpoint 0x21.
+
+============================================================
 WQM + EXACT EXPORT, and LADDER STEP: DRAW_STOP 3 (+cube)
 (build=wqm-exact-export+cube)
 ============================================================

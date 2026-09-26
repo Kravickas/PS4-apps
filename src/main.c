@@ -143,9 +143,9 @@
      -DRT_TEST         back to the gradient/fulltri diagnostic
      -DMINIMAL_TEST    GPU-DMA magenta, no draws */
 /* Ladder, one step at a time: 1 sky (clean, 1744 frames) -> 2 +floor -> 3 +cube
-   -> DRAW_STOP_OFF +shadow. Full scene tried early: GPU hung in frame 0 at
+   -> 4 +shadow pass (same sky as 1-3) -> DRAW_STOP_OFF (full-scene sky path). Full scene tried early: GPU hung in frame 0 at
    checkpoint 0x21 (shadow: hw state done). */
-#define DRAW_STOP 3
+#define DRAW_STOP 4
 
 /* Floor and cube without depth test/write. The depth buffer is never cleared
    on hardware (sky clear has writes off), so LESS fails against it; the first
@@ -154,7 +154,7 @@
 #define SCENE_NO_DEPTH 1
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "wqm-exact-export+cube"
+#define BUILD_TAG "shadow-pass"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -4096,7 +4096,7 @@ int main(void) {
         g_cp_frame = frame;
 
         uint32_t shadow_sz = 0;
-#if !defined(MINIMAL_TEST) && !defined(DRAW_STOP)
+#if !defined(MINIMAL_TEST) && (!defined(DRAW_STOP) || DRAW_STOP >= 4)
         if (shadow_depth && g_shadow_ready) {
             shadow_sz = build_shadow_dcb(&pm4,
                                          vs_shadow, ps_shadow_gpu, ps_shadow_clear_gpu,
