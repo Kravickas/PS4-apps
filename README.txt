@@ -1,4 +1,35 @@
 ============================================================
+PS M0 / PRIM_MASK FIX  (build=ps-m0-primmask)
+============================================================
+Probe result (shadowmap-probe): desc[40] T# base == shadow map address
+(0x202400000), format 8_8_8_8, texels 0xff0000ff from init to frame 18432.
+The shadow lookup is correct; the dark rectangle is gone.
+
+New symptom: screen-space split - left half smooth, right half dark specks,
+flickering. A world-space bug cannot split the screen; per-unit garbage can.
+
+Cause: every PS that interpolates (floor, cube, full-scene sky, shadow,
+loading-screen blue) ran v_interp WITHOUT setting M0.
+  LLVM SIInstructions.td:  let Uses = [MODE, M0, EXEC] in { V_INTERP_P1_F32 ...
+                           (int_amdgcn_interp_p1 ..., M0) }
+  radeonsi si_shader.c:    PS args = user SGPRs, then PRIM_MASK (hardware-
+                           provided), which the interp intrinsics take as M0.
+M0 held whatever the previous wave left there, so parameter data was read
+from the wrong LDS location - different per unit, per frame. shadPS4 ignores
+M0 for interpolation. The sky PS on this rung uses FragCoord only.
+
+Fix: s_mov_b32 m0, s2 (0xBEFC0302, assembled with llvm-mc -mcpu=bonaire) at
+dword 2 of each interpolating PS - after the 2-dword SDK header token
+0xBEEB03FF (shadPS4 checks code[0] for it). All PS bindings use 2 user SGPRs,
+so PRIM_MASK is s2. No branches or PC-relative ops in these shaders. Each
+OrbShdr trailer's length (bits 8-31, bytes of code) was increased by 4:
+shadPS4 translates exactly length/4 dwords.
+
+The fine grid on the floor is not vertex seams: mesh cells are 6.25 world
+units (64x64 over 400); the visible squares are far smaller - the texture's
+own tile pattern repeating.
+
+============================================================
 SHADOW MAP PROBE  (build=shadowmap-probe)
 ============================================================
 shadowmap-init did not remove the dark rectangle. From the floor PS IR:

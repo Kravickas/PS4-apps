@@ -153,7 +153,7 @@
 #define FLOOR_NO_DEPTH 1
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "shadowmap-probe"
+#define BUILD_TAG "ps-m0-primmask"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -621,7 +621,7 @@ static const uint32_t vs_shadow_binary[] __attribute__((aligned(256))) = {
 //   v21      = lit factor = 0.3 + 0.7*max(0, dot)
 //   v40-v43  = output RGBA = albedo * lit * light_color (alpha forced to 1)
 static const uint32_t ps_shader_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xC0C80100, 0xC0860108,
+    0xBEEB03FF, 0x00000009, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0C80100, 0xC0860108,
     0xC08C010C, 0xC08E0120, 0xBF8C007F, 0xC80C0000,
     0xC80D0001, 0xC8100100, 0xC8110101, 0xC8280200,
     0xC8290201, 0xC82C0300, 0xC82D0301, 0xC8300700,
@@ -633,7 +633,7 @@ static const uint32_t ps_shader_binary[] __attribute__((aligned(256))) = {
     0x7E5602F2, 0xF800080F, 0x2B2A2928, 0xBF810000,
     /* OrbShdr footer: 40 dwords = 160 bytes = 0xA0 */
     0x5362724F, 0x00726468,
-    0x0000A000, 0x00000000, 0xDEADBEEF,
+    0x0000A400, 0x00000000, 0xDEADBEEF,
     0xCAFE0114, 0x00000000,
 };
 
@@ -665,7 +665,7 @@ static const uint32_t ps_shader_binary_WPOS_UV[] __attribute__((aligned(256))) =
 //   output.rgb = lerp(sky, light_color, sun_factor)
 // Hash CAFE00E2 (camera-locked but with working sun disc).
 static const uint32_t ps_dark_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x0000001C, 0xC0820110, 0xC0840118,
+    0xBEEB03FF, 0x0000001C, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0820110, 0xC0840118,
     0xC086011C, 0xC0880120, 0xBF8C007F, 0xC8080000,
     0xC8090001, 0xC80C0100, 0xC80D0101, 0x7E140208,
     0x7E160209, 0x7E18020A, 0x7E1A020C, 0x7E1C020D,
@@ -680,7 +680,7 @@ static const uint32_t ps_dark_binary[] __attribute__((aligned(256))) = {
     0x08363111, 0x1036351B, 0x0630311B, 0x08363312,
     0x1036351B, 0x0632331B, 0x7E3402F2, 0xF800080F,
     0x1A191817, 0xBF810000, 0x5362724F, 0x00726468,
-    0x0000E800, 0x00000000, 0xDEADBEEF, 0xCAFE00E2,
+    0x0000EC00, 0x00000000, 0xDEADBEEF, 0xCAFE00E2,
     0x00000000,
 };
 
@@ -760,7 +760,7 @@ static const uint32_t ps_shadow_clear_binary[] __attribute__((aligned(256))) = {
 // PGM_RSRC1: 44 VGPRs, 48 SGPRs → (5<<6)|10 = 0x14A.
 // Hash CAFE00FB — fresh hash to force a pipeline-cache miss.
 static const uint32_t ps_shadow_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009,                          /* prefix */
+    0xBEEB03FF, 0x00000009, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */,                          /* prefix */
     0xC1100130,                                       /* s_load_dwordx16 s32, s[0:1], 0x30 — load light_MVP */
     0xBF8C007F,                                       /* s_waitcnt lgkmcnt(0) */
     /* Interp attr1 = world_pos.xyzw → v10,v11,v12,v13 */
@@ -782,7 +782,7 @@ static const uint32_t ps_shadow_binary[] __attribute__((aligned(256))) = {
     0xF800080F, 0x2B2A2928, 0xBF810000,
     /* OrbShdr footer: 37 dwords = 148 bytes = 0x94 */
     0x5362724F, 0x00726468,
-    0x00009400, 0x00000000, 0xDEADBEEF,
+    0x00009800, 0x00000000, 0xDEADBEEF,
     0xCAFE00FB, 0x00000000,
 };
 
@@ -806,7 +806,7 @@ static const uint32_t ps_shadow_binary[] __attribute__((aligned(256))) = {
 //
 // PGM_RSRC1 = 0x28D (88 SGPRs, 56 VGPRs).
 static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xC0860108, 0xC0C80140,
+    0xBEEB03FF, 0x00000009, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0860108, 0xC0C80140,
     0xC0CC0148, 0xC0D40128, 0xC1180130, 0xC0A0010C,
     0xC0A20150, 0xC0AA0120, 0xBF8C007F, 0xC8280000,
     0xC8290001, 0xC82C0100, 0xC82D0101, 0xC8640200,
@@ -837,17 +837,17 @@ static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
     0x103C3D25, 0x1064211E, 0x1066231E, 0x1068251E,
     0x10646454, 0x10666655, 0x10686856, 0x7E6A02F2,
     0xF800080F, 0x35343332, 0xBF810000, 0x5362724F,
-    0x00726468, 0x0001EC00, 0x00000000, 0xDEADBEEF,
+    0x00726468, 0x0001F000, 0x00000000, 0xDEADBEEF,
     0xCAFE0119, 0x00000000,
 };
 
 // White PS for loading bar — solid (1, 1, 1, 1) output, no texture sampling
 static const uint32_t ps_blue_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000006, 0xC8080000, 0xC8090001,
+    0xBEEB03FF, 0x00000006, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC8080000, 0xC8090001,
     0xC80C0100, 0xC80D0101, 0x7E2802F2, 0x7E2A02F2,
     0x7E2C02F2, 0x7E2E02F2, 0xF800080F, 0x17161514,
     0xBF810000, 0xBF800000, 0x5362724F, 0x00726468,
-    0x00003800, 0x00000000, 0xDEADBEEF, 0xCAFE0003,
+    0x00003C00, 0x00000000, 0xDEADBEEF, 0xCAFE0003,
     0x00000000,
 };
 
