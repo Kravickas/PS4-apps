@@ -3,8 +3,8 @@
  *           element face M (property list uchar int vertex_index/vertex_indices)
  */
 
-static int ply_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned long),
-                         ObjMesh* out, void (*cb)(float, const char*, void*), void* cb_ud) {
+int ply_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned long), ObjMesh* out,
+                  void (*cb)(float, const char*, void*), void* cb_ud) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return -1;
 

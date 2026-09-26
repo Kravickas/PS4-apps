@@ -25,8 +25,8 @@ static int stl_is_binary(const char *path) {
     return 0;
 }
 
-static int stl_load_binary(const char* path, void* (*alloc_fn)(unsigned long, unsigned long),
-                           ObjMesh* out, void (*cb)(float, const char*, void*), void* cb_ud) {
+int stl_load_binary(const char* path, void* (*alloc_fn)(unsigned long, unsigned long), ObjMesh* out,
+                    void (*cb)(float, const char*, void*), void* cb_ud) {
     int fd = sceKernelOpen(path, 0, 0);
     if (fd < 0) return -1;
 

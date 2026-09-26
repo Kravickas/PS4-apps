@@ -9,22 +9,9 @@
  * Peak: 162MB + 2.6GB + 64MB = 2.82GB
  */
 
-#define OBJ_STRIDE 12
-#define OBJ_BG_VERTS   6
-#define OBJ_IDENT_SIZE 64
-#define OBJ_BG_SUN_SIZE 16
-#define OBJ_BG_SIZE    (OBJ_BG_VERTS * OBJ_STRIDE * 4)
-#define OBJ_MVP_OFF    (OBJ_IDENT_SIZE + OBJ_BG_SUN_SIZE + OBJ_BG_SIZE)
-#define OBJ_MVP_SIZE   64
-#define OBJ_SUN_SIZE   16
-#define OBJ_DATA_OFF   (OBJ_MVP_OFF + OBJ_MVP_SIZE + OBJ_SUN_SIZE)
-#define OBJ_CHUNK      (64 * 1024 * 1024)
+#include "loaders.h"
 
-typedef struct {
-    void *vb_base; float *verts; uint32_t *ib_base;
-    int num_verts, num_tris, num_indices, indexed;
-    unsigned long vb_size, ib_size;
-} ObjMesh;
+#define OBJ_CHUNK (64 * 1024 * 1024)
 
 static void *obj_talloc(unsigned long size, long *phys) {
     unsigned long a = 0x4000;
@@ -42,14 +29,74 @@ static void obj_tfree(void *addr, long phys, unsigned long size) {
     if (phys >= 0) sceKernelReleaseDirectMemory(phys, size);
 }
 
-static float obj_atof(const char **pp, const char *end) {
-    const char *p = *pp;
-    while (p<end&&(*p==' '||*p=='\t')) p++;
-    float s=1; if(p<end&&*p=='-'){s=-1;p++;}else if(p<end&&*p=='+')p++;
-    float v=0; while(p<end&&*p>='0'&&*p<='9'){v=v*10+(*p-'0');p++;}
-    if(p<end&&*p=='.'){p++;float f=.1f;while(p<end&&*p>='0'&&*p<='9'){v+=(*p-'0')*f;f*=.1f;p++;}}
-    if(p<end&&(*p=='e'||*p=='E')){p++;int es=1,ex=0;if(p<end&&*p=='-'){es=-1;p++;}else if(p<end&&*p=='+')p++;while(p<end&&*p>='0'&&*p<='9'){ex=ex*10+(*p-'0');p++;}float m=1;for(int i=0;i<ex;i++)m*=10;v=es>0?v*m:v/m;}
-    *pp=p; return s*v;
+/* Digits accumulate in a uint64 (first 19 significant), then one scale by an
+   exact power of ten in double. Faster than per-digit float math, and exact to
+   float precision (the old v*10 / f*=0.1 float loop lost digits). */
+static const double obj_pow10[23] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+                                     1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+                                     1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+static float obj_atof(const char** pp, const char* end) {
+    const char* p = *pp;
+    while (p < end && (*p == ' ' || *p == '\t'))
+        p++;
+    int neg = 0;
+    if (p < end && (*p == '-' || *p == '+')) {
+        neg = (*p == '-');
+        p++;
+    }
+    uint64_t m = 0;
+    int nd = 0, e10 = 0;
+    while (p < end && *p >= '0' && *p <= '9') {
+        if (nd < 19) {
+            m = m * 10 + (uint64_t)(*p - '0');
+            if (m)
+                nd++;
+        } else {
+            e10++;
+        }
+        p++;
+    }
+    if (p < end && *p == '.') {
+        p++;
+        while (p < end && *p >= '0' && *p <= '9') {
+            if (nd < 19) {
+                m = m * 10 + (uint64_t)(*p - '0');
+                if (m)
+                    nd++;
+                e10--;
+            }
+            p++;
+        }
+    }
+    if (p < end && (*p == 'e' || *p == 'E')) {
+        p++;
+        int es = 1, ex = 0;
+        if (p < end && (*p == '-' || *p == '+')) {
+            es = (*p == '-') ? -1 : 1;
+            p++;
+        }
+        while (p < end && *p >= '0' && *p <= '9') {
+            if (ex < 10000)
+                ex = ex * 10 + (*p - '0');
+            p++;
+        }
+        e10 += es * ex;
+    }
+    double v = (double)m;
+    while (e10 < -22 && v != 0.0) {
+        v /= 1e22;
+        e10 += 22;
+    }
+    while (e10 > 22) {
+        v *= 1e22;
+        e10 -= 22;
+    }
+    if (e10 < 0)
+        v /= obj_pow10[-e10];
+    else if (e10 > 0)
+        v *= obj_pow10[e10];
+    *pp = p;
+    return (float)(neg ? -v : v);
 }
 static int obj_atoi(const char **pp, const char *end) {
     const char *p=*pp;while(p<end&&(*p==' '||*p=='\t'))p++;
@@ -61,8 +108,14 @@ static const char *obj_memchr(const char *s, char c, int n) {
     return 0;
 }
 
-static float obj_sqrtf(float x){if(x<=0)return 0;float r=x;for(int i=0;i<8;i++)r=.5f*(r+x/r);return r;}
-
+/* sqrtss: exact, one instruction. The old 8-step Newton from r = x was ~2x off
+   for small x (e.g. 1e-6), which skewed per-face normal weights. */
+static inline float obj_sqrtf(float x) {
+    if (x <= 0)
+        return 0;
+    __asm__("sqrtss %1, %0" : "=x"(x) : "x"(x));
+    return x;
+}
 
 /* MTL material table */
 #define MTL_MAX 32
@@ -181,31 +234,138 @@ typedef struct {
     unsigned long fsize;
 } ObjProg;
 
+/* First '\n' in [p, e), 8 bytes per step: x = word ^ 0x0A.. has a zero byte
+   exactly where the word has '\n' (the classic exact has-zero test), then the
+   byte loop finds its position. */
+static inline const char* obj_find_nl(const char* p, const char* e) {
+    while (p < e && ((uintptr_t)p & 7)) {
+        if (*p == '\n')
+            return p;
+        p++;
+    }
+    while (e - p >= 8) {
+        uint64_t x = *(const uint64_t*)p ^ 0x0A0A0A0A0A0A0A0AULL;
+        if ((x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL)
+            break;
+        p += 8;
+    }
+    while (p < e) {
+        if (*p == '\n')
+            return p;
+        p++;
+    }
+    return 0;
+}
+
+/* Reads land at OBJ_HEAD in each buffer; the partial last line of the previous
+   buffer is copied in front of them (longest carried line = OBJ_HEAD). */
+#define OBJ_HEAD 65536
+
+typedef struct {
+    int fd;
+    char* buf[2];
+    long len[2];
+    int full[2];
+    void* mtx;
+    void* cv;
+} ObjReader;
+
+/* Reader thread: fills buffer k whenever the parser has released it. Stops
+   after the read that returns less than a full chunk (EOF or error), which is
+   also where the parser stops, so neither waits on the other at exit. */
+static void* obj_reader_main(void* arg) {
+    ObjReader* rd = (ObjReader*)arg;
+    for (int k = 0;; k ^= 1) {
+        scePthreadMutexLock(&rd->mtx);
+        while (rd->full[k])
+            scePthreadCondWait(&rd->cv, &rd->mtx);
+        scePthreadMutexUnlock(&rd->mtx);
+        long r = sceKernelRead(rd->fd, rd->buf[k] + OBJ_HEAD, OBJ_CHUNK);
+        scePthreadMutexLock(&rd->mtx);
+        rd->len[k] = r;
+        rd->full[k] = 1;
+        scePthreadCondSignal(&rd->cv);
+        scePthreadMutexUnlock(&rd->mtx);
+        if (r < OBJ_CHUNK)
+            break;
+    }
+    return 0;
+}
+
+/* One pass over the file: every pass reads the whole file, so a reader thread
+   fills one buffer while this thread parses the other and disk reads overlap
+   parsing. Falls back to synchronous reads if the thread cannot be created. */
 static void obj_stream_pass(const char* path, obj_line_fn fn, void* ud, const ObjProg* pg) {
     int fd = sceKernelOpen(path, 0, 0);
-    if (fd < 0) return;
-    long ck_ph; unsigned long ck_sz = OBJ_CHUNK + 65536;
-    char *ck = (char*)obj_talloc(ck_sz, &ck_ph);
-    if (!ck) { sceKernelClose(fd); return; }
+    if (fd < 0)
+        return;
+    unsigned long bsz = OBJ_HEAD + OBJ_CHUNK + 1;
+    long ph[2] = {-1, -1};
+    ObjReader rd;
+    rd.fd = fd;
+    rd.buf[0] = (char*)obj_talloc(bsz, &ph[0]);
+    rd.buf[1] = rd.buf[0] ? (char*)obj_talloc(bsz, &ph[1]) : 0;
+    rd.len[0] = rd.len[1] = 0;
+    rd.full[0] = rd.full[1] = 0;
+    rd.mtx = 0;
+    rd.cv = 0;
+    if (!rd.buf[0] || !rd.buf[1]) {
+        if (rd.buf[0])
+            obj_tfree(rd.buf[0], ph[0], bsz);
+        sceKernelClose(fd);
+        return;
+    }
+    void* thr = 0;
+    int threaded = scePthreadMutexInit(&rd.mtx, 0, "obj_reader") == 0;
+    if (threaded && scePthreadCondInit(&rd.cv, 0, "obj_reader") != 0) {
+        scePthreadMutexDestroy(&rd.mtx);
+        threaded = 0;
+    }
+    if (threaded && scePthreadCreate(&thr, 0, obj_reader_main, &rd, "obj_reader") != 0) {
+        scePthreadCondDestroy(&rd.cv);
+        scePthreadMutexDestroy(&rd.mtx);
+        threaded = 0;
+    }
+    const char* lp = 0; /* partial last line carried from the previous buffer */
     int left = 0;
     unsigned long done = 0;
-    for (;;) {
-        long r = sceKernelRead(fd, ck + left, OBJ_CHUNK);
-        if (r <= 0) {
-            /* Process any remaining data */
-            if (left > 0) { ck[left] = '\n'; fn(ck, ck + left, ud); }
-            break;
+    for (int k = 0, first = 1;; k ^= 1, first = 0) {
+        long r;
+        if (threaded) {
+            scePthreadMutexLock(&rd.mtx);
+            while (!rd.full[k])
+                scePthreadCondWait(&rd.cv, &rd.mtx);
+            r = rd.len[k];
+            scePthreadMutexUnlock(&rd.mtx);
+        } else {
+            r = sceKernelRead(fd, rd.buf[k] + OBJ_HEAD, OBJ_CHUNK);
         }
-        long clen = left + r; ck[clen] = 0;
+        if (r < 0)
+            r = 0;
+        char* ck = rd.buf[k] + OBJ_HEAD - left;
+        for (int i = 0; i < left; i++)
+            ck[i] = lp[i];
+        if (threaded && !first) { /* leftover copied: hand the previous buffer back */
+            scePthreadMutexLock(&rd.mtx);
+            rd.full[k ^ 1] = 0;
+            scePthreadCondSignal(&rd.cv);
+            scePthreadMutexUnlock(&rd.mtx);
+        }
+        long clen = left + r;
+        ck[clen] = 0;
         const char *cp = ck, *ce = ck + clen;
+        left = 0;
         while (cp < ce) {
-            const char *eol = cp; while (eol < ce && *eol != '\n') eol++;
-            if (eol >= ce) {
-                left = (int)(ce - cp); if (left > 65536) left = 65536;
-                for (int i = 0; i < left; i++) ck[i] = cp[i]; break;
+            const char* eol = obj_find_nl(cp, ce);
+            if (!eol) {
+                left = (int)(ce - cp);
+                if (left > OBJ_HEAD)
+                    left = OBJ_HEAD;
+                lp = cp;
+                break;
             }
             fn(cp, eol, ud);
-            cp = eol + 1; left = 0;
+            cp = eol + 1;
         }
         done += (unsigned long)r;
         if (pg && pg->fn && pg->fsize) {
@@ -214,10 +374,23 @@ static void obj_stream_pass(const char* path, obj_line_fn fn, void* ud, const Ob
                 f = 1.0f;
             pg->fn(((float)pg->pass + f) / (float)pg->npass, pg->msg, pg->ud);
         }
-        if (r < OBJ_CHUNK) break;
+        if (r < OBJ_CHUNK) { /* EOF: the last line may have no '\n' */
+            if (left > 0) {
+                char* t = (char*)lp;
+                t[left] = '\n';
+                fn(t, t + left, ud);
+            }
+            break;
+        }
+    }
+    if (threaded) {
+        scePthreadJoin(thr, 0);
+        scePthreadCondDestroy(&rd.cv);
+        scePthreadMutexDestroy(&rd.mtx);
     }
     sceKernelClose(fd);
-    obj_tfree(ck, ck_ph, ck_sz);
+    obj_tfree(rd.buf[0], ph[0], bsz);
+    obj_tfree(rd.buf[1], ph[1], bsz);
 }
 
 /* Pass 1 context: count */
@@ -312,7 +485,6 @@ static int p3_line(const char *s, const char *e, void *ud) {
 
 /* ================================================================ */
 /* Progress callback: called between passes with (pass 1-3, detail string, user_data) */
-typedef void (*obj_progress_fn)(float frac, const char* msg, void* ud); /* frac 0..1 */
 
 /* Smooth normal accumulation callback */
 typedef struct { const float *px,*py,*pz; float *snx,*sny,*snz; int nv; } SNCtx;
@@ -340,10 +512,8 @@ static int sn_line(const char *s, const char *e, void *ud) {
     return 0;
 }
 
-static int obj_load_file(const char *path,
-                         void *(*alloc_fn)(unsigned long, unsigned long),
-                         ObjMesh *out,
-                         obj_progress_fn progress, void *progress_ud) {
+int obj_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned long), ObjMesh* out,
+                  obj_progress_fn progress, void* progress_ud) {
     out->vb_base=0;out->ib_base=0;out->verts=0;
     out->num_verts=0;out->num_tris=0;out->num_indices=0;
     out->indexed=0;out->vb_size=0;out->ib_size=0;

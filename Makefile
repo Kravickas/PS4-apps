@@ -46,6 +46,10 @@ LIBMODULES  := $(wildcard sce_module/*)
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) \
                -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
+# Model parsing (multi-GB text OBJ) is CPU-bound: optimise just the loaders.
+# The renderer (main.o) keeps its hardware-verified default codegen.
+# -fno-builtin: no implicit memset/memcpy calls from loop idioms (no libc dependency).
+$(INTDIR)/loaders.o: CFLAGS += -O2 -fno-strict-aliasing -fno-builtin
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
                $(TOOLCHAIN)/lib/crt1.o

@@ -137,6 +137,19 @@ extern int scePadClose(int handle);
 extern void *scePthreadSelf(void);
 extern int scePthreadSetaffinity(void *thread, unsigned long long mask);
 #endif
+/* Threads (libkernel; names verified against their NIDs, e.g. scePthreadCreate
+   = 6UgtwV+0zb4). Handles are opaque pointers; attr 0 = defaults. */
+extern int scePthreadCreate(void** thread, const void* attr, void* (*entry)(void*), void* arg,
+                            const char* name);
+extern int scePthreadJoin(void* thread, void** value);
+extern int scePthreadMutexInit(void** mutex, const void* attr, const char* name);
+extern int scePthreadMutexLock(void** mutex);
+extern int scePthreadMutexUnlock(void** mutex);
+extern int scePthreadMutexDestroy(void** mutex);
+extern int scePthreadCondInit(void** cond, const void* attr, const char* name);
+extern int scePthreadCondWait(void** cond, void** mutex);
+extern int scePthreadCondSignal(void** cond);
+extern int scePthreadCondDestroy(void** cond);
 extern int scePadRead(int, void*, int);
 extern int scePadReadState(int, void*);
 extern int sceUserServiceInitialize(void*);

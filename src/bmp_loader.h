@@ -1,5 +1,9 @@
 /* bmp_loader.h — Load a BMP into GPU memory as RGBA8, optionally with a mip chain */
 
+#pragma once
+#include <stdint.h>
+#include "nid_resolve.h"
+
 typedef struct {
     void *pixels;       /* RGBA8: level 0, then levels 1.. (see bmp_level_offset) */
     int width, height;  /* level 0 */

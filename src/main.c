@@ -114,13 +114,11 @@
 
 #define SET_AFFINITY 1
 
-#include "pm4.h"
+#include "bmp_loader.h"
+#include "loaders.h"
 #include "logo_texture.h"
 #include "nid_resolve.h"
-#include "obj_loader.h"
-#include "stl_loader.h"
-#include "ply_loader.h"
-#include "bmp_loader.h"
+#include "pm4.h"
 
 // memset/memcpy declared in nid_resolve.h
 
@@ -135,8 +133,17 @@
    105 px wide (NDC distance on a 16:9 screen); it is now round. */
 #define SUN_DISC_RADIUS_PX 110.0f
 
+/* Linear HDR pipeline: the scene renders to RGBA16F, bloom runs at quarter
+   resolution, the composite writes the sRGB display buffer (videoout format
+   A8R8G8B8Srgb). Values are linear light; 1.0 = display white. */
+#define SUN_HDR 4.0f         /* sun disc colour = light colour x this (desc[19]) */
+#define MOON_HDR 2.0f        /* moon disc */
+#define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
+#define BLOOM_INTENSITY 0.25f
+#define EXPOSURE 1.0f
+
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "stars+model+loading"
+#define BUILD_TAG "hdr-bloom+fast-loader"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -352,6 +359,23 @@ static void* g_ps_stars_gpu = 0;
 static uint32_t g_stars_v[4];
 static int g_stars_n = 0;    /* star quads in the buffer */
 static int g_stars_draw = 0; /* 0 while fully faded out (or on the loading screen) */
+/* Post-processing (emit_post): HDR scene target and a 6-level bloom chain
+   (quarter res down to 15x9; one level alone spreads only ~sigma 1.4 texels,
+   the coarse levels give the wide halo). Pitches are 64-texel multiples: the
+   T# TILING_INDEX 8 is linear aligned. A = downsample / blurred level, B = blur
+   temp, then the up-sampled sum. One 32-dword descriptor table per pass. */
+#define BLOOM_LEVELS 6
+static const uint16_t g_bloom_w[BLOOM_LEVELS] = {480, 240, 120, 60, 30, 15};
+static const uint16_t g_bloom_h[BLOOM_LEVELS] = {270, 135, 68, 34, 17, 9};
+static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64, 64, 64};
+#define POST_PASSES (BLOOM_LEVELS * 4) /* down, blur H, blur V, up-add (last: composite) */
+static void* g_hdr = 0;
+static void* g_bloom_a[BLOOM_LEVELS];
+static void* g_bloom_b[BLOOM_LEVELS];
+static uint32_t* g_post_tab = 0;
+static void* g_ps_post_down_gpu = 0;
+static void* g_ps_post_blur_gpu = 0;
+static void* g_ps_post_comp_gpu = 0;
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 
@@ -454,20 +478,58 @@ static const uint32_t vs_shadow_binary[] __attribute__((aligned(256))) = {
 //   v21      = lit factor = 0.3 + 0.7*max(0, dot)
 //   v40-v43  = output RGBA = albedo * lit * light_color (alpha forced to 1)
 static const uint32_t ps_shader_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xBEFC0302, 0xBEA0047E /* s_mov_b64 s[32:33], exec: live mask */, 0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0C80100, 0xC0860108,
-    0xC08C010C, 0xC08E0120, 0xBF8C007F, 0xC80C0000,
-    0xC80D0001, 0xC8100100, 0xC8110101, 0xC8280200,
-    0xC8290201, 0xC82C0300, 0xC82D0301, 0xC8300700,
-    0xC8310701, 0xF0800F00, 0x00641003, 0xBF8C0F70,
-    0x10281818, 0x102A1419, 0x06282B14, 0x102A161A,
-    0x06282B14, 0x20282880, 0x102A28FF, 0x3F333333,
-    0x062A2AFF, 0x3E99999A, 0x10502B10, 0x10522B11,
-    0x10542B12, 0x1050501C, 0x1052521D, 0x1054541E,
-    0x7E5602F2, 0xBEFE0420 /* s_mov_b64 exec, s[32:33]: exact mode for the export */, 0xF800180F /* exp: vm=1 */, 0x2B2A2928, 0xBF810000,
+    0xBEEB03FF,
+    0x00000015,
+    0xBEFC0302,
+    0xBEA0047E /* s_mov_b64 s[32:33], exec: live mask */,
+    0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */,
+    0xC0C80100,
+    0xC0860108,
+    0xC08C010C,
+    0xC08E0120,
+    0xBF8C007F,
+    0xC80C0000,
+    0xC80D0001,
+    0xC8100100,
+    0xC8110101,
+    0xC8280200,
+    0xC8290201,
+    0xC82C0300,
+    0xC82D0301,
+    0xC8300700,
+    0xC8310701,
+    0xF0800F00,
+    0x00641003,
+    0xBF8C0F70,
+    0x10281818,
+    0x102A1419,
+    0x06282B14,
+    0x102A161A,
+    0x06282B14,
+    0x20282880,
+    0x102A28FF,
+    0x3F6DE3F7,
+    0x062A2AFF,
+    0x3D90E047,
+    0x10502B10,
+    0x10522B11,
+    0x10542B12,
+    0x1050501C,
+    0x1052521D,
+    0x1054541E,
+    0x7E5602F2,
+    0xBEFE0420 /* s_mov_b64 exec, s[32:33]: exact mode for the export */,
+    0xF800180F /* exp: vm=1 */,
+    0x2B2A2928,
+    0xBF810000,
     /* OrbShdr footer: 40 dwords = 160 bytes = 0xA0 */
-    0x5362724F, 0x00726468,
-    0x0000B000, 0x00000000, 0xDEADBEEF,
-    0xCAFE0114, 0x00000000,
+    0x5362724F,
+    0x00726468,
+    0x0000B000,
+    0x00000000,
+    0xDEADBEEF,
+    0xCAFE0115,
+    0x00000000,
 };
 
 // Kept for diagnostic swap-back if needed: wpos-UV shadow sample
@@ -498,28 +560,30 @@ static const uint32_t ps_shader_binary_WPOS_UV[] __attribute__((aligned(256))) =
 //   output.rgb = lerp(sky, light_color, sun_factor)
 // Hash CAFE00E2 (camera-locked but with working sun disc).
 static const uint32_t ps_dark_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x0000001C, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0820110, 0xC0840118,
-    0xC086011C, 0xC0880120, 0xBF8C007F, 0xC8080000,
-    0xC8090001, 0xC80C0100, 0xC80D0101, 0x7E140208,
-    0x7E160209, 0x7E18020A, 0x7E1A020C, 0x7E1C020D,
-    0x7E1E020E, 0x7E200210, 0x7E220211, 0x7E240212,
-    0x7E260204, 0x7E280205, 0x7E2A0206, 0x082C06F2,
-    0x102C2CF0, 0x082E150D, 0x102E2D17, 0x062E1517,
-    0x0830170E, 0x10302D18, 0x06301718, 0x0832190F,
-    0x10322D19, 0x06321919, 0x08342702, 0x08362903,
-    0x1034351A, 0x1036371B, 0x0634371A, 0x7E385515,
-    0x1034391A, 0x083434F2, 0x20343480, 0x1E3434F2,
-    0x1034351A, 0x08362F10, 0x1036351B, 0x062E2F1B,
-    0x08363111, 0x1036351B, 0x0630311B, 0x08363312,
-    0x1036351B, 0x0632331B, 0x7E3402F2, 0xF800080F,
-    0x1A191817, 0xBF810000, 0x5362724F, 0x00726468,
-    0x0000EC00, 0x00000000, 0xDEADBEEF, 0xCAFE00E2,
-    0x00000000,
+    0xBEEB03FF, 0x0000001E, 0xBEFC0302 /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */,
+    0xC0820110, 0xC0840118, 0xC086011C,
+    0xC0880120, 0xBF8C007F, 0xC8080000,
+    0xC8090001, 0xC80C0100, 0xC80D0101,
+    0x7E140208, 0x7E160209, 0x7E18020A,
+    0x7E1A020C, 0x7E1C020D, 0x7E1E020E,
+    0x7E200210, 0x7E220211, 0x7E240212,
+    0x10202007, 0x10222207, 0x10242407 /* v16..v18 *= s7: desc[19] sun/moon HDR */,
+    0x7E260204, 0x7E280205, 0x7E2A0206,
+    0x082C06F2, 0x102C2CF0, 0x082E150D,
+    0x102E2D17, 0x062E1517, 0x0830170E,
+    0x10302D18, 0x06301718, 0x0832190F,
+    0x10322D19, 0x06321919, 0x08342702,
+    0x08362903, 0x1034351A, 0x1036371B,
+    0x0634371A, 0x7E385515, 0x1034391A,
+    0x083434F2, 0x20343480, 0x1E3434F2,
+    0x1034351A, 0x08362F10, 0x1036351B,
+    0x062E2F1B, 0x08363111, 0x1036351B,
+    0x0630311B, 0x08363312, 0x1036351B,
+    0x0632331B, 0x7E3402F2, 0xF800080F,
+    0x1A191817, 0xBF810000, 0x5362724F,
+    0x00726468, 0x0000F800, 0x00000000,
+    0xDEADBEEF, 0xCAFE00E3, 0x00000000,
 };
-
-
-
-
 
 // Shadow-pass clear PS: outputs (1, 0, 0, 1) — solid R=1.0 ("nothing occluding").
 // Drawn as a fullscreen quad BEFORE the cube in the shadow pass to fill the
@@ -599,39 +663,143 @@ static const uint32_t ps_shadow_binary[] __attribute__((aligned(256))) = {
 //
 // PGM_RSRC1 = 0x28D (88 SGPRs, 56 VGPRs).
 static const uint32_t ps_floor_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000009, 0xBEFC0302, 0xBED8047E /* s_mov_b64 s[88:89], exec: live mask */, 0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */, 0xC0860108, 0xC0C80140,
-    0xC0CC0148, 0xC0D40128, 0xC1180130, 0xC0A0010C,
-    0xC0A20150, 0xC0AA0120, 0xBF8C007F, 0xC8280000,
-    0xC8290001, 0xC82C0100, 0xC82D0101, 0xC8640200,
-    0xC8650201, 0xC8680300, 0xC8690301, 0xC8300400,
-    0xC8310401, 0xC8340500, 0xC8350501, 0xC8380600,
-    0xC8390601, 0xC8600700, 0xC8610701, 0x7E1E02F2,
-    0xF0800F00, 0x0064100A, 0xF0800F00, 0x00663C0A,
-    0xBF8C0070, 0x107878F4, 0x067878F3, 0x107A7AF4,
-    0x067A7AF3, 0x107C7CF4, 0x067C7CF3, 0x7E40031A,
-    0x7E420280, 0x08443080, 0x10464120, 0x3E464522,
-    0x7E465D23, 0x10404720, 0x10444722, 0x10484519,
-    0x104A411A, 0x104C4518, 0x084A4D25, 0x104C4119,
-    0x084C4C80, 0x10507920, 0x3E507B24, 0x3E507D18,
-    0x10527B25, 0x3E527D19, 0x10547922, 0x3E547B26,
-    0x3E547D1A, 0x10565128, 0x3E565329, 0x3E56552A,
-    0x7E565D2B, 0x10505728, 0x10525729, 0x1054572A,
-    0x10365040, 0x3E365241, 0x3E365442, 0x203C3680,
-    0x103C3CFF, 0x3F333333, 0x063C3CFF, 0x3E99999A,
-    0x10581830, 0x3E581A31, 0x3E581C32, 0x06585833,
-    0x105A1834, 0x3E5A1A35, 0x3E5A1C36, 0x065A5A37,
-    0x105C1838, 0x3E5C1A39, 0x3E5C1C3A, 0x065C5C3B,
-    0x105E183C, 0x3E5E1A3D, 0x3E5E1C3E, 0x065E5E3F,
-    0x7E60552F, 0x1058612C, 0x105A612D, 0x105C612E,
-    0x104258F0, 0x064242F0, 0x10445AF0, 0x064444F0,
-    0x1C405C80, 0x1A4040F2, 0xF0800100, 0x022A2321,
-    0xBF8C0F70, 0x7C024123, 0x7E480280, 0x004648F2,
-    0x7C025E80, 0x004646F2, 0x104A46F0, 0x064A4AF0,
-    0x103C3D25, 0x1064211E, 0x1066231E, 0x1068251E,
-    0x10646454, 0x10666655, 0x10686856, 0x7E6A02F2,
-    0xBEFE0458 /* s_mov_b64 exec, s[88:89]: exact mode for the export */, 0xF800180F /* exp: vm=1 */, 0x35343332, 0xBF810000, 0x5362724F,
-    0x00726468, 0x0001FC00, 0x00000000, 0xDEADBEEF,
-    0xCAFE0119, 0x00000000,
+    0xBEEB03FF,
+    0x00000040,
+    0xBEFC0302,
+    0xBED8047E /* s_mov_b64 s[88:89], exec: live mask */,
+    0xBEFE0A7E /* s_wqm_b64 exec, exec */ /* s_mov_b32 m0, s2: PRIM_MASK for v_interp */,
+    0xC0860108,
+    0xC0C80140,
+    0xC0CC0148,
+    0xC0D40128,
+    0xC1180130,
+    0xC0A0010C,
+    0xC0A20150,
+    0xC0AA0120,
+    0xBF8C007F,
+    0xC8280000,
+    0xC8290001,
+    0xC82C0100,
+    0xC82D0101,
+    0xC8640200,
+    0xC8650201,
+    0xC8680300,
+    0xC8690301,
+    0xC8300400,
+    0xC8310401,
+    0xC8340500,
+    0xC8350501,
+    0xC8380600,
+    0xC8390601,
+    0xC8600700,
+    0xC8610701,
+    0x7E1E02F2,
+    0xF0800F00,
+    0x0064100A,
+    0xF0800F00,
+    0x00663C0A,
+    0xBF8C0070,
+    0x107878F4,
+    0x067878F3,
+    0x107A7AF4,
+    0x067A7AF3,
+    0x107C7CF4,
+    0x067C7CF3,
+    0x7E40031A,
+    0x7E420280,
+    0x08443080,
+    0x10464120,
+    0x3E464522,
+    0x7E465D23,
+    0x10404720,
+    0x10444722,
+    0x10484519,
+    0x104A411A,
+    0x104C4518,
+    0x084A4D25,
+    0x104C4119,
+    0x084C4C80,
+    0x10507920,
+    0x3E507B24,
+    0x3E507D18,
+    0x10527B25,
+    0x3E527D19,
+    0x10547922,
+    0x3E547B26,
+    0x3E547D1A,
+    0x10565128,
+    0x3E565329,
+    0x3E56552A,
+    0x7E565D2B,
+    0x10505728,
+    0x10525729,
+    0x1054572A,
+    0x10365040,
+    0x3E365241,
+    0x3E365442,
+    0x203C3680,
+    0x103C3CFF,
+    0x3F6DE3F7,
+    0x063C3CFF,
+    0x3D90E047,
+    0x10581830,
+    0x3E581A31,
+    0x3E581C32,
+    0x06585833,
+    0x105A1834,
+    0x3E5A1A35,
+    0x3E5A1C36,
+    0x065A5A37,
+    0x105C1838,
+    0x3E5C1A39,
+    0x3E5C1C3A,
+    0x065C5C3B,
+    0x105E183C,
+    0x3E5E1A3D,
+    0x3E5E1C3E,
+    0x065E5E3F,
+    0x7E60552F,
+    0x1058612C,
+    0x105A612D,
+    0x105C612E,
+    0x104258F0,
+    0x064242F0,
+    0x10445AF0,
+    0x064444F0,
+    0x1C405C80,
+    0x1A4040F2,
+    0xF0800100,
+    0x022A2321,
+    0xBF8C0F70,
+    0x7C024123,
+    0x7E480280,
+    0x004648F2,
+    0x7C025E80,
+    0x004646F2,
+    0x104A46FF,
+    0x3F4848E6,
+    0x064A4AFF,
+    0x3E5EDC67,
+    0x103C3D25,
+    0x1064211E,
+    0x1066231E,
+    0x1068251E,
+    0x10646454,
+    0x10666655,
+    0x10686856,
+    0x7E6A02F2,
+    0xBEFE0458 /* s_mov_b64 exec, s[88:89]: exact mode for the export */,
+    0xF800180F /* exp: vm=1 */,
+    0x35343332,
+    0xBF810000,
+    0xBF800000 /* pad: trailer at an even dword */,
+    0x5362724F,
+    0x00726468,
+    0x00020800,
+    0x00000000,
+    0xDEADBEEF,
+    0xCAFE011A,
+    0x00000000,
 };
 
 // Stars PS: outputs desc[36..39] (star colour x fade), no interpolants, no
@@ -649,6 +817,49 @@ static const uint32_t ps_stars_binary[] __attribute__((aligned(256))) = {
     0xBF800000,             /* s_nop 0 (pad: trailer at an even dword)       */
     0x5362724F, 0x00726468, 0x00003000, 0x00000000, /* OrbShdr, length 48 B   */
     0xDEADBEEF, 0xCAFE0200, 0x00000000,
+};
+
+// Post 1/3 - bright-pass + downsample (shaders/post_down.s, llvm-mc -mcpu=bonaire).
+// uv = POS * (1/480, 1/270); 4 bilinear taps at +-1 source texel
+// average the 4x4 block exactly; out = c * max(l - desc[28], 0) / max(l, 1e-4),
+// l = max(r, g, b). desc: T# [0], S# [8], {1/w, 1/h, 1/src_w, 1/src_h} [12].
+static const uint32_t ps_post_down_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x0000001B, 0xC0C20100, 0xC0860108, 0xC088010C, 0xC00A011C, 0xBF8C007F, 0x10080410,
+    0x100A0611, 0x0A140812, 0x0A160A13, 0x06180812, 0x7E1A030B, 0x7E1C030A, 0x061E0A13, 0x7E20030C,
+    0x7E22030F, 0xF09C0F00, 0x0061140A, 0xF09C0F00, 0x0061180C, 0xF09C0F00, 0x00611C0E, 0xF09C0F00,
+    0x00612010, 0xBF8C0F70, 0x06283114, 0x06283914, 0x06284114, 0x062A3315, 0x062A3B15, 0x062A4315,
+    0x062C3516, 0x062C3D16, 0x062C4516, 0x102828FF, 0x3E800000, 0x102A2AFF, 0x3E800000, 0x102C2CFF,
+    0x3E800000, 0x20482B14, 0x20484916, 0x0A4A4814, 0x204A4A80, 0x204C48FF, 0x38D1B717, 0x7E4C5526,
+    0x104A4D25, 0x10284B14, 0x102A4B15, 0x102C4B16, 0x7E2E02F2, 0xF800180F, 0x17161514, 0xBF810000,
+    0x5362724F, 0x00726468, 0x0000E000, 0x00000000, 0xDEADBEEF, 0xCAFE0210, 0x00000000,
+};
+
+// Post 2/3 - separable blur (shaders/post_blur.s): 9-tap binomial (1 8 28 56 70 56 28 8 1)/256 as 5
+// bilinear taps: 0.2734375 at 0, 0.328125 at +-1.3333, 0.03515625 at +-3.1111
+// texels along desc[14..15] (one texel step). desc: T# [0], S# [8],
+// {1/w, 1/h, step_x, step_y} [12].
+static const uint32_t ps_post_blur_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x00000020, 0xC0C20100, 0xC0860108, 0xC088010C, 0xBF8C007F, 0x10180410, 0x101A0611,
+    0x7E0C0212, 0x7E0E0213, 0x10100CFF, 0x3FAAAAAB, 0x10120EFF, 0x3FAAAAAB, 0x10140CFF, 0x40471C72,
+    0x10160EFF, 0x40471C72, 0x061C110C, 0x061E130D, 0x0820110C, 0x0822130D, 0x0624150C, 0x0626170D,
+    0x0828150C, 0x082A170D, 0xF09C0F00, 0x0061180C, 0xF09C0F00, 0x00611C0E, 0xF09C0F00, 0x00612010,
+    0xF09C0F00, 0x00612412, 0xF09C0F00, 0x00612814, 0xBF8C0F70, 0x0658411C, 0x065A5124, 0x106030FF,
+    0x3E8C0000, 0x3E6058FF, 0x3EA80000, 0x3E605AFF, 0x3D100000, 0x0658431D, 0x065A5325, 0x106232FF,
+    0x3E8C0000, 0x3E6258FF, 0x3EA80000, 0x3E625AFF, 0x3D100000, 0x0658451E, 0x065A5526, 0x106434FF,
+    0x3E8C0000, 0x3E6458FF, 0x3EA80000, 0x3E645AFF, 0x3D100000, 0x7E6602F2, 0xF800180F, 0x33323130,
+    0xBF810000, 0xBF800000, 0x5362724F, 0x00726468, 0x00010800, 0x00000000, 0xDEADBEEF, 0xCAFE0211,
+    0x00000000,
+};
+
+// Post 3/3 - composite (shaders/post_comp.s): (scene + desc[14] * bloom) * desc[15]; the sRGB
+// colour buffer clamps and encodes. desc: scene T# [0] + point S# [8], {1/w, 1/h, bloom, exposure}
+// [12], bloom T# [16] + bilinear S# [24].
+static const uint32_t ps_post_comp_binary[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x0000000C, 0xC0C20100, 0xC0860108, 0xC088010C, 0xC0CA0110, 0xC08E0118,
+    0xBF8C007F, 0x10080410, 0x100A0611, 0xF09C0F00, 0x00610804, 0xF09C0F00, 0x00E50C04,
+    0xBF8C0F70, 0x3E101812, 0x3E121A12, 0x3E141C12, 0x10101013, 0x10121213, 0x10141413,
+    0x7E1602F2, 0xF800180F, 0x0B0A0908, 0xBF810000, 0xBF800000, 0x5362724F, 0x00726468,
+    0x00006800, 0x00000000, 0xDEADBEEF, 0xCAFE0212, 0x00000000,
 };
 
 // White PS for loading bar — solid (1, 1, 1, 1) output, no texture sampling
@@ -1362,6 +1573,177 @@ static void build_ssharp_pcf(uint32_t *s) {
 }
 
 // === DCB builder ===
+/* sRGB decode (IEC 61966-2-1): colours picked as sRGB values -> linear light.
+   x^2.4 = x^2 * (x^(1/5))^2, fifth root by Newton from 1 (x in (0.04, 1]). */
+static float srgb_to_linear(float c) {
+    if (c <= 0.04045f)
+        return c / 12.92f;
+    float x = (c + 0.055f) / 1.055f;
+    float y = 1.0f;
+    for (int i = 0; i < 8; i++)
+        y -= (y * y * y * y * y - x) / (5.0f * y * y * y * y);
+    return x * x * y * y;
+}
+
+/* RGBA16F render target as a texture: 16_16_16_16 / FLOAT, linear aligned
+   (TILING_INDEX 8, like the shadow map), 2D. */
+static void build_tsharp_f16(uint32_t* t, void* tex, int w, int h, int pitch) {
+    uint64_t a = (uint64_t)(uintptr_t)tex;
+    my_memset(t, 0, 32);
+    t[0] = (uint32_t)(a >> 8);
+    t[1] = (uint32_t)(a >> 40) | (0xCu << 20) | (7u << 26);
+    t[2] = (uint32_t)(w - 1) | ((uint32_t)(h - 1) << 14);
+    t[3] = 4u | (5u << 3) | (6u << 6) | (7u << 9) | (8u << 20) | (9u << 28);
+    t[4] = (uint32_t)(pitch - 1) << 13;
+}
+
+/* Clamp-to-edge sampler (CLAMP_LAST_TEXEL x/y/z), point or bilinear, LOD 0. */
+static void build_ssharp_clamp(uint32_t* s, int bilinear) {
+    my_memset(s, 0, 16);
+    s[0] = 2u | (2u << 3) | (2u << 6);
+    s[2] = bilinear ? ((1u << 20) | (1u << 22)) : 0u;
+}
+
+/* Pass tables, in emit_post order (layouts in the ps_post_* comments):
+   0..5   down:   level 0 = bright-pass of the HDR scene, 1..5 = level i-1
+   6..17  blur:   level i  H: A -> B, V: B -> A
+   18..22 up-add: level i  B = A (point) + bilinear(level i+1: B, or A for 5)
+   23     composite: scene (point) + BLOOM_INTENSITY * B0, x EXPOSURE */
+static void post_consts(uint32_t* t, float a, float b, float c, float d) {
+    float* f = (float*)(t + 12);
+    f[0] = a;
+    f[1] = b;
+    f[2] = c;
+    f[3] = d;
+}
+static void build_post_tables(uint32_t* tab) {
+    my_memset(tab, 0, POST_PASSES * 32 * 4);
+    uint32_t* t = tab;
+    for (int i = 0; i < BLOOM_LEVELS; i++, t += 32) {
+        float w = g_bloom_w[i], h = g_bloom_h[i];
+        if (i == 0) {
+            build_tsharp_f16(t, g_hdr, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+            post_consts(t, 1.0f / w, 1.0f / h, 1.0f / DISPLAY_W, 1.0f / DISPLAY_H);
+            ((float*)t)[28] = BLOOM_THRESHOLD;
+        } else {
+            build_tsharp_f16(t, g_bloom_a[i - 1], g_bloom_w[i - 1], g_bloom_h[i - 1],
+                             g_bloom_pitch[i - 1]);
+            post_consts(t, 1.0f / w, 1.0f / h, 1.0f / g_bloom_w[i - 1], 1.0f / g_bloom_h[i - 1]);
+            ((float*)t)[28] = 0.0f; /* no threshold: plain downsample */
+        }
+        build_ssharp_clamp(t + 8, 1);
+    }
+    for (int i = 0; i < BLOOM_LEVELS; i++) {
+        float w = g_bloom_w[i], h = g_bloom_h[i];
+        build_tsharp_f16(t, g_bloom_a[i], w, h, g_bloom_pitch[i]);
+        build_ssharp_clamp(t + 8, 1);
+        post_consts(t, 1.0f / w, 1.0f / h, 1.0f / w, 0.0f);
+        t += 32;
+        build_tsharp_f16(t, g_bloom_b[i], w, h, g_bloom_pitch[i]);
+        build_ssharp_clamp(t + 8, 1);
+        post_consts(t, 1.0f / w, 1.0f / h, 0.0f, 1.0f / h);
+        t += 32;
+    }
+    for (int i = BLOOM_LEVELS - 2; i >= 0; i--, t += 32) {
+        int j = i + 1;
+        build_tsharp_f16(t, g_bloom_a[i], g_bloom_w[i], g_bloom_h[i], g_bloom_pitch[i]);
+        build_ssharp_clamp(t + 8, 0);
+        post_consts(t, 1.0f / g_bloom_w[i], 1.0f / g_bloom_h[i], 1.0f, 1.0f);
+        build_tsharp_f16(t + 16, (j == BLOOM_LEVELS - 1) ? g_bloom_a[j] : g_bloom_b[j],
+                         g_bloom_w[j], g_bloom_h[j], g_bloom_pitch[j]);
+        build_ssharp_clamp(t + 24, 1);
+    }
+    build_tsharp_f16(t, g_hdr, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+    build_ssharp_clamp(t + 8, 0);
+    post_consts(t, 1.0f / DISPLAY_W, 1.0f / DISPLAY_H, BLOOM_INTENSITY, EXPOSURE);
+    build_tsharp_f16(t + 16, g_bloom_b[0], g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
+    build_ssharp_clamp(t + 24, 1);
+}
+
+/* CB_COLOR0_INFO: FORMAT @2, LINEAR_GENERAL @7, NUMBER_TYPE @8, COMP_SWAP @11,
+   BLEND_CLAMP @15 (gfx_7_2_sh_mask.h / enum.h). Blend clamp as Mesa: set for
+   NORM/SRGB, not FLOAT. */
+#define CB_INFO_RGBA16F ((0xCu << 2) | (1u << 7) | (7u << 8))
+#define CB_INFO_DISPLAY_SRGB ((0xAu << 2) | (1u << 7) | (6u << 8) | (1u << 11) | (1u << 15))
+
+/* One full-screen pass into dst (w x h, pitch in pixels): the previous render
+   target becomes a texture (same ACQUIRE_MEM as the shadow pass), then state
+   for this size, the same way build_shadow_dcb sets up its target. */
+static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t w, uint32_t h,
+                      uint32_t info, const void* ps, uint32_t rsrc1, const uint32_t* tab,
+                      const uint32_t* bg_v) {
+    pm4_acquire_mem(b, COHER_RT_TO_TEXTURE);
+    {
+        uint32_t s[2] = {0, (w & 0x7FFF) | ((h & 0x7FFF) << 16)};
+        pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, s, 2);
+        pm4_set_context_regs(b, CTX_VIEWPORT_SCISSOR0, s, 2);
+        s[0] = (1u << 31); /* WINDOW_OFFSET_DISABLE */
+        pm4_set_context_regs(b, CTX_GENERIC_SCISSOR, s, 2);
+        pm4_set_context_regs(b, CTX_WINDOW_SCISSOR, s, 2);
+    }
+    pm4_emit(b, pm4_type3(PM4_SET_CONTEXT_REG, 7));
+    pm4_emit(b, CTX_VIEWPORT0);
+    pm4_emit_f(b, (float)w * 0.5f);
+    pm4_emit_f(b, (float)w * 0.5f);
+    pm4_emit_f(b, (float)h * -0.5f);
+    pm4_emit_f(b, (float)h * 0.5f);
+    pm4_emit_f(b, 1.0f);
+    pm4_emit_f(b, 0.0f);
+    {
+        uint32_t c = (uint32_t)((uint64_t)(uintptr_t)dst >> 8);
+        uint32_t r[14] = {c, (pitch / 8) - 1, (pitch * h / 64) - 1, 0, info, 0, 0, 0, 0, 0, 0, 0, 0,
+                          0};
+        pm4_set_context_regs(b, CTX_CB_COLOR0_BASE, r, 14);
+        pm4_emit(b, 0xC0001000u);
+        pm4_emit(b, w | (h << 16));
+    }
+    pm4_set_context_reg(b, CTX_DEPTH_CONTROL, 0);
+    pm4_set_context_reg(b, CTX_DB_Z_INFO, 0); /* Z_INVALID: no depth surface */
+    pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0);
+    pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
+    /* PERSP_CENTER + POS_X/Y_FLOAT: v2, v3 = pixel centre (PIX_CENTER = 1). */
+    pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x302);
+    pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x302);
+    {
+        uint64_t a = (uint64_t)(uintptr_t)ps;
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), rsrc1, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
+        uint64_t t = (uint64_t)(uintptr_t)tab;
+        uint32_t ud[2] = {(uint32_t)t, (uint32_t)(t >> 32)};
+        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 2);
+    }
+    pm4_set_sh_regs(b, SH_VS_USER_DATA_0, bg_v, 4);
+    pm4_draw_index_auto(b, BG_VERTS);
+}
+
+/* PGM_RSRC1 of the post shaders: VGPRs v38 / v51 / v15, SGPRs s20 / s19 / s31,
+   each + VCC (the header token writes vcc_hi). */
+#define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
+#define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
+#define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
+
+/* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
+   Order and tables as build_post_tables. */
+static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v) {
+    const uint32_t* t = g_post_tab;
+    for (int i = 0; i < BLOOM_LEVELS; i++, t += 32)
+        post_pass(b, g_bloom_a[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
+                  g_ps_post_down_gpu, PS_POST_DOWN_RSRC1, t, bg_v);
+    for (int i = 0; i < BLOOM_LEVELS; i++) {
+        post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
+                  g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, t, bg_v);
+        t += 32;
+        post_pass(b, g_bloom_a[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
+                  g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, t, bg_v);
+        t += 32;
+    }
+    for (int i = BLOOM_LEVELS - 2; i >= 0; i--, t += 32)
+        post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
+                  g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
+    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_SRGB, g_ps_post_comp_gpu,
+              PS_POST_COMP_RSRC1, t, bg_v);
+}
+
 static uint32_t build_dcb(struct PM4Builder *b,
     const void *vs, const void *ps, const void *ps_bg, const void *ps_null,
     const void *ps_floor,
@@ -1475,12 +1857,30 @@ static uint32_t build_dcb(struct PM4Builder *b,
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
 
-    // Color — render directly to display FB (BGRA, sRGB).
-    { uint32_t c=(uint32_t)((uint64_t)(uintptr_t)color>>8);
-      uint32_t r[14]={c,(DISPLAY_W/8)-1,(DISPLAY_W*DISPLAY_H/64)-1,0,
-        0x09A8u,0,0,0,0,0,0,0,0,0};
-      pm4_set_context_regs(b,CTX_CB_COLOR0_BASE,r,14);
-      pm4_emit(b,0xC0001000u); pm4_emit(b,DISPLAY_W|(DISPLAY_H<<16)); }
+    /* Colour: the RGBA16F HDR target (emit_post composites it into the display
+       buffer); without it, straight into the sRGB display buffer. The old
+       0x09A8 had NUMBER_TYPE 1 = SNORM: 1.0 was stored as 127 -> half bright. */
+    {
+        void* rt = g_hdr ? g_hdr : color;
+        uint32_t c = (uint32_t)((uint64_t)(uintptr_t)rt >> 8);
+        uint32_t r[14] = {c,
+                          (DISPLAY_W / 8) - 1,
+                          (DISPLAY_W * DISPLAY_H / 64) - 1,
+                          0,
+                          g_hdr ? CB_INFO_RGBA16F : CB_INFO_DISPLAY_SRGB,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0};
+        pm4_set_context_regs(b, CTX_CB_COLOR0_BASE, r, 14);
+        pm4_emit(b, 0xC0001000u);
+        pm4_emit(b, DISPLAY_W | (DISPLAY_H << 16));
+    }
 
     pm4_set_context_reg(b,CTX_COLOR_TARGET_MASK,0xF);
     pm4_set_context_reg(b,CTX_COLOR_SHADER_MASK,0xF);
@@ -1604,6 +2004,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_draw_index_auto(b, model_verts);
     }
     GPU_TS(4);
+    if (g_hdr)
+        emit_post(b, color, bg_v);
+    GPU_TS(5);
 
     /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
          flip     -> marker block carrying the fence addr+value, NO EOP.
@@ -2220,9 +2623,15 @@ static void loading_progress(float frac, const char* msg, void* ud) {
     /* Loading sky: SOLID blue (both zenith and horizon = blue) to cover behind rendering */
     {
         float *sz = (float*)(c->desc + 24); /* zenith */
-        sz[0]=0.08f; sz[1]=0.20f; sz[2]=0.55f; sz[3]=0;
+        sz[0] = srgb_to_linear(0.08f);
+        sz[1] = srgb_to_linear(0.20f);
+        sz[2] = srgb_to_linear(0.55f);
+        sz[3] = 0;
         float *sh = (float*)(c->desc + 28); /* horizon */
-        sh[0]=0.08f; sh[1]=0.20f; sh[2]=0.55f; sh[3]=0;
+        sh[0] = srgb_to_linear(0.08f);
+        sh[1] = srgb_to_linear(0.20f);
+        sh[2] = srgb_to_linear(0.55f);
+        sh[3] = 0;
         /* Sun NDC off-screen (no disc on loading screen) */
         float *snd = (float*)(c->desc + 16);
         snd[0]=10.0f; snd[1]=10.0f; snd[2]=0.0001f; snd[3]=0;
@@ -2555,6 +2964,7 @@ int main(void) {
     if (!desc) FATAL_EXIT("descriptor alloc failed");
     g_gpu_ts = (volatile uint64_t *)gpu_alloc_typed(0x1000, 0x100, MEM_TYPE_ONION);
     build_tsharp(desc,tex,tex_w,tex_h);
+    desc[1] |= 9u << 26;          /* NUM_FORMAT SRGB: colour texture -> linear on sampling */
     build_ssharp_aniso(desc+8);   /* 16× anisotropic — used by cube + floor */
     /* Second sampler at desc[80..83]: PCF depth-compare sampler for the floor
        PS (CAFE100C) projective shadow lookup. Works in tandem with:
@@ -2601,6 +3011,7 @@ int main(void) {
        why the texture looked streaked/washed.
        build_tsharp already sets 8 so no patching needed. */
     build_tsharp_levels(desc + 64, floor_albedo_tex, floor_tex_w, floor_tex_h, floor_tex_levels);
+    desc[65] |= 9u << 26; /* albedo: NUM_FORMAT SRGB (the normal map stays UNORM data) */
     /* Floor normal map at desc[72..79] — procedural 64x64 tangent-space normals */
     build_tsharp_levels(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h, floor_nrm_levels);
 
@@ -2680,6 +3091,20 @@ int main(void) {
         g_stars_n = build_stars((float*)(stars_vb + 80));
         build_vsharp(g_stars_v, stars_vb, (uint32_t)stars_size);
     }
+    /* Post-processing targets (fully rewritten every frame) and tables. */
+    g_hdr = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 8, 0x10000);
+    int post_ok = g_hdr != 0;
+    for (int i = 0; i < BLOOM_LEVELS; i++) {
+        unsigned long sz = (unsigned long)g_bloom_pitch[i] * g_bloom_h[i] * 8;
+        g_bloom_a[i] = gpu_alloc(sz, 0x10000);
+        g_bloom_b[i] = gpu_alloc(sz, 0x10000);
+        post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
+    }
+    g_post_tab = (uint32_t*)gpu_alloc_typed(POST_PASSES * 32 * 4, 0x100, MEM_TYPE_ONION);
+    if (post_ok && g_post_tab)
+        build_post_tables(g_post_tab);
+    else
+        g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
     /* Copy cube verts into shadow VB at offset 0x50 */
     if (shadow_vb) {
         my_memcpy((char*)shadow_vb + 0x50,
@@ -2724,6 +3149,12 @@ int main(void) {
     UPLOAD_SHADER(ps_blue_gpu,          ps_blue_binary);
     UPLOAD_SHADER(ps_stars_gpu, ps_stars_binary);
     g_ps_stars_gpu = ps_stars_gpu;
+    UPLOAD_SHADER(ps_post_down_gpu, ps_post_down_binary);
+    UPLOAD_SHADER(ps_post_blur_gpu, ps_post_blur_binary);
+    UPLOAD_SHADER(ps_post_comp_gpu, ps_post_comp_binary);
+    g_ps_post_down_gpu = ps_post_down_gpu;
+    g_ps_post_blur_gpu = ps_post_blur_gpu;
+    g_ps_post_comp_gpu = ps_post_comp_gpu;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];
@@ -3559,7 +3990,10 @@ int main(void) {
         }
         {
             float *lc = (float*)(desc + 32);
-            lc[0] = light_r; lc[1] = light_g; lc[2] = light_b; lc[3] = 1.0f;
+            lc[0] = srgb_to_linear(light_r);
+            lc[1] = srgb_to_linear(light_g);
+            lc[2] = srgb_to_linear(light_b);
+            lc[3] = 1.0f;
         }
 
         /* Dynamic sky colors based on REAL sun elevation (orig_sun_y, before
@@ -3592,9 +4026,15 @@ int main(void) {
         }
         {
             float *sz = (float*)(desc + 24);
-            sz[0] = zr; sz[1] = zg; sz[2] = zb; sz[3] = 0;
+            sz[0] = srgb_to_linear(zr);
+            sz[1] = srgb_to_linear(zg);
+            sz[2] = srgb_to_linear(zb);
+            sz[3] = 0;
             float *sh = (float*)(desc + 28);
-            sh[0] = hr; sh[1] = hg; sh[2] = hb; sh[3] = 0;
+            sh[0] = srgb_to_linear(hr);
+            sh[1] = srgb_to_linear(hg);
+            sh[2] = srgb_to_linear(hb);
+            sh[3] = 0;
         }
         { /* Star fade (smoothstep over the STARS_FADE band) -> desc[36..39].
              Alpha 0: additive blend leaves the destination alpha alone. */
@@ -3605,8 +4045,8 @@ int main(void) {
                 fa = 1.0f;
             fa = fa * fa * (3.0f - 2.0f * fa);
             float* st = (float*)(desc + 36);
-            st[0] = 0.85f * fa;
-            st[1] = 0.88f * fa;
+            st[0] = srgb_to_linear(0.85f) * fa;
+            st[1] = srgb_to_linear(0.88f) * fa;
             st[2] = 1.0f * fa;
             st[3] = 0.0f;
             g_stars_draw = fa > 0.0f;
@@ -3629,7 +4069,8 @@ int main(void) {
             float disc_radius = sun_r * sun_r * (is_night ? 0.75f : 1.0f);
             if (cw > 0.01f) {
                 sd[0] = (cx / cw) * ((float)DISPLAY_W / (float)DISPLAY_H); sd[1] = cy / cw;
-                sd[2] = disc_radius; sd[3] = 1.0f;
+                sd[2] = disc_radius;
+                sd[3] = is_night ? MOON_HDR : SUN_HDR;
             } else {
                 sd[0] = 99.0f; sd[1] = 99.0f;
                 sd[2] = disc_radius; sd[3] = 0.0f;
@@ -3744,7 +4185,7 @@ int main(void) {
            trace shows exactly which call (if any) still blocks. */
         int saf_ret; uint64_t t_saf; uint64_t t_submit; uint64_t t_ioctl0;
         int fence_iters = 0; int flip_iters = 0;
-        uint64_t gts[5] = {0, 0, 0, 0, 0};
+        uint64_t gts[6] = {0, 0, 0, 0, 0, 0};
         int asb, asa, asd;   /* AreSubmitsAllowed: before / after submit / after done */
         int ifb, ifa, ifd;   /* raw gnm in-flight submit count at the same points */
         int drn = 0;         /* drain-spin iterations needed to reach submits-allowed */
@@ -3916,7 +4357,10 @@ int main(void) {
             }
             phase("fence-ok");
             if (g_gpu_ts && fence_ok)
-                for (int q = 0; q < 5; q++) { gts[q] = g_gpu_ts[q]; g_gpu_ts[q] = 0; }
+                for (int q = 0; q < 6; q++) {
+                    gts[q] = g_gpu_ts[q];
+                    g_gpu_ts[q] = 0;
+                }
             /* DO NOT FLIP A FRAME THE GPU NEVER FINISHED.
                Measured on hardware: once the fence stalls, flipping anyway
                queues a flip that the display can never complete, the buffer
@@ -4231,8 +4675,11 @@ int main(void) {
             LP(" gsk="); p+=lg_i64(L+p,GTD(1,2));
             LP(" gfl="); p+=lg_i64(L+p,GTD(2,3));
             LP(" gcu="); p+=lg_i64(L+p,GTD(3,4));
-            LP(" gtot="); p+=lg_i64(L+p,GTD(0,4));
-            #undef GTD
+            LP(" gpo=");
+            p += lg_i64(L + p, GTD(4, 5));
+            LP(" gtot=");
+            p += lg_i64(L + p, GTD(0, 5));
+#undef GTD
             LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv);
             L[p++]='\n';
             #undef LP

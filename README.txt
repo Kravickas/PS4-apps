@@ -1,4 +1,53 @@
 ============================================================
+HDR + BLOOM, sRGB OUTPUT, FAST LOADER  (build=hdr-bloom+fast-loader)
+============================================================
+Display buffer is A8R8G8B8Srgb (videoout 0x80000000). The colour buffer was
+CB_COLOR0_INFO 0x09A8 = NUMBER_TYPE 1 (SNORM): 1.0 stored as 127 -> the whole
+scene at half brightness.
+
+Pipeline (linear light, 1.0 = display white):
+  scene -> RGBA16F target (CB_INFO 0x7B0) -> 6-level bloom -> composite into
+  the display buffer with NUMBER_SRGB + SWAP_ALT (0x8EA8), hardware sRGB encode.
+  Bloom levels 480x270 .. 15x9 (pitch 512/256/128/64/64/64, T# tiling index 8
+  needs 64-texel pitch multiples): bright-pass downsample (threshold 1.0),
+  plain downsamples, blur H+V per level (9-tap binomial as 5 bilinear taps),
+  up-add coarse -> fine, composite = scene + 0.25 * bloom. 24 passes, each
+  starting with ACQUIRE_MEM(COHER_RT_TO_TEXTURE) like the shadow pass;
+  2064 dwords per frame. One level alone spreads sigma ~8 px (the halo stayed
+  inside the clipped sun - emulated); 6 levels: +0.15 at the disc edge, +0.08
+  at 30 px, +0.04 at 70 px, +0.02 at 130 px.
+  Shaders: shaders/post_{down,blur,comp}.s (llvm-mc -mcpu=bonaire), RSRC1
+  0x89 / 0x8C / 0x103. MIMG fields decoded by hand (op 0x27 IMAGE_SAMPLE_LZ).
+  Host emulation of the real tables + pass order: 4-tap == 4x4 box (7e-6),
+  blur energy 0.9999998, halo centred, no change away from the sun.
+
+Recalibration (linear):
+  - colour textures (desc[0] cube/logo/model, desc[64] floor albedo) sampled
+    with NUM_FORMAT SRGB; normal map and shadow map stay UNORM data
+  - sky, light, star and loading-screen colours: srgb_to_linear (exact
+    IEC 61966-2-1, max rel. error 5.6e-7)
+  - floor + cube PS: ambient 0.3 -> 0.3^2.2 = 0.0707, diffuse 0.7 -> 0.9293;
+    floor shadow factor 0.5 -> 0.5^2.2 = 0.2176 (lit part 0.7824)
+  - sky PS: disc colour x desc[19] (3 v_mul_f32 after the light load): SUN_HDR
+    4.0, MOON_HDR 2.0 - only the sun and moon exceed 1.0 and bloom
+  Knobs: SUN_HDR, MOON_HDR, BLOOM_THRESHOLD, BLOOM_INTENSITY, EXPOSURE.
+  Trace: gpo = post-processing GPU time, gtot now includes it.
+
+Loader (why 2 GB loaded slowly: CPU-bound -O0 parsing, 4 full passes = 8 GB
+of reads, reads and parsing serialized):
+  - loaders.c (OBJ/STL/PLY) built with -O2 -fno-strict-aliasing -fno-builtin;
+    main.o keeps its default codegen. loaders.o calls only libkernel.
+  - newline scan 8 bytes/step; float parser exact (4.2M numbers == strtof);
+    sqrt = sqrtss (the old 8-step Newton was ~2x off for small faces)
+  - reader thread (scePthread*, names checked against NIDs) fills one 64 MB
+    buffer while the other is parsed; falls back to synchronous reads
+  - last line without '\n' is no longer dropped (the old loop lost the last face)
+  Host: 2.67 s -> 1.04 s parse (104 MB); at 100 MB/s reads 4.50 s vs I/O 4.18 s.
+  Output byte-identical threaded / synchronous / 4 KB chunks.
+  Next: merge the normals pass into the emit pass (4 -> 3 file passes).
+bmp_loader.h now includes what it uses (clang-format sorts includes).
+
+============================================================
 STARS, MODEL FIXES, LOADING SCREEN  (build=stars+model+loading)
 ============================================================
 Model loaded -> cube still drawn: the model's VB puts vertices at
