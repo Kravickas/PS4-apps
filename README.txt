@@ -1,4 +1,26 @@
 ============================================================
+FLOOR 50% LARGER, PARALLAX TO 90 UNITS, FOG TO THE NEW EDGE
+(build=floor-300)
+============================================================
+FLOOR_HALF 200 -> 300 (floor +-300, corners at 424), FLOOR_UV_MAX 100 ->
+150 so a tile stays 4 units; u = (x + 300) / 4 differs from the old
+(x + 200) / 4 by 25 whole tiles, so every world point shows the same texel
+as before. Grid stays 64 x 64 (vertices 9.4 units apart; chord error of the
+curve ~0.001), vertex buffer layout unchanged.
+POM_FADE 30 -> 90: parallax fades out at 90 units instead of 30 (cost is
+the same, the loop is unrolled).
+Fog follows FLOOR_HALF: min(1, FOG_MIN * e^(d / L)), L = 300 / ln(1 /
+0.07) = 113: 7% at 0, 11% at 50, 17% at 100, 26% at 150, 41% at 200, 64%
+at 250, 100% at 300 and beyond (was 100% at 200).
+Far plane is 500: from the centre the whole floor (424) is inside; if the
+camera moves far off-centre the farthest corner can clip, where the fog is
+already 100% (sky colour), so it looks the same.
+Checks: mesh +-300, UV = (x + 300) / 4 exactly, curve and normals exact;
+cube and floor fog identical, weight exactly 1 from 300 out. OpenOrbis: 0
+warnings, no import change, 13/13 shaders match; changed build_static_vb
+and main (constants only). Shaders unchanged.
+
+============================================================
 EXPONENTIAL FOG WITH A MINIMUM  (build=fog-exp)
 ============================================================
 Fog weight = min(1, FOG_MIN * e^(d / L)), L = FLOOR_HALF / ln(1 / FOG_MIN):

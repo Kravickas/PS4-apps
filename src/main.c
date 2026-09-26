@@ -146,7 +146,7 @@
 /* Floor surface (ps_floor): parallax occlusion mapping from the height map
    and distance fog toward the sky gradient. */
 #define POM_DEPTH 0.05f      /* relief depth in world units (a texture tile is 4 units) */
-#define POM_FADE 30.0f       /* parallax fades to zero by this distance */
+#define POM_FADE 90.0f       /* parallax fades to zero by this distance */
 #define FOG_MIN 0.07f /* fog at distance 0; grows as FOG_MIN * e^(d / L), 100% at FLOOR_HALF */
 /* Midday sun disc colour (sRGB); amber at the horizon ramps to this. */
 #define SUN_DAY_R 1.00f
@@ -154,7 +154,7 @@
 #define SUN_DAY_B 0.87f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "fog-exp"
+#define BUILD_TAG "floor-300"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -332,8 +332,8 @@
 #define CUBE_VERTS      36
 #define FLOOR_VERTS     24576 /* 64×64 grid of quads, 2 tris each = 8192 tris = 24576 verts */
 #define FLOOR_GRID 64
-#define FLOOR_HALF 200.0f   /* floor spans +-FLOOR_HALF in X and Z */
-#define FLOOR_UV_MAX 100.0f /* albedo / normal / height tiles across the floor */
+#define FLOOR_HALF 300.0f   /* floor spans +-FLOOR_HALF in X and Z */
+#define FLOOR_UV_MAX 150.0f /* texture tiles across: one per 4 units */
 #define TOTAL_VERTS     (BG_VERTS + CUBE_VERTS + FLOOR_VERTS)
 #define VERT_STRIDE     48
 #define IDENT_OFF       0
@@ -751,9 +751,9 @@ static void build_static_vb(float* vb) {
        down toward the horizon: y = Y_BASE - (x^2 + z^2) / (2R), normal =
        normalize(x/R, 1, z/R). UV = (x + HALF, z + HALF) * FLOOR_UV_MAX / (2 HALF),
        so u runs along +x and v along +z (the tangent frame ps_floor uses). Surface
-       relief comes from parallax occlusion mapping in ps_floor: a 6.25-unit vertex
-       grid cannot carry texture-scale height detail (the old per-vertex sampling
-       read only 4 texels of the height map). */
+       relief comes from parallax occlusion mapping in ps_floor: a vertex grid
+       (2 * FLOOR_HALF / FLOOR_GRID units apart) cannot carry texture-scale height
+       detail; the old per-vertex sampling read only 4 texels of the height map. */
     {
         float *fp = (float*)((char*)vb + FLOOR_DATA_OFF);
         const float Y_BASE = -0.5f;
