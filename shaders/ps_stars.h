@@ -1,19 +1,18 @@
 #pragma once
 #include <stdint.h>
 
-// Stars PS: outputs desc[36..39] (star colour x fade), no interpolants, no
-// textures. Assembled with llvm-mc -mcpu=bonaire; header token + OrbShdr
-// trailer as the other shaders (literal 5 -> trailer at dword 12). Uses s0-s7
-// + VCC (header writes vcc_hi) and v0-v3 -> PGM_RSRC1 0x40 (16 SGPR, 4 VGPR).
+// Stars PS (ps_stars.s): a smooth (1 - r^2)^2 splat over the star quad, so the
+// light a star adds does not depend on its sub-pixel position (hard 1.5-4 px
+// quads varied up to 4x -> flicker). attr0 = (corner u, corner v, brightness)
+// from the vertex uv / normal.y. Colour = desc[36..39] (colour x fade).
+// Exports FP16_ABGR (packed, compr): the draw is additive, and radeonsi's
+// blend format for a 16_16_16_16 FLOAT target is FP16_ABGR - with a 32-bit
+// export the blend did not apply and faded stars replaced the sky (black).
+// PGM_RSRC1 0x42 (12 VGPRs, s0-s7 + VCC = 16 SGPRs). Hash CAFE0201.
 static const uint32_t ps_stars_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000005, /* s_mov_b32 vcc_hi, 5 (SDK header token)      */
-    0xC0820124,             /* s_load_dwordx4 s[4:7], s[0:1], 0x24 (desc[36]) */
-    0xBF8C007F,             /* s_waitcnt lgkmcnt(0)                          */
-    0x7E000204, 0x7E020205, /* v_mov_b32 v0, s4 ; v_mov_b32 v1, s5           */
-    0x7E040206, 0x7E060207, /* v_mov_b32 v2, s6 ; v_mov_b32 v3, s7           */
-    0xF800180F, 0x03020100, /* exp mrt0 v0, v1, v2, v3 done vm               */
-    0xBF810000,             /* s_endpgm                                      */
-    0xBF800000,             /* s_nop 0 (pad: trailer at an even dword)       */
-    0x5362724F, 0x00726468, 0x00003000, 0x00000000, /* OrbShdr, length 48 B   */
-    0xDEADBEEF, 0xCAFE0200, 0x00000000,
+    0xBEEB03FF, 0x0000000C, 0xBEFC0302, 0xC0820124, 0xC8080000, 0xC8090001, 0xC80C0100,
+    0xC80D0101, 0xC8100200, 0xC8110201, 0x100A0502, 0x3E0A0703, 0x080A0AF2, 0x200A0A80,
+    0x100A0B05, 0x100A0905, 0xBF8C007F, 0x100C0A04, 0x100E0A05, 0x10100A06, 0x7E120280,
+    0x5E140F06, 0x5E161308, 0xF8001C0F, 0x00000B0A, 0xBF810000, 0x5362724F, 0x00726468,
+    0x00006800, 0x00000000, 0xDEADBEEF, 0xCAFE0201, 0x00000000,
 };

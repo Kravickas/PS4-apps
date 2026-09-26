@@ -1,4 +1,33 @@
 ============================================================
+STARS: BLEND + NO FLICKER, OUTPUT DITHER  (build=stars-blend+dither)
+============================================================
+Black stars during the fade: additive blending cannot darken, so the stars
+were replacing the sky (colour x fade ~ 0 -> black). Blend registers matched
+radeonsi exactly; the export format did not. radeonsi's table uses FP16_ABGR
+as the (blend) export format for 16_16_16_16 FLOAT (and 8-bit) targets; we
+exported 32_ABGR. The star draw now sets SPI_SHADER_COL_FORMAT = FP16_ABGR (4)
+and ps_stars packs halves (v_cvt_pkrtz_f16_f32, compressed export, en 0xF,
+done vm); restored to 32_ABGR (9) after the draw.
+
+Flicker: hard 1.5-4 px quads cover 1..4 px depending on sub-pixel position
+(4x brightness swing). Stars are now a smooth (1 - r^2)^2 splat over the quad
+(corner uv and brightness via PARAM0 = uv.xy, normal.y), radius 2.0-3.0 px
+(on screen 2.0-3.6): total light varies <= 2.1%. Brightness 0.35-1.0, mostly
+faint; brighter = bigger. ps_stars: RSRC1 0x42, hash CAFE0201, source .s.
+
+Banding: new ps_post_final (the up-add passes keep ps_post_comp) encodes sRGB
+in the shader (exact curve, max error 1.6e-7) and adds +-0.5/255 interleaved
+gradient noise before a UNORM display write (CB 0x88A8; the no-bloom fallback
+keeps hardware sRGB). Dark night gradient: 17 flat bands (22 rows wide at
+quarter height) -> per-row average within 0.008 of a step. RSRC1 0x105.
+
+Checked: all 13 shaders fit their RSRC1, unique hashes; post chain passes
+1-23 + all tables unchanged, last pass = ps_post_final; OpenOrbis v0.5.4
+build: 0 warnings, no import/module change, 13/13 shader binaries in the
+eboot match their headers; only main, build_stars, build_dcb, emit_post
+changed.
+
+============================================================
 SHADERS MOVED TO shaders/  (build=hdr-bloom+fast-loader, no functional change)
 ============================================================
 All 12 shader binaries moved from main.c into shaders/<name>.h (one per

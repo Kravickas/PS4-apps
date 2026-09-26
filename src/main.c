@@ -144,7 +144,7 @@
 #define EXPOSURE 1.0f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "hdr-bloom+fast-loader"
+#define BUILD_TAG "stars-blend+dither"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -377,6 +377,7 @@ static uint32_t* g_post_tab = 0;
 static void* g_ps_post_down_gpu = 0;
 static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
+static void* g_ps_post_final_gpu = 0;
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 // === Helpers ===
@@ -923,10 +924,14 @@ static void build_vsharp_strided(uint32_t *v, void *base, uint32_t size,
 }
 /* Stars: STARS_N quads on a sphere of STARS_RADIUS around the origin, upper
    hemisphere only (height 0.03..1, uniform in area), each quad facing the
-   origin, 1.5-3.5 px wide at 1080p (1 px = 0.233 units at 400). Vertex layout
-   = the MVP VS's: pos(x,y,z,1), normal 0, uv 0 - 48 bytes. Fixed seed. */
+   origin. ps_stars draws a smooth (1 - r^2)^2 splat over the quad: radius
+   2.0-3.0 px keeps a star's total light within ~2% at any sub-pixel position
+   (hard 1.5 px quads varied 4x). Brighter stars are bigger. Vertex layout = the
+   MVP VS's 48 bytes: pos(x,y,z,1), normal (0, brightness, 0, 0), uv (corner
+   -1/+1, 0, 0) -> PARAM0 = (u, v, brightness). Fixed seed. */
 #define STARS_N 2500
 #define STARS_RADIUS 400.0f
+#define STARS_PX 0.2335f /* world units per pixel at STARS_RADIUS: 2*400*tan(0.3054)/1080 */
 /* Fade band in orig_sun_y (sun height factor): stars start fading in when the
    sun drops below +STARS_FADE (just before sunset = moonrise), are full at
    -STARS_FADE, and fade out mirrored around sunrise (= moonset). */
@@ -948,7 +953,9 @@ static int build_stars(float* out) {
         }
         float t2x = dy * t1z, t2y = dz * t1x - dx * t1z, t2z = -dy * t1x; /* cross(d, t1) */
         float u = STAR_RND();
-        float sz = 0.18f + 0.20f * u * u * u; /* mostly small, a few bright */
+        float u3 = u * u * u;                     /* mostly faint, a few bright */
+        float sz = (2.0f + 1.0f * u3) * STARS_PX; /* splat radius 2.0-3.0 px */
+        float bright = 0.35f + 0.65f * u3;
         float cx = dx * STARS_RADIUS, cy = dy * STARS_RADIUS, cz = dz * STARS_RADIUS;
         float c[4][3];
         for (int k = 0; k < 4; k++) {
@@ -965,6 +972,9 @@ static int build_stars(float* out) {
             o[3] = 1.0f;
             for (int q = 4; q < 12; q++)
                 o[q] = 0.0f;
+            o[5] = bright;                                      /* normal.y */
+            o[8] = (tri[v] == 1 || tri[v] == 2) ? 1.0f : -1.0f; /* uv: corner */
+            o[9] = (tri[v] >= 2) ? 1.0f : -1.0f;
         }
     }
 #undef STAR_RND
@@ -1172,6 +1182,8 @@ static void build_post_tables(uint32_t* tab) {
    NORM/SRGB, not FLOAT. */
 #define CB_INFO_RGBA16F ((0xCu << 2) | (1u << 7) | (7u << 8))
 #define CB_INFO_DISPLAY_SRGB ((0xAu << 2) | (1u << 7) | (6u << 8) | (1u << 11) | (1u << 15))
+/* Final composite target: ps_post_final encodes sRGB (and dithers) itself. */
+#define CB_INFO_DISPLAY_UNORM ((0xAu << 2) | (1u << 7) | (0u << 8) | (1u << 11) | (1u << 15))
 
 /* One full-screen pass into dst (w x h, pitch in pixels): the previous render
    target becomes a texture (same ACQUIRE_MEM as the shadow pass), then state
@@ -1228,6 +1240,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
+#define PS_POST_FINAL_RSRC1 ((4u << 6) | 5u) /* v21, s31 + VCC */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -1247,8 +1260,8 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     for (int i = BLOOM_LEVELS - 2; i >= 0; i--, t += 32)
         post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
-    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_SRGB, g_ps_post_comp_gpu,
-              PS_POST_COMP_RSRC1, t, bg_v);
+    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
+              g_ps_post_final_gpu, PS_POST_FINAL_RSRC1, t, bg_v);
 }
 
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -1445,11 +1458,14 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Stars: after the sky, before the floor. Depth test LESS against the cleared
        1.0 without writing, so the floor drawn next covers anything below the
        horizon. Additive blend (CB_BLEND0_CONTROL: SRC ONE @0, DST ONE @8,
-       COMB dst+src, ENABLE @30 - gfx_7_2_sh_mask.h / enum.h), reset to 0 after. */
+       COMB dst+src, ENABLE @30 - gfx_7_2_sh_mask.h / enum.h), reset to 0 after.
+       The blend needs the export format radeonsi uses for blending a
+       16_16_16_16 FLOAT target, FP16_ABGR (4); ps_stars exports packed halves.
+       Restored to 32_ABGR (9) for the other draws. */
     if (g_stars_n > 0 && g_stars_draw && g_ps_stars_gpu) {
         {
             uint64_t a = (uint64_t)(uintptr_t)g_ps_stars_gpu;
-            uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (1u << 6) | 0u, (2u << 1)};
+            uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (1u << 6) | 2u, (2u << 1)};
             pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
             uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
                               (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
@@ -1459,9 +1475,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
                             (1u << 1) | (1u << 4));     /* Z test LESS, no write */
         pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); /* no culling */
         pm4_set_context_reg(b, CTX_BLEND_CONTROL0, (1u << 0) | (1u << 8) | (1u << 30));
+        pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 4); /* SPI_SHADER_FP16_ABGR */
         pm4_set_sh_regs(b, SH_VS_USER_DATA_0, g_stars_v, 4);
         pm4_draw_index_auto(b, (uint32_t)g_stars_n * 6u);
         pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
+        pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 9); /* SPI_SHADER_32_ABGR */
     }
 
     // === Floor draw: between sky and cube ===
@@ -2659,9 +2677,11 @@ int main(void) {
     UPLOAD_SHADER(ps_post_down_gpu, ps_post_down_binary);
     UPLOAD_SHADER(ps_post_blur_gpu, ps_post_blur_binary);
     UPLOAD_SHADER(ps_post_comp_gpu, ps_post_comp_binary);
+    UPLOAD_SHADER(ps_post_final_gpu, ps_post_final_binary);
     g_ps_post_down_gpu = ps_post_down_gpu;
     g_ps_post_blur_gpu = ps_post_blur_gpu;
     g_ps_post_comp_gpu = ps_post_comp_gpu;
+    g_ps_post_final_gpu = ps_post_final_gpu;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];

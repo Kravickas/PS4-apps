@@ -9,11 +9,12 @@ CPU code, which is why GCN assembly must not live in src/).
   ps_shader.h        cube / model: texture + Lambert
   ps_shadow.h        shadow pass: light-space depth
   ps_shadow_clear.h  shadow map clear
-  ps_stars.h         stars
+  ps_stars.h         stars (smooth splat, FP16 export for the additive blend)
   ps_blue.h          loading bar
-  ps_post_*.h        bloom: down / blur / composite, sources in ps_post_*.s
+  ps_post_*.h        bloom: down / blur / up-add, final composite (sRGB encode
+                     + dither); sources in ps_post_*.s
 
-Only the post shaders have .s sources; the others were hand-encoded and their
+Only the post shaders and ps_stars have .s sources; the others were hand-encoded and their
 headers document the instructions. To rebuild a post shader:
   llvm-mc -triple=amdgcn -mcpu=bonaire -show-encoding ps_post_down.s
 then put the dwords between the SDK header token (0xBEEB03FF, n/2-1) and the
