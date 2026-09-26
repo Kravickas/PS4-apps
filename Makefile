@@ -32,7 +32,7 @@ CXX         := clang++
 LD          := ld.lld
 PKG         := $(TOOLCHAIN)/bin/linux
 
-# ---- Sources: any .c / .cpp / .s in src/ ----
+# ---- Sources: any .c / .cpp / .s in src/ (shaders/ holds GPU code: headers only) ----
 CFILES      := $(wildcard $(SRCDIR)/*.c)
 CPPFILES    := $(wildcard $(SRCDIR)/*.cpp)
 SFILES      := $(wildcard $(SRCDIR)/*.s)
@@ -44,7 +44,7 @@ OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
 LIBMODULES  := $(wildcard sce_module/*)
 
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) \
-               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
+               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -Ishaders
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
 # Model parsing (multi-GB text OBJ) is CPU-bound: optimise just the loaders.
 # The renderer (main.o) keeps its hardware-verified default codegen.

@@ -1,4 +1,15 @@
 ============================================================
+SHADERS MOVED TO shaders/  (build=hdr-bloom+fast-loader, no functional change)
+============================================================
+All 12 shader binaries moved from main.c into shaders/<name>.h (one per
+shader, comments with them), included via shaders.h; Makefile adds -Ishaders.
+main.c 4794 -> 4301 lines. Removed ps_shader_binary_WPOS_UV (unused leftover,
+missed by the earlier cleanup) and a stale 'Projective shadow PS' comment.
+Comment facts updated to this build (hashes, 0.0707/0.9293, shadow 0.2176,
+RSRC1 0x18A / 0x2CF). Verified with clang-18: every shader section and all
+70 functions (disassembly, symbolic relocations) identical before/after.
+
+============================================================
 HDR + BLOOM, sRGB OUTPUT, FAST LOADER  (build=hdr-bloom+fast-loader)
 ============================================================
 Display buffer is A8R8G8B8Srgb (videoout 0x80000000). The colour buffer was
