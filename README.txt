@@ -1,4 +1,37 @@
 ============================================================
+CLEANUP: DIAGNOSTICS REMOVED  (build=cleanup-diagnostics)
+============================================================
+round-sun+start-of-day confirmed on hardware: 13456 frames, 0 dropped
+(median 16.68 ms), GPU 5.6 ms median / 8.7 ms p95 per frame, depth clear
+substitutes 1.0 (dz0 = 0x3f800000), mips active.
+
+Removed (main.c 4812 -> ~4210 lines):
+  - bring-up ladder and test modes: DRAW_STOP, RT_TEST, MINIMAL_TEST,
+    VS_LOAD_TEST, BG_SKY_CLEAN / BG_CLEAN_* / BG_PS_MAGENTA (+ *_FORCE),
+    SIMPLE_DRAW - stripped with unifdef for the full-scene config
+  - bisection: SKY_NO_DRAW, EMPTY_FRAME, STATE_CUT / STATE_PAD_DW /
+    STATE_REWRITE_N / STATE_SEC4_MASK, the g_sec4 table and STATE_CUT_POINT
+  - fix switches made unconditional: WRITE_VGT_STAGES_DMA (the two VGT
+    registers are never written; a comment at both sites records why),
+    SCENE_NO_DEPTH (depth always on); HW_STATUS_POLL (was 0)
+  - probes: drain/paced probe + wall detector, shadow-map probe (trace_smap),
+    depth readback (dz0min/dz0max)
+  - 8 unused shader binaries and their uploads: ps_grad, ps_skyclean, vs_bg,
+    vs_ftload, vs_fulltri, ps_magenta (uploaded, never bound), ps_null,
+    ps_depthonly (never uploaded)
+Verified: the 8 remaining shader binaries are byte-identical; preprocessed
+build_dcb / build_shadow_dcb / main() differ from before ONLY by the removed
+diagnostics (build_shadow_dcb identical).
+
+Kept on purpose:
+  - CPU_FLIP (EOP fence, then sceVideoOutSubmitFlip). gnm's patcher turns the
+    0x778 marker into WRITE_DATA(label=1) + NOP + WRITE_DATA(fence) - CP writes,
+    no EOP (0xc0033700 / 0x500) - so the fence would land before the draws
+    finish. The CPU flip is the correctly synchronized path.
+  - trace log, GPU pass timestamps, CP checkpoints (cheap, still useful).
+Still to do: comment rewrite + clang-format pass.
+
+============================================================
 ROUND, BIGGER SUN; START OF THE DAY  (build=round-sun+start-of-day)
 ============================================================
 ps_dark decoded (CI opcodes from LLVM VOP1/2/3Instructions.td gfx6_gfx7):

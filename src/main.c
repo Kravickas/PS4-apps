@@ -107,7 +107,6 @@
    if dpus is large, it is the new problem and we turn this off. */
 #define DISPLAY_POLL 1
 
-#define HW_STATUS_POLL 0
 
 #define WAITFREE_SUBMIT 0
 
@@ -128,35 +127,6 @@
 #define DISPLAY_W       1920
 #define DISPLAY_H       1080
 
-/* Draw bisect: with the GPU path proven good, isolate which draw faults on
-   hardware. Default = stop after the BG/sky draw. Override on the make line:
-     EXTRAFLAGS=-DDRAW_STOP=2       BG + floor
-     EXTRAFLAGS=-DDRAW_STOP=3       BG + floor + cube (no shadow)
-     EXTRAFLAGS=-DDRAW_STOP_OFF     full scene incl. shadow */
-/* BRINGUP MILESTONE: gradient confirmed the full draw pipeline works on real
-   hardware (correct tiling/layout). Now step up to REAL shaders one draw at a
-   time. Default = BG/sky draw with the real VS (vertex fetch + MVP) and real
-   sky PS (descriptor table). Then:
-     -DDRAW_STOP=2     + floor
-     -DDRAW_STOP=3     + cube
-     -DDRAW_STOP_OFF   full scene + shadow
-     -DRT_TEST         back to the gradient/fulltri diagnostic
-     -DMINIMAL_TEST    GPU-DMA magenta, no draws */
-/* Ladder, one step at a time: 1 sky (clean, 1744 frames) -> 2 +floor -> 3 +cube
-   -> 4 +shadow pass (same sky as 1-3) -> DRAW_STOP_OFF (full-scene sky path). Full scene tried early: GPU hung in frame 0 at
-   checkpoint 0x21 (shadow: hw state done). */
-/* DRAW_STOP 4 (+shadow) confirmed on hardware. Final rung: the full-scene sky
-   path. Compiled-frame diff vs DRAW_STOP 4 is exactly: sky VS g_vs_bg_gpu ->
-   vs (MVP VS, identity MVP at vb+0), interpolators set once for 2 params, sky
-   PS skyclean -> ps_dark (0xCA, M0). Shadow pass unchanged. */
-#define DRAW_STOP_OFF 1
-
-/* Floor and cube without depth test/write. The depth buffer is never cleared
-   on hardware (sky clear has writes off), so LESS fails against it; the first
-   depth write (clear enabled) crashed in frame 0. Depth = separate step. The
-   cube is convex, back-face culled and drawn after the floor. */
-#define SCENE_NO_DEPTH 0
-
 /* Mip levels for the floor albedo/normal maps (power-of-two sizes only, down to
    16x16; see bmp_loader.h). 1 = no mips, as before. */
 #define FLOOR_TEX_MIPS 9
@@ -166,36 +136,7 @@
 #define SUN_DISC_RADIUS_PX 110.0f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "round-sun+start-of-day"
-#if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
-#define DRAW_STOP 1
-#endif
-/* CONFIRM the VM=0 export fix in isolation first. Default = VS_LOAD_TEST
-   (fulltri+load VS + magenta PS) — the exact build that gave NOISE; with VM
-   fixed it should now be SOLID MAGENTA. Opt-in:
-     -DBG_PS_MAGENTA_FORCE   real VS + magenta PS
-     -DREAL_BG_FORCE         real VS + real sky PS
-     -DRT_TEST               gradient/fulltri (known good)
-     -DMINIMAL_TEST          GPU-DMA magenta */
-#if !defined(REAL_BG_FORCE) && !defined(BG_CLEAN_SKY_FORCE) && !defined(BG_CLEAN_VS_FORCE) && !defined(BG_PS_MAGENTA_FORCE) && !defined(VS_LOAD_TEST_FORCE) && !defined(RT_TEST) && !defined(MINIMAL_TEST) && defined(DRAW_STOP)
-#define BG_SKY_CLEAN 1
-#endif
-#if defined(BG_CLEAN_SKY_FORCE) && !defined(RT_TEST) && !defined(MINIMAL_TEST) && defined(DRAW_STOP)
-#define BG_CLEAN_SKY 1
-#endif
-#if defined(BG_CLEAN_VS_FORCE) && !defined(RT_TEST) && !defined(MINIMAL_TEST) && defined(DRAW_STOP)
-#define BG_CLEAN_VS 1
-#endif
-#if defined(BG_PS_MAGENTA_FORCE) && !defined(RT_TEST) && !defined(MINIMAL_TEST) && defined(DRAW_STOP)
-#define BG_PS_MAGENTA 1
-#endif
-#if defined(VS_LOAD_TEST_FORCE) && !defined(RT_TEST) && !defined(MINIMAL_TEST) && defined(DRAW_STOP)
-#define VS_LOAD_TEST 1
-#endif
-/* Shared simple-draw config (depth off, trivial interp) for the diagnostic VS paths. */
-#if defined(RT_TEST) || defined(VS_LOAD_TEST)
-#define SIMPLE_DRAW 1
-#endif
+#define BUILD_TAG "cleanup-diagnostics"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -302,55 +243,6 @@
 /* 256 ran on hardware: still exactly 547, identical to 1. Fence address innocent. */
 #define FENCE_SLOTS     1
 
-/* Skip only the sky draw packet; all state, shaders, checkpoints and the fence
-   tail stay identical. Every run so far was sky-only (DRAW_STOP 1), so:
-   survives past 547 -> the draw is implicated; still 547 -> it is not. */
-#define SKY_NO_DRAW     0
-
-/* Leading tag + checkpoints + fence only: no context control, no state, no draw.
-   SKY_NO_DRAW still wedged at 548 completed frames, so the draw is innocent.
-   Still 548 here -> DCB content is irrelevant, it is the submit path itself. */
-#define EMPTY_FRAME     0
-
-/* 0 = do not write VGT_SHADER_STAGES_EN (0x2D5) or VGT_DMA_SIZE (0x29D).
-   Bisection: cut 3 + {PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, VGT_DMA_SIZE}
-   reproduces the 512 stall and 548 wedge. gnm writes PA_SC_MODE_CNTL_0 in its
-   own default tables; neither gnm nor the game writes the other two via
-   SET_CONTEXT_REG (CLEAR_STATE default / CP loads index sizes from draw packets). */
-#define WRITE_VGT_STAGES_DMA 0
-
-/* Bisect the state setup (SKY_NO_DRAW still on). EMPTY_FRAME ran 6560 frames
-   clean; the full state (0) hits the 512 stall and the 548 wedge.
-   Cut points, emitting everything before them:
-     1 after CONTEXT_CONTROL
-     2 after SH/scissor/viewport/DB regs, before CB_COLOR0 (calls 1-31)
-     3 after CB_COLOR0_BASE x14 + the size NOP
-     4 after the CB/PA/SPI context regs, before UCONFIG
-     5 after UCONFIG, before the SH user data */
-#define STATE_CUT       0
-
-/* Size control ran clean: cut 3 + one 63-dword NOP (816 B) works. Not size. */
-#define STATE_PAD_DW    0
-
-/* Packet-count control: cut 3 + 21 rewrites of PA_SU_SC_MODE_CNTL = 0, the value
-   it already holds. Same 21 packets and 252 B as cut 4, no state change.
-   fails -> number of context-register writes; clean -> specific values. */
-#define STATE_REWRITE_N 0
-
-/* Packet-count control ran clean too: 21 same-value rewrites (816 B) work. The
-   cause is specific section-4 content. Emit a subset of the 21 at cut 3
-   (bit n = g_sec4[n]). 0x66F3 = the 10 writes that change a value vs CLEAR_STATE:
-   CB_TARGET_MASK, CB_SHADER_MASK, SPI_PS_INPUT_ENA/ADDR, SPI_PS_IN_CONTROL,
-   SPI_SHADER_POS/COL_FORMAT, CB_COLOR_CONTROL, PA_CL_CLIP_CNTL, PA_CL_VTE_CNTL.
-   0x66F3 ran clean (684 B): the 10 value-changing writes are innocent.
-   0x1F990C = the 11 writes that keep their CLEAR_STATE value: SPI_PS_INPUT_CNTL_0,
-   SPI_VS_OUT_CONFIG, SPI_SHADER_Z_FORMAT, DB_SHADER_CONTROL, SPI_BARYC_CNTL,
-   PA_CL_VS_OUT_CNTL, PA_SC_MODE_CNTL_0, VGT_SHADER_STAGES_EN, PA_SC_AA_CONFIG,
-   CB_BLEND0_CONTROL, VGT_DMA_SIZE (no CLEAR_STATE default).
-   0x1F990C FAILED (696 B): stall at 514, wedge at 548. Not an interaction.
-   0x130000 = PA_SC_MODE_CNTL_0 (16), VGT_SHADER_STAGES_EN (17), VGT_DMA_SIZE (20).
-   fails -> one of these 3; clean -> one of the other 8 (0x0C990C). */
-#define STATE_SEC4_MASK 0
 
 #define CPU_FLIP        1
 
@@ -450,97 +342,15 @@
 #define MEM_TYPE_GARLIC 0x03
 #define MEM_TYPE_FLEX   MEM_TYPE_GARLIC   /* legacy name, kept for existing uses */
 
-// === VS: GPU-side MVP + dynamic lighting from sun buffer ===
-// s[0:3]=V# verts. v0=vertex_id
-// Buffer layout (from V# base):
-//   0x00: MVP matrix (64 bytes)
-//   0x40: Sun direction (16 bytes: sx, sy, sz, mode)
-//   0x50: Vertex data (stride 48: pos+normal+uv)
-// VS: MVP + pass {u, v, ny, nz} to PS for per-pixel sun lighting
-// s[0:3]=V#. No sun in VS — PS does all lighting via desc table.
-// Minimal fullscreen-triangle VS: generates 3 clip-space verts from
-// vertex_id with NO vertex fetch, NO V#, NO memory load. Assembled with
-// llvm-mc (hawaii). Used by RT_TEST to isolate whether the original VS's
-// vertex-fetch / V# path is the hardware hang cause.
-// Gradient diagnostic PS: outputs (posX/1920, posY/1080, 0, 1). A correct
-// linear surface shows a smooth red->green gradient; tiling errors break it
-// into blocks; pitch errors shear it. Reads pixel pos from v2,v3. llvm-mc.
-static const uint32_t ps_grad_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0x7E0A02FF, 0x3A005ADF,
-    0x10000B02, 0x7E0A02FF, 0x3A2FF2E5, 0x10020B03,
-    0x7E0C0280, 0x7E0E02F2, 0xF800080F, 0x07060100,
-    0xBF810000, 0x5362724F, 0x00726468, 0x00003400,
-    0x00000000, 0xDEADBEEF, 0xCAFE0E03, 0x00000000,
-};
 
-// GPU-resident copies of the RT_TEST diagnostic shaders (set in main()).
-// build_dcb's RT_TEST path binds these instead of the raw .rodata arrays,
-// which aren't GPU-accessible.
-static void *g_vs_fulltri_gpu = 0;
 /* Per-pass GPU timestamps (64-bit GPU clock, EOP): [0] frame start, [1] after
    the shadow pass, [2] after the sky, [3] after the floor, [4] after the cube. */
 static volatile uint64_t *g_gpu_ts = 0;
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
-static void *g_vs_bg_gpu = 0;
-static void *g_vs_ftload_gpu = 0;
-static void *g_ps_magenta_gpu = 0;
-static void *g_ps_skyclean_gpu = 0;
-static void *g_ps_grad_gpu = 0;
 
-// Clean sky PS (llvm-mc): reads SCREEN Y from the SPI (POS_Y in v3) — no
-// v_interp, no seam. t = 1 - screen_y/1080 (0x3A72B9D6 = 1/1080);
-// sky = lerp(horizon, zenith, t). Reads zenith @ desc dword 24 (SMRD offset
-// 0x18) and horizon @ dword 28 (0x1C) — SI/CIK SMRD offsets are in DWORDS,
-// not bytes. desc ptr in s[0:1]. user_sgpr=2, 16 VGPRs.
-static const uint32_t ps_skyclean_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0xC0820118, 0xC084011C,
-    0xBF8C007F, 0x7E0A02FF, 0x3A72B9D6, 0x10040B03,
-    0xD20A0002, 0x0001E502, 0x7E140208, 0x7E160209,
-    0x7E18020A, 0x08081404, 0xD2820006, 0x042A0902,
-    0x08081605, 0xD2820007, 0x042E0902, 0x08081806,
-    0xD2820008, 0x04320902, 0x7E1202F2, 0xF800080F,
-    0x09080706, 0xBF810000, 0x5362724F, 0x00726468,
-    0x00006800, 0x00000000, 0xDEADBEEF, 0xCAFE00E3,
-    0x00000000,
-};
 
-// Clean BG vertex shader (llvm-mc). BG verts are already in clip space, so no
-// MVP transform: fetch the 4-float clip pos (base + 80 + vid*48) and pass it to
-// POS0, plus export it as PARAM0 for the sky PS. Replaces the hand-encoded real
-// VS for the BG draw to rule out a malformed-encoding hang.
-static const uint32_t vs_bg_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0x7E0202B0, 0x16020300,
-    0x4A0202FF, 0x00000050, 0xE0381000, 0x80000401,
-    0xBF8C0F70, 0xF80008CF, 0x07060504, 0xF800020F,
-    0x07060504, 0xBF810000, 0x5362724F, 0x00726468,
-    0x00003800, 0x00000000, 0x47505508, 0xAABBEE03,
-    0x00000000,
-};
 
-// fulltri VS + one buffer_load from the V# (s[0:3]) — tests whether a VS
-// buffer_load hangs on hardware. Position still vertex_id-derived (covers
-// screen); loaded dword is *0 then added so it can't be dropped. llvm-mc.
-static const uint32_t vs_ftload_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0x34020081, 0x36020282,
-    0x36040082, 0x7E020D01, 0x7E040D02, 0x7E0602F4,
-    0x10020701, 0xD2080001, 0x0001E501, 0x10040702,
-    0xD2080002, 0x0001E502, 0x7E140280, 0xE0301000,
-    0x80000A0A, 0xBF8C0F70, 0xD210000A, 0x0001010A,
-    0x06021501, 0x7E060280, 0x7E0802F2, 0xF80008CF,
-    0x04030201, 0xBF810000, 0x5362724F, 0x00726468,
-    0x00006800, 0x00000000, 0xDEADBEEF, 0xCAFE0E04,
-    0x00000000,
-};
 
-static const uint32_t vs_fulltri_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0x34020081, 0x36020282,
-    0x36040082, 0x7E020D01, 0x7E040D02, 0x7E0602F4,
-    0x10020701, 0xD2080001, 0x0001E501, 0x10040702,
-    0xD2080002, 0x0001E502, 0x7E060280, 0x7E0802F2,
-    0xF80008CF, 0x04030201, 0xBF810000, 0x5362724F,
-    0x00726468, 0x00004C00, 0x00000000, 0xDEADBEEF,
-    0xCAFE0E02, 0x00000000,
-};
 
 /* Exports patched: pos0 now has DONE (was on param1). The last position export
    must carry DONE for the primitive assembler to proceed (radeonsi: done=1 on the
@@ -702,48 +512,8 @@ static const uint32_t ps_dark_binary[] __attribute__((aligned(256))) = {
 };
 
 
-// Minimal PS exporting solid magenta (1,0,1,1) to MRT0. Assembled with llvm-mc.
-// Export is 0xF800080F (VM=0): a plain color export. (An earlier hand-encoded
-// version set VM=1, which made the hardware read a bogus pixel-valid mask and
-// produced full-screen noise — misdiagnosed as a tiling issue.)
-static const uint32_t ps_magenta_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000000, 0x7E0402F2, 0x7E060280,
-    0x7E1402F2, 0x7E1602F2, 0xF800080F, 0x0B0A0302,
-    0xBF810000, 0x5362724F, 0x00726468, 0x00002400,
-    0x00000000, 0xDEADBEEF, 0xCAFE0E01, 0x00000000,
-};
 
-// Null PS for shadow depth pass — exports zero color (depth still written by rasterizer)
-static const uint32_t ps_null_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF, 0x00000004, 0x7E040280, 0x7E060280,
-    0x7E140280, 0x7E160280, 0xF800080F, 0x0B0A0302,
-    0xBF810000, 0xBF800000, 0x5362724F, 0x00726468,
-    0x00002800, 0x00000000, 0xDEADBEEF, 0xCAFE00E3,
-    0x00000000,
-};
 
-/* Truly minimal null PS for proper depth-only shadow pass.
-   No color export, no depth export. Starts with the canonical
-   s_mov_b32 vcc_hi, imm prefix (0xBEEB03FF) so shadPS4's BinaryInfo parser
-   (regs_shader.h:215) locates the footer via code[1] rather than linear scan.
-   With code[1]=1, footer is at (1+1)*2 = 4 dwords in, which matches our
-   signature position. Fresh hash CAFE00FA forces a pipeline cache miss. */
-static const uint32_t ps_depthonly_binary[] __attribute__((aligned(256))) = {
-    0xBEEB03FF,   /* s_mov_b32 vcc_hi, literal (shadPS4-required prefix) */
-    0x00000001,   /* literal = 1 → BinaryInfo at dword offset 4 */
-    0xBF810000,   /* s_endpgm */
-    0xBF800000,   /* s_nop (padding to align BinaryInfo to dword 4) */
-    0x5362724F,   /* 'O','r','b','S' - signature bytes 0..3 */
-    0x00726468,   /* 'h','d','r',version=0 - signature bytes 4..7 */
-    0x00001000,   /* pssl=0 cached=0 type=0(PS) source=0 length=16 bytes.
-                     length is in BYTES per regs_shader.h:236:
-                     code = std::span{code, bininfo.length / sizeof(u32)}.
-                     16 bytes = 4 dwords of executable code (prefix[2] + endpgm + nop). */
-    0x00000000,   /* chunk_usage_base=0, num_input_usage_slots=0, flags=0, pad=0 */
-    0xDEADBEEF,   /* shader_hash lo */
-    0xCAFE00FA,   /* shader_hash hi — unique to force fresh compile */
-    0x00000000,   /* crc32 (unchecked) */
-};
 
 // Shadow-pass clear PS: outputs (1, 0, 0, 1) — solid R=1.0 ("nothing occluding").
 // Drawn as a fullscreen quad BEFORE the cube in the shadow pass to fill the
@@ -999,9 +769,6 @@ static void phase_flush(void){
     trace_line(g_ph_buf, (unsigned long)g_ph_len);
     g_ph_len = 0;
 }
-static int g_slow_submits = 0;     /* consecutive submits over 100ms = the wall */
-static int g_drain_probed = 0;     /* one-shot: idle-drain probe already run */
-static int g_paced_left = 0;       /* paced-probe frames remaining (600ms cadence) */
 
 /* Spin body for the teardown quiesce; the game uses 16 pauses per iteration. */
 /* Read gnm's in-flight submit counter.
@@ -1107,34 +874,6 @@ static void trace_line(const char *buf, unsigned long n){
 /* trace_msg: write a plain string + fsync. */
 static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
 
-/* Runtime evidence for the shadow lookup: where the shadow map is, where the
-   desc[40] T# actually points, and what three of its texels hold. */
-static void trace_smap(const char *tag, long long f, const void *smap,
-                       unsigned long smap_bytes, const uint32_t *desc,
-                       const void *alb, const void *nrm) {
-    char L[320]; int p = 0;
-    #define SM(x) do { const char *_q = (x); while (*_q) L[p++] = *_q++; } while (0)
-    SM(tag); SM(" f="); p += lg_i64(L + p, f);
-    SM(" smap="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)smap);
-    if (desc) {
-        unsigned long long tb = ((unsigned long long)desc[40] << 8) |
-                                ((unsigned long long)(desc[41] & 0xFFu) << 40);
-        SM(" t40base="); p += lg_hex(L + p, tb);
-        SM(" t40w1="); p += lg_hex(L + p, desc[41]);
-    }
-    if (smap && smap_bytes >= 4) {
-        const volatile uint32_t *t = (const volatile uint32_t *)smap;
-        unsigned long n = smap_bytes / 4;
-        SM(" t0="); p += lg_hex(L + p, t[0]);
-        SM(" tmid="); p += lg_hex(L + p, t[n / 2 + SHADOW_W / 2]);
-        SM(" tlast="); p += lg_hex(L + p, t[n - 1]);
-    }
-    SM(" alb="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)alb);
-    SM(" nrm="); p += lg_hex(L + p, (unsigned long long)(uintptr_t)nrm);
-    SM("\n");
-    #undef SM
-    trace_line(L, (unsigned long)p);
-}
 /* Allocate GPU-visible memory of an explicit PS4 direct-memory type.
      MEM_TYPE_ONION  (0) WB, CPU<->GPU coherent  - command buffers, fences,
                          anything the CP reads or the CPU polls.
@@ -1550,42 +1289,6 @@ static void build_ssharp_pcf(uint32_t *s) {
 }
 
 // === DCB builder ===
-/* Section-4 context writes, in emit order, extracted from the compiled cut-4 path. */
-static const uint32_t g_sec4[21][2] = {
-    {0x08e, 0x0000000fu}, /*  0 CB_TARGET_MASK */
-    {0x08f, 0x0000000fu}, /*  1 CB_SHADER_MASK */
-    {0x191, 0x00000000u}, /*  2 SPI_PS_INPUT_CNTL_0 */
-    {0x1b1, 0x00000000u}, /*  3 SPI_VS_OUT_CONFIG */
-    {0x1b3, 0x00000302u}, /*  4 SPI_PS_INPUT_ENA */
-    {0x1b4, 0x00000302u}, /*  5 SPI_PS_INPUT_ADDR */
-    {0x1b6, 0x00000000u}, /*  6 SPI_PS_IN_CONTROL */
-    {0x1c3, 0x00000004u}, /*  7 SPI_SHADER_POS_FORMAT */
-    {0x1c4, 0x00000000u}, /*  8 SPI_SHADER_Z_FORMAT */
-    {0x1c5, 0x00000009u}, /*  9 SPI_SHADER_COL_FORMAT */
-    {0x202, 0x00cc0010u}, /* 10 CB_COLOR_CONTROL */
-    {0x203, 0x00000000u}, /* 11 DB_SHADER_CONTROL */
-    {0x1b8, 0x00000000u}, /* 12 SPI_BARYC_CNTL */
-    {0x204, 0x00080000u}, /* 13 PA_CL_CLIP_CNTL */
-    {0x206, 0x0000043fu}, /* 14 PA_CL_VTE_CNTL */
-    {0x207, 0x00000000u}, /* 15 PA_CL_VS_OUT_CNTL */
-    {0x292, 0x00000000u}, /* 16 PA_SC_MODE_CNTL_0 */
-    {0x2d5, 0x00000000u}, /* 17 VGT_SHADER_STAGES_EN */
-    {0x2f8, 0x00000000u}, /* 18 PA_SC_AA_CONFIG */
-    {0x1e0, 0x00000000u}, /* 19 CB_BLEND0_CONTROL */
-    {0x29d, 0x00000000u}, /* 20 VGT_DMA_SIZE */
-};
-
-/* Return early with the frame's fence tail at bisection point k (STATE_CUT). */
-#define STATE_CUT_POINT(k) do { if (STATE_CUT == (k)) { \
-    for (int s4_i = 0; s4_i < 21; s4_i++) \
-        if ((STATE_SEC4_MASK >> s4_i) & 1) pm4_set_context_reg(b, g_sec4[s4_i][0], g_sec4[s4_i][1]); \
-    for (int rw_i = 0; rw_i < STATE_REWRITE_N; rw_i++) \
-        pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); \
-    if (STATE_PAD_DW > 1) { pm4_emit(b, pm4_type3(PM4_NOP, STATE_PAD_DW - 1)); \
-        for (int pad_i = 0; pad_i < STATE_PAD_DW - 1; pad_i++) pm4_emit(b, 0); } \
-    CPMARK(b, 0x1F); \
-    if (no_flip) pm4_event_write_eop(b, fence, fv); else pm4_prepare_flip(b, fence, fv); \
-    return b->off * 4; } } while (0)
 static uint32_t build_dcb(struct PM4Builder *b,
     const void *vs, const void *ps, const void *ps_bg, const void *ps_null,
     const void *ps_floor,
@@ -1606,36 +1309,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_init_default_hw_state(b);
     CPMARK(b, 0x11);   /* main: hw state done */
 
-#if EMPTY_FRAME
-    CPMARK(b, 0x1F);
-    if (no_flip) pm4_event_write_eop(b, fence, fv);
-    else         pm4_prepare_flip(b, fence, fv);
-    return b->off * 4;
-#endif
 
-#ifdef MINIMAL_TEST
-    /* DIAGNOSTIC (opt-in: -DMINIMAL_TEST): skip ALL draws. GPU-DMA-fill the
-       framebuffer with solid magenta, then signal the EOP fence. Tests
-       command-processor + submit + fence + flip in isolation from the draw
-       pipeline. Magenta = GPU path healthy; black = fault in init/submit. */
-    {
-        unsigned long fb_bytes = (unsigned long)DISPLAY_W * DISPLAY_H * 4;
-        const unsigned long CHUNK = 0x100000;   /* DMA_DATA byte count is 21-bit */
-        unsigned long off = 0;
-        while (off < fb_bytes) {
-            unsigned long n = fb_bytes - off;
-            if (n > CHUNK) n = CHUNK;
-            pm4_dma_fill(b, (char*)color + off, (uint32_t)n, 0xFFFF00FFu /* magenta */);
-            off += n;
-        }
-        if (no_flip) pm4_event_write_eop(b, fence, fv);
-        else         pm4_prepare_flip(b, fence, fv);   /* last 64 dwords */
-        return b->off * 4;
-    }
-#endif
 
     pm4_context_control(b);
-    STATE_CUT_POINT(1);
 
     /* Shadow pass moved to end of DCB — see after model draw below.
        Rationale: testing if order of execution is the issue (user hint). */
@@ -1644,31 +1320,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // PGM_RSRC1 = 0xCB: vgpr_field=11 (48 VGPRs),
     // sgpr_field=3 (32 SGPRs: s0-s28 + VCC). RSRC1=4 (20 VGPRs) faults on real hardware
     // because the shader accesses v20-v45 beyond the allocation.
-#ifdef RT_TEST
-    /* RT_TEST: minimal fullscreen-triangle VS — no vertex fetch, no V#.
-       Isolates whether the original VS's vertex-fetch path faults hardware.
-       RSRC1 vgpr_field=1 (5 VGPRs, uses v0-v4); RSRC2 user_sgpr=0. */
-    { uint64_t a=(uint64_t)(uintptr_t)g_vs_fulltri_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),1u,0u};
-      pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
-#elif defined(VS_LOAD_TEST)
-    /* VS_LOAD_TEST: fulltri VS + one buffer_load from the V#. vgpr_field=2
-       (12 VGPRs), user_sgpr=4 (V# in s[0:3]). Tests if a VS buffer_load hangs. */
-    { uint64_t a=(uint64_t)(uintptr_t)g_vs_ftload_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),2u,(4u<<1)};
-      pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
-#elif defined(BG_CLEAN_VS) || defined(BG_CLEAN_SKY) || defined(BG_SKY_CLEAN)
-    /* Clean llvm-mc BG VS: passthrough clip pos + param0. vgpr_field=1
-       (8 VGPRs), user_sgpr=4 (V# in s[0:3]). */
-    { uint64_t a=(uint64_t)(uintptr_t)g_vs_bg_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),1u,(4u<<1)};
-      pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4); }
-#else
     { uint64_t a=(uint64_t)(uintptr_t)vs;
       uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),0xCBu,(4u<<1)};
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4);
       /* VS user data set per-draw below */ }
-#endif
 
     // PS: user_sgpr=2. New projective-shadow PS uses up to v43 (need 44 VGPRs
     // → field = ceil(44/4)-1 = 10) and up to s47 (need 48 SGPRs → field = ceil(48/8)-1 = 5).
@@ -1719,14 +1374,6 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_INDEX_OFFSET,0);
 
     // Depth — clear to 1.0f via DB_RENDER_CONTROL.depth_clear_enable on the sky draw.
-#ifdef SIMPLE_DRAW
-    /* SIMPLE_DRAW (RT_TEST / VS_LOAD_TEST): depth fully disabled. */
-    pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,0);
-    pm4_set_context_reg(b,CTX_DB_Z_INFO,0);            /* Z_INVALID — no depth surface */
-    pm4_set_context_reg(b,CTX_DB_STENCIL_INFO,0);
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);        /* depth test/write OFF */
-    pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0);      /* no culling */
-#else
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_CONTROL,1u); // bit0 = depth_clear_enable
     pm4_set_context_reg(b,CTX_DEPTH_VIEW,0);
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_OVERRIDE,0);
@@ -1747,19 +1394,13 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_context_regs(b,CTX_DB_Z_READ_BASE,d,4); }
     pm4_set_context_reg(b,CTX_DB_DEPTH_SIZE,((DISPLAY_W/8)-1)|(((DISPLAY_H/8)-1)<<11));
     pm4_set_context_reg(b,CTX_DB_DEPTH_SLICE,(DISPLAY_W*DISPLAY_H/64)-1);
-#if SCENE_NO_DEPTH
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(7u<<4));   /* no depth write */
-#else
     /* Clear-by-draw, the game's pattern (DB_RENDER_CONTROL=3 + 0x777) minus
        stencil: Z enable | Z write | ALWAYS. The clear only writes through the
        depth write path. Previously this crashed in frame 0 - with DB_DEPTH_INFO
        unset (linear general). */
     pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(7u<<4));
-#endif
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
-#endif
-    STATE_CUT_POINT(2);
 
     // Color — render directly to display FB (BGRA, sRGB).
     { uint32_t c=(uint32_t)((uint64_t)(uintptr_t)color>>8);
@@ -1767,55 +1408,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
         0x09A8u,0,0,0,0,0,0,0,0,0};
       pm4_set_context_regs(b,CTX_CB_COLOR0_BASE,r,14);
       pm4_emit(b,0xC0001000u); pm4_emit(b,DISPLAY_W|(DISPLAY_H<<16)); }
-    STATE_CUT_POINT(3);
 
     pm4_set_context_reg(b,CTX_COLOR_TARGET_MASK,0xF);
     pm4_set_context_reg(b,CTX_COLOR_SHADER_MASK,0xF);
-#ifdef RT_TEST
-    /* RT_TEST: fulltri VS exports position only; gradient PS reads pos at v2,v3. */
-    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);         /* 1 (min-one) param export slot */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x302);         /* PERSP_CENTER(v0,v1) + POS_X(v2) + POS_Y(v3) */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x302);
-    pm4_set_context_reg(b,CTX_NUM_INTERP,0);               /* no interpolants */
-#elif defined(VS_LOAD_TEST)
-    /* VS_LOAD_TEST: ftload VS exports position only; magenta PS reads nothing. */
-    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);
-    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
-    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
-    pm4_set_context_reg(b,CTX_NUM_INTERP,0);
-#elif defined(BG_CLEAN_VS)
-    /* BG_CLEAN_VS: VS exports pos + param0; magenta PS reads nothing (param ignored). */
-    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);         /* 1 param export */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
-    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
-    pm4_set_context_reg(b,CTX_NUM_INTERP,0);
-#elif defined(BG_CLEAN_SKY)
-    /* BG_CLEAN_VS + hand-encoded sky PS: interpolates attr0.x/.y. 1 interpolant,
-       PERSP_CENTER barycentrics in v0,v1. */
-    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);          /* VS param0 -> PS slot0 */
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);         /* 1 param export */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);          /* PERSP_CENTER -> v0,v1 */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
-    pm4_set_context_reg(b,CTX_NUM_INTERP,1);               /* attr0 */
-#elif defined(BG_SKY_CLEAN)
-    /* clean sky PS reads SCREEN Y from SPI (POS_Y in v3) — no v_interp, no seam.
-       PERSP_CENTER(v0,v1) + POS_X(v2) + POS_Y(v3). No interpolants. */
-    pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,0);
-    pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x302);         /* POS_X(v2) + POS_Y(v3) */
-    pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x302);
-    pm4_set_context_reg(b,CTX_NUM_INTERP,0);
-#else
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);           /* attr0: VS param 0 -> PS slot 0 */
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0+1,1);         /* attr1: VS param 1 -> PS slot 1 */
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,1);          /* 2 param exports (export_count_min_one=1) */
     pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
     pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
     pm4_set_context_reg(b,CTX_NUM_INTERP,2);                /* 2 attrs: {u,v,ny,nz} and {wpos.xyzw} */
-#endif
     pm4_set_context_reg(b,CTX_SHADER_POS_FORMAT,4);
     pm4_set_context_reg(b,CTX_Z_EXPORT_FORMAT,0);
     pm4_set_context_reg(b,CTX_COLOR_EXPORT_FORMAT,9);
@@ -1834,46 +1435,16 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
     pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
-#if WRITE_VGT_STAGES_DMA
-    pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
-#endif
+    /* VGT_SHADER_STAGES_EN / VGT_DMA_SIZE are deliberately never written:
+       neither gnm nor the game does (CLEAR_STATE default; the CP loads index
+       sizes from the draw packets). Writing them every frame caused the
+       512-submit stall and the frame-548 GPU wedge. */
     pm4_set_context_reg(b,CTX_AA_CONFIG,0);
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
-#if WRITE_VGT_STAGES_DMA
-    pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
-#endif
-    STATE_CUT_POINT(4);
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
-    STATE_CUT_POINT(5);
 
     // Draw 1: BG quad with sky PS (sun disc)
-#ifdef RT_TEST
-    /* RT_TEST: use the trivial magenta PS instead of the sky shader. Isolates
-       the render-target + VS + draw pipeline from the real shaders. */
-    { uint64_t a=(uint64_t)(uintptr_t)g_ps_grad_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(0u<<6)|2u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); }
-#else
-#if defined(BG_PS_MAGENTA) || defined(VS_LOAD_TEST) || defined(BG_CLEAN_VS)
-    /* Diagnostic: real VS, but trivial magenta PS (no descriptors). Isolates
-       the VS vertex-fetch/MVP path from the sky PS descriptor table. */
-    { uint64_t a=(uint64_t)(uintptr_t)g_ps_magenta_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(0u<<6)|2u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); }
-#elif defined(BG_SKY_CLEAN)
-    /* Clean llvm-mc sky PS: lerp(zenith,horizon,clip_y) from the descriptor.
-       RSRC1 = (sgpr_field 3)<<6 | (vgpr_field 3) = 16 VGPRs + 32 SGPRs.
-       The shader uses up to v12 (horizon.b), so vgpr_field must be 3, NOT 2 —
-       12 VGPRs left v12 unallocated -> read as 0 -> inverted blue channel.
-       user_sgpr=2 (desc ptr in s[0:1]). */
-    { uint64_t a=(uint64_t)(uintptr_t)g_ps_skyclean_gpu;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(3u<<6)|3u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
-      uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
-                      (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
-      pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
-#else
     { uint64_t a=(uint64_t)(uintptr_t)ps_bg;
       uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(3u<<6)|10u,(2u<<1)};
       pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4); /* ps_dark: 43 VGPRs, s0-s28 + VCC -> 44 / 32 */
@@ -1881,39 +1452,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
       uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                       (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
-#endif
-#endif
-#ifdef RT_TEST
-    /* fulltri VS needs no vertex data — draw 3 auto verts (one fullscreen tri). */
-    pm4_draw_index_auto(b,3);
-#elif defined(VS_LOAD_TEST)
-    /* ftload VS: bind V# in s[0:3], draw 3 verts (fullscreen tri from vertex_id). */
-    pm4_set_sh_regs(b,SH_VS_USER_DATA_0,bg_v,4);
-    pm4_draw_index_auto(b,3);
-#else
     // VS s[0:3] = vertex/MVP V#. Sun read via s_buffer_load from V#+0x40
     pm4_set_sh_regs(b,SH_VS_USER_DATA_0,bg_v,4);
-#if !SKY_NO_DRAW
     pm4_draw_index_auto(b,BG_VERTS);
-#endif
-#endif
     GPU_TS(2);
 
-#if defined(DRAW_STOP) && DRAW_STOP <= 1
-    /* Bisect: stop after BG/sky draw. If the sky gradient renders, the
-       render-target setup + VS/PS pipeline work; problem is in a later draw. */
-    /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
-         flip     -> marker block carrying the fence addr+value, NO EOP.
-                     gnm's patcher emits WRITE_DATA(label=1) + WRITE_DATA(fence)
-                     and registers the flip, all inside this submit.
-         no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
-       Emitting both, or emitting an EOP and then flipping separately from the
-       CPU, is neither path. */
-    CPMARK(b, 0x1F);   /* stage: all draws retired, about to complete */
-    if (no_flip) pm4_event_write_eop(b,fence,fv);
-    else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
-    return b->off*4;
-#endif
 
     /* Sky draw performed the one-shot depth clear. Disable clear flag so subsequent
        draws (floor, cube) render normally against the now-cleared depth buffer. */
@@ -1933,25 +1476,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2);
 
         /* Depth for floor: less-than, write enabled (so cube z-tests correctly against floor) */
-#if defined(BG_CLEAN_VS) || defined(BG_CLEAN_SKY) || defined(BG_SKY_CLEAN)
-        /* The sky bound the pass-through BG VS (no MVP) and a 0-interpolant PS
-           setup. The floor needs the GPU-MVP VS and the full-scene interpolator
-           state - the same values the #else path of the VS/SPI setup writes. */
-        { uint64_t va=(uint64_t)(uintptr_t)vs;
-          uint32_t vr[4]={(uint32_t)(va>>8),(uint32_t)(va>>40),0xCBu,(4u<<1)};
-          pm4_set_sh_regs(b,SH_VS_PGM_LO,vr,4); }
-        pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
-        pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0+1,1);
-        pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,1);
-        pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
-        pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
-        pm4_set_context_reg(b,CTX_NUM_INTERP,2);
-#endif
-#if SCENE_NO_DEPTH
-        pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
-#else
         pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
-#endif
         pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1<<1)); /* cull back */
 
         pm4_set_sh_regs(b,SH_VS_USER_DATA_0,floor_v,4);
@@ -1959,20 +1484,6 @@ static uint32_t build_dcb(struct PM4Builder *b,
         GPU_TS(3);
     }
 
-#if defined(DRAW_STOP) && DRAW_STOP <= 2
-    /* Bisect: stop after floor draw (BG + floor, no cube). */
-    /* The game's two paths are MUTUALLY EXCLUSIVE (eboot 0x94edf0):
-         flip     -> marker block carrying the fence addr+value, NO EOP.
-                     gnm's patcher emits WRITE_DATA(label=1) + WRITE_DATA(fence)
-                     and registers the flip, all inside this submit.
-         no flip  -> EVENT_WRITE_EOP carrying the fence, NO marker.
-       Emitting both, or emitting an EOP and then flipping separately from the
-       CPU, is neither path. */
-    CPMARK(b, 0x1F);   /* stage: all draws retired, about to complete */
-    if (no_flip) pm4_event_write_eop(b,fence,fv);
-    else         pm4_prepare_flip(b,fence,fv);   /* MUST be the last 64 dwords */
-    return b->off*4;
-#endif
 
     // Switch back to textured PS for model. Same RSRC1 as initial: 44 VGPRs, 48 SGPRs.
     { uint64_t a=(uint64_t)(uintptr_t)ps;
@@ -1983,11 +1494,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
 
     // Switch to depth=Less for cube
-#if SCENE_NO_DEPTH
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,0);
-#else
     pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
-#endif
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1<<1)); /* cull back, CW front */
 
     // Draw 2: Model with real MVP. Sun at V#+0x40 read via s_buffer_load
@@ -2163,14 +1670,12 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
     pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
-#if WRITE_VGT_STAGES_DMA
-    pm4_set_context_reg(b,CTX_STAGE_ENABLE,0);
-#endif
+    /* VGT_SHADER_STAGES_EN / VGT_DMA_SIZE are deliberately never written:
+       neither gnm nor the game does (CLEAR_STATE default; the CP loads index
+       sizes from the draw packets). Writing them every frame caused the
+       512-submit stall and the frame-548 GPU wedge. */
     pm4_set_context_reg(b,CTX_AA_CONFIG,0);
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
-#if WRITE_VGT_STAGES_DMA
-    pm4_set_context_reg(b,CTX_INDEX_SIZE,0);
-#endif
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
 
@@ -2816,7 +2321,7 @@ int main(void) {
     void *shadow_depth = gpu_alloc(shadow_size, 0x100000);
     /* Start from the shadow-clear value, not zeros: ps_shadow_clear writes
        (1,0,0,1) = R 1.0 "nothing occluding" = 0xFF0000FF per RGBA8 texel. Without
-       the shadow pass (DRAW_STOP rungs) a zero map made every LessEqual compare
+       the shadow pass a zero map made every LessEqual compare
        inside the light frustum fail - a dark rectangle with no caster. */
     if (shadow_depth) {
         uint32_t *sp = (uint32_t *)shadow_depth;
@@ -3104,20 +2609,8 @@ int main(void) {
     UPLOAD_SHADER(ps_floor_gpu,         ps_floor_binary);
     UPLOAD_SHADER(ps_shadow_gpu,        ps_shadow_binary);
     UPLOAD_SHADER(ps_shadow_clear_gpu,  ps_shadow_clear_binary);
-    UPLOAD_SHADER(vs_fulltri_gpu,       vs_fulltri_binary);
-    UPLOAD_SHADER(vs_bg_gpu,            vs_bg_binary);
-    UPLOAD_SHADER(vs_ftload_gpu,        vs_ftload_binary);
-    UPLOAD_SHADER(ps_magenta_gpu,       ps_magenta_binary);
-    UPLOAD_SHADER(ps_skyclean_gpu,      ps_skyclean_binary);
     UPLOAD_SHADER(ps_blue_gpu,          ps_blue_binary);
-    UPLOAD_SHADER(ps_grad_gpu,          ps_grad_binary);
     #undef UPLOAD_SHADER
-    g_vs_fulltri_gpu = vs_fulltri_gpu;
-    g_vs_bg_gpu = vs_bg_gpu;
-    g_vs_ftload_gpu = vs_ftload_gpu;
-    g_ps_magenta_gpu = ps_magenta_gpu;
-    g_ps_skyclean_gpu = ps_skyclean_gpu;
-    g_ps_grad_gpu = ps_grad_gpu;
 
     uint32_t *dcb_mem[NUM_FRAMES];
     /* NOT ALLOCATED. The shadow pass shares the main pm4 builder and its
@@ -3470,45 +2963,8 @@ int main(void) {
     { char L[384];  /* build + scene + 5 lines, worst ~263 bytes */ int p=0;
       g_hw_ok = sceGnmDebugHardwareStatus(0);   /* baseline while healthy */
       { const char *bt = "build=" BUILD_TAG "\n"; while (*bt) L[p++] = *bt++; }
-      const char *mc = "scene cfg="
-#if defined(DRAW_STOP_OFF)
-          "DRAW_STOP_OFF(full scene+shadow)"
-#elif defined(DRAW_STOP)
-          "DRAW_STOP"
-#elif defined(RT_TEST)
-          "RT_TEST"
-#elif defined(MINIMAL_TEST)
-          "MINIMAL_TEST"
-#else
-          "unknown"
-#endif
-          ;
+      const char *mc = "scene cfg=full scene+shadow";
       while (*mc) L[p++] = *mc++;
-#if defined(DRAW_STOP) && !defined(DRAW_STOP_OFF)
-      p += lg_i64(L+p, (long long)DRAW_STOP);
-#endif
-#if defined(BG_SKY_CLEAN)
-      { const char *m2 = " BG_SKY_CLEAN"; while (*m2) L[p++] = *m2++; }
-#endif
-#if !WRITE_VGT_STAGES_DMA
-      { const char *m7 = " NO_VGT_STAGES_DMA"; while (*m7) L[p++] = *m7++; }
-#endif
-#if SCENE_NO_DEPTH
-      { const char *m8 = " SCENE_NO_DEPTH"; while (*m8) L[p++] = *m8++; }
-#endif
-#if EMPTY_FRAME
-      { const char *m3 = " EMPTY_FRAME"; while (*m3) L[p++] = *m3++; }
-#elif STATE_CUT
-      { const char *m3 = " STATE_CUT="; while (*m3) L[p++] = *m3++; L[p++] = (char)('0' + STATE_CUT);
-        if (STATE_PAD_DW) { const char *m4 = " PAD_DW="; while (*m4) L[p++] = *m4++;
-                            p += lg_i64(L+p, (long long)STATE_PAD_DW); }
-        if (STATE_REWRITE_N) { const char *m5 = " REWRITE="; while (*m5) L[p++] = *m5++;
-                               p += lg_i64(L+p, (long long)STATE_REWRITE_N); }
-        if (STATE_SEC4_MASK) { const char *m6 = " SEC4="; while (*m6) L[p++] = *m6++;
-                               p += lg_hex(L+p, (unsigned long long)STATE_SEC4_MASK); } }
-#elif SKY_NO_DRAW
-      { const char *m3 = " SKY_NO_DRAW"; while (*m3) L[p++] = *m3++; }
-#endif
       L[p++] = '\n';
       const char *mq = "mapcomputequeue=";
       while (*mq) L[p++] = *mq++;
@@ -3556,7 +3012,6 @@ int main(void) {
     /* Event buffer for sceSystemServiceReceiveEvent. SDK struct is large; this
        is a safe over-allocation. We only read the first int32 (eventType). */
     static unsigned char sysevent[8192];
-    trace_smap("smap init", -1, shadow_depth, shadow_size, desc, floor_albedo_tex, floor_normal_tex);
     { char T[128]; int p = 0;
       #define TP(x) do { const char *_q = (x); while (*_q) T[p++] = *_q++; } while (0)
       TP("floor tex alb="); p += lg_i64(T + p, floor_tex_w); TP("x"); p += lg_i64(T + p, floor_tex_h);
@@ -4048,44 +3503,6 @@ int main(void) {
            and DEPTH_CLEAR=1.0f on the first draw — shadPS4 translates this to a Vulkan
            loadOp=Clear on the depth attachment. A CPU linear memset won't work because
            the depth buffer is GPU-tiled. */
-        /* One-shot idle-drain probe, triggered BY THE STALL, not a frame count.
-           The wall is a hard per-submission limit (proven: halving IB packets
-           per submit moved it 0 frames). Past it we submit ~2/sec and each costs
-           500ms, so slots free at exactly the rate we consume them - we have
-           never stopped to see if idling recovers.
-           Fires 5 slow submits after the onset (~2.5s), stops submitting for
-           10s, then resumes.
-           Fast after the pause => the array drains when idle; a burst harness
-                                   (<512 submits, pause, repeat) is viable.
-           Still 500ms          => the process gets 512 submits, total, ever. */
-        if (g_slow_submits >= 5 && !g_drain_probed) {
-            g_drain_probed = 1;
-            trace_msg("drain probe: stall detected, idling 10s (no submits)\n");
-            uint64_t t0 = tstamp();
-            for (int i = 0; i < 100; i++) sceKernelUsleep(100000);
-            uint64_t t1 = tstamp();
-            { char L[128]; int p=0;
-              #define LPD(s) do{ const char*_q=(s); while(*_q) L[p++]=*_q++; }while(0)
-              LPD("drain probe: idled "); p+=lg_i64(L+p,(long long)(t1-t0));
-              LPD(" us, resuming\n"); L[p]=0; trace_msg(L);
-              #undef LPD
-            }
-            /* 10s idle bought exactly ONE fast submit - that only fits a minimum
-               ~500ms interval between submits (a draining array or refilling
-               bucket would have bought ~20). If so, pacing ABOVE the interval
-               makes every submit instant. Confirm from a second direction. */
-            g_paced_left = 12;
-            trace_msg("paced probe: 12 frames at 600ms cadence\n");
-        }
-
-        /* Paced probe: sleep past the suspected ~500ms minimum interval before
-           each submit. All-fast => minimum-interval model confirmed exactly. */
-        if (g_paced_left > 0) {
-            g_paced_left--;
-            sceKernelUsleep(600000);
-            if (g_paced_left == 0) trace_msg("paced probe: done\n");
-        }
-
         uint64_t t_pre_build = tstamp();
         /* BATCHING: the submit quota is per IOCTL CALL, not per command buffer
            or per frame (proven: 2 command buffers per call walled at the same
@@ -4160,7 +3577,6 @@ int main(void) {
         g_cp_frame = frame;
 
         uint32_t shadow_sz = 0;
-#if !defined(MINIMAL_TEST) && (!defined(DRAW_STOP) || DRAW_STOP >= 4)
         if (shadow_depth && g_shadow_ready) {
             shadow_sz = build_shadow_dcb(&pm4,
                                          vs_shadow, ps_shadow_gpu, ps_shadow_clear_gpu,
@@ -4169,7 +3585,6 @@ int main(void) {
                                          0, 0, 0,
                                          shadow_depth);
         }
-#endif
         if (g_gpu_ts) pm4_gpu_timestamp(&pm4, &g_gpu_ts[1]);
 
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
@@ -4520,9 +3935,6 @@ int main(void) {
         uint64_t t_flip1 = tstamp();
         long long d_flip = (long long)(t_flip1 - t_flip0);
 
-        /* Wall detector: healthy submit is 30-60us; past the wall ~500ms. */
-        if ((long long)(t_saf - t_pre_build) > 100000) g_slow_submits++;
-        else g_slow_submits = 0;
         g_submit_count++;
 
         /* Per-frame trace. Discriminator: subc=(total submits) vs ptms=(wall
@@ -4563,9 +3975,6 @@ int main(void) {
            reports the kernel's verdict without dominating the frame. The
            at-stall sample (g_fence_timeouts == 1) is untouched: it fires once
            per stall, which is exactly when its cost does not matter. */
-#if HW_STATUS_POLL
-        if ((frame & 1023) == 0) g_hw_ok = sceGnmDebugHardwareStatus(0);
-#endif
 #if DISPLAY_POLL
         {   uint64_t dp0 = sceKernelGetProcessTime();
             OrbisVideoOutFlipStatus fsp;
@@ -4686,23 +4095,11 @@ int main(void) {
             LP(" gcu="); p+=lg_i64(L+p,GTD(3,4));
             LP(" gtot="); p+=lg_i64(L+p,GTD(0,4));
             #undef GTD
-            /* Depth tile (0,0): the first 256 B in 1D tiling = the top-left 8x8
-               pixels, where only the sky draws. 0x3f800000 = DB_DEPTH_CLEAR
-               substituted; 0x3f7fbe77 = the sky quad's own z (0.999). */
-            if (depth) {
-                const volatile uint32_t *dz = (const volatile uint32_t *)depth;
-                uint32_t dmin = 0xFFFFFFFFu, dmax = 0;
-                for (int q = 0; q < 64; q++) { uint32_t v = dz[q]; if (v < dmin) dmin = v; if (v > dmax) dmax = v; }
-                LP(" dz0min="); p+=lg_hex(L+p,dmin);
-                LP(" dz0max="); p+=lg_hex(L+p,dmax);
-            }
             LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv);
             L[p++]='\n';
             #undef LP
             trace_line(L,p);
         }
-        if (frame == 60 || (frame > 0 && (frame % 1024) == 0))
-            trace_smap("smap", (long long)frame, shadow_depth, shadow_size, desc, floor_albedo_tex, floor_normal_tex);
         frame++;
     }
 
