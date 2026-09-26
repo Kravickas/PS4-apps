@@ -1,4 +1,54 @@
 ============================================================
+EXPONENTIAL FOG WITH A MINIMUM  (build=fog-exp)
+============================================================
+Fog weight = min(1, FOG_MIN * e^(d / L)), L = FLOOR_HALF / ln(1 / FOG_MIN):
+FOG_MIN (7%) at the camera, growing by e every L = 75 units (doubling every
+52), exactly 100% at the floor edge (200) and beyond. 7% at 0, 10% at 25,
+14% at 50, 27% at 100, 51% at 150, 72% at 175, 100% at 200. Same in
+ps_floor and ps_shader (cube / model): desc[107] = log2(FOG_MIN), desc[109]
+= log2(1 / FOG_MIN) / FLOOR_HALF, shader: min(1, 2^(desc[109] * d +
+desc[107])). Replaces FOG_START / FOG_EDGE_STOPS. Real-air (Beer-Lambert)
+fog grows fastest near the camera and flattens; this curve does the
+opposite, as asked: a light haze everywhere, thickening with distance.
+Checks: both shaders vs the formula within 3e-7, cube == floor bit-exact,
+weight exactly 1 at d >= 200; with the weight forced to 0 both are
+bit-identical to the fog-free shaders. my_log2 (init-time constants, no
+libm) within 1.2e-6 of libm over 1e-6..1e6. OpenOrbis: 0 warnings, no
+import change, 13/13 shaders match; changed main, added my_log2.
+Hashes: ps_shader CAFE0117, ps_floor CAFE0122.
+
+============================================================
+FOG ON THE CUBE, LATER FOG, HALF PARALLAX, WARM SUN, SMOOTH NIGHT
+(build=fog2+sky-fade)
+============================================================
+Fog starts at FOG_START (50 units) and still reaches 99% at the floor edge:
+transmittance 2^(k * max(d - FOG_START, 0)^2), k = -FOG_EDGE_STOPS /
+(FLOOR_HALF - FOG_START)^2. Weight: 0% to 50, 17% at 80, 40% at 100, 87% at
+150, 99% at 200 (before: 17% already at 40, 68% at 100).
+Cube and model are fogged too: ps_shader (new source shaders/ps_shader.s,
+hash CAFE0116, RSRC1 0x18A) = the old shader (reassembled byte-identical)
+plus the same fog block as ps_floor; the cube/model draw enables POS_Y
+(PS_INPUT 0x202, restored after). Fog start is desc[107] (camera w).
+Parallax depth halved: POM_DEPTH 0.05.
+Sun disc: amber at the horizon now ramps to SUN_DAY_R/G/B = sRGB (1.00,
+0.97, 0.87) instead of pure white. At SUN_HDR 4 the core still clips to
+white; the warm tint shows on the rim and in the bloom halo. Scene light
+unchanged.
+Sky: the twilight branch ended at orig_sun_y -0.2 on its most orange
+horizon (0.95, 0.35, 0.25) and the next frame was night (0.03, 0.04, 0.10).
+New sky_colours(): unchanged at and above the horizon; below it the
+twilight colours fade into night with a smoothstep over -0.2..0.
+Checks:
+- ps_shader with fog off: bit-identical to the old cube shader (float32
+  emulation); ps_floor with fog off: bit-identical to the previous floor;
+- cube vs floor for the same point and row: identical fog transmittance and
+  bit-identical fog colour;
+- sky sweep, 1e-4 steps: old jump 0.888 (linear) at -0.2, new max step
+  0.00067; identical to before for sun_y >= 0.
+OpenOrbis build: 0 warnings, no import change, 13/13 shaders in the eboot
+match; changed functions: main, build_dcb; added sky_colours.
+
+============================================================
 FLOOR: PARALLAX OCCLUSION MAPPING + DISTANCE FOG  (build=floor-pom+fog)
 ============================================================
 Old floor relief was per-vertex: the grid is 6.25 units per vertex and the

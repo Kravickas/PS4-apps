@@ -145,12 +145,16 @@
 
 /* Floor surface (ps_floor): parallax occlusion mapping from the height map
    and distance fog toward the sky gradient. */
-#define POM_DEPTH 0.1f       /* relief depth in world units (a texture tile is 4 units) */
+#define POM_DEPTH 0.05f      /* relief depth in world units (a texture tile is 4 units) */
 #define POM_FADE 30.0f       /* parallax fades to zero by this distance */
-#define FOG_EDGE_STOPS 6.64f /* fog transmittance at the floor edge = 2^-6.64 = 1% */
+#define FOG_MIN 0.07f /* fog at distance 0; grows as FOG_MIN * e^(d / L), 100% at FLOOR_HALF */
+/* Midday sun disc colour (sRGB); amber at the horizon ramps to this. */
+#define SUN_DAY_R 1.00f
+#define SUN_DAY_G 0.97f
+#define SUN_DAY_B 0.87f
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "floor-pom+fog"
+#define BUILD_TAG "fog-exp"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -657,6 +661,26 @@ static float my_sin(float x) {
 }
 static float my_cos(float x) { return my_sin(x + 1.57079632679490f); }
 
+/* log2 for init-time constants (no libm): exponent from the float bits,
+   mantissa m in [1, 2) through ln m = 2 atanh(s), s = (m - 1) / (m + 1) < 1/3,
+   six odd terms. Positive normal floats only. */
+static float my_log2(float x) {
+    union {
+        float f;
+        uint32_t u;
+    } v = {x};
+    int e = (int)((v.u >> 23) & 0xFFu) - 127;
+    v.u = (v.u & 0x007FFFFFu) | 0x3F800000u;
+    float s = (v.f - 1.0f) / (v.f + 1.0f), s2 = s * s;
+    float t = 1.0f / 11.0f;
+    t = 1.0f / 9.0f + s2 * t;
+    t = 1.0f / 7.0f + s2 * t;
+    t = 1.0f / 5.0f + s2 * t;
+    t = 1.0f / 3.0f + s2 * t;
+    t = 1.0f + s2 * t;
+    return (float)e + 2.0f * s * t * 1.44269504f;
+}
+
 /* Exact square root (sqrtss). The previous 6-step Newton from x/2 was only
    accurate for roughly 0.1..1000 (1e6 -> 7855, 1e-6 -> 0.031). */
 static float my_sqrt(float x) {
@@ -1024,6 +1048,49 @@ static float srgb_to_linear(float c) {
     return x * x * y * y;
 }
 
+/* Sky zenith / horizon colours (sRGB) from the sun's elevation y (unit
+   direction, before the moon swap). Day above 0.3; twilight below, the horizon
+   turning orange as the sun sinks. Under the horizon the twilight colours fade
+   into the night sky with a smoothstep over -0.2..0 (value and slope continuous
+   at both ends); before, the brightest orange horizon switched to night in one
+   frame at -0.2. */
+static void sky_colours(float y, float* zr, float* zg, float* zb, float* hr, float* hg, float* hb) {
+    if (y > 0.3f) {
+        *zr = 0.10f;
+        *zg = 0.25f;
+        *zb = 0.60f;
+        *hr = 0.65f;
+        *hg = 0.82f;
+        *hb = 0.95f;
+        return;
+    }
+    float k = (y + 0.2f) / 0.5f; /* 0 at the night edge, 1 at the day edge */
+    if (k < 0.0f)
+        k = 0.0f;
+    if (k > 1.0f)
+        k = 1.0f;
+    float warm = 1.0f - k;
+    *zr = 0.04f + 0.06f * k;
+    *zg = 0.06f + 0.19f * k;
+    *zb = 0.18f + 0.42f * k;
+    *hr = 0.65f + 0.30f * warm;
+    *hg = 0.35f + 0.47f * (1.0f - warm * warm);
+    *hb = 0.25f + 0.70f * k;
+    if (y < 0.0f) {
+        float f = (y + 0.2f) / 0.2f;
+        if (f < 0.0f)
+            f = 0.0f;
+        f = f * f * (3.0f - 2.0f * f);
+        const float nz[3] = {0.01f, 0.02f, 0.06f}, nh[3] = {0.03f, 0.04f, 0.10f};
+        *zr = nz[0] + (*zr - nz[0]) * f;
+        *zg = nz[1] + (*zg - nz[1]) * f;
+        *zb = nz[2] + (*zb - nz[2]) * f;
+        *hr = nh[0] + (*hr - nh[0]) * f;
+        *hg = nh[1] + (*hg - nh[1]) * f;
+        *hb = nh[2] + (*hb - nh[2]) * f;
+    }
+}
+
 /* Normal-map channel convention, from the data: a tangent-space normal tilts
    away from rising height, n ~ (-dH/du, -dH/dv, 1) with u along texel columns
    and v along texel rows (both textures load rows in file order). Correlate
@@ -1269,15 +1336,15 @@ static uint32_t build_dcb(struct PM4Builder *b,
       pm4_set_sh_regs(b,SH_VS_PGM_LO,r,4);
       /* VS user data set per-draw below */ }
 
-    // PS: user_sgpr=2. New projective-shadow PS uses up to v43 (need 44 VGPRs
-    // → field = ceil(44/4)-1 = 10) and up to s47 (need 48 SGPRs → field = ceil(48/8)-1 = 5).
-    // PGM_RSRC1 = (sgpr_field<<6) | vgpr_field = (5<<6)|10 = 0x14A.
+    // PS: user_sgpr=2. ps_shader (textured + Lambert + fog): v0-v43, s0-s51 + VCC
+    // -> 44 VGPRs, 56 SGPRs: PGM_RSRC1 = (6 << 6) | 10 = 0x18A.
     { uint64_t a=(uint64_t)(uintptr_t)ps;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(5u<<6)|10u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
-      uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
-                      (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
-      pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (6u << 6) | 10u, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
+        uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
+                          (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
+        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 2);
+    }
 
     // Scissors
     CPMARK(b, 0x12);   /* stage: scissors/viewport */
@@ -1480,14 +1547,14 @@ static uint32_t build_dcb(struct PM4Builder *b,
         GPU_TS(3);
     }
 
-
-    // Switch back to textured PS for model. Same RSRC1 as initial: 44 VGPRs, 48 SGPRs.
+    // Switch back to textured PS for model. Same RSRC1 as initial: 44 VGPRs, 56 SGPRs.
     { uint64_t a=(uint64_t)(uintptr_t)ps;
-      uint32_t r[4]={(uint32_t)(a>>8),(uint32_t)(a>>40),(5u<<6)|10u,(2u<<1)};
-      pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
-      uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
-                      (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
-      pm4_set_sh_regs(b,SH_PS_USER_DATA_0,ud,2); }
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (6u << 6) | 10u, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
+        uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
+                          (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
+        pm4_set_sh_regs(b, SH_PS_USER_DATA_0, ud, 2);
+    }
 
     // Switch to depth=Less for cube
     pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(1u<<4));
@@ -1497,6 +1564,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     { uint32_t cube_v[4];
       build_vsharp(cube_v,(char*)vb_base+MVP_OFF,(uint32_t)(vb_total > MVP_OFF ? vb_total - MVP_OFF : VERT_BUF_SIZE - MVP_OFF));
       pm4_set_sh_regs(b,SH_VS_USER_DATA_0,cube_v,4); }
+    /* ps_shader reads POS_Y (v2) for the fog colour: PERSP_CENTER | POS_Y_FLOAT.
+       (The loading screen's ps_blue writes v2 before reading it.) */
+    pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x202);
+    pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x202);
     if (is_indexed && ib_ptr && num_indices > 0) {
         pm4_index_type(b, 1); /* uint32 indices */
         pm4_draw_index_2(b, (uint32_t)num_indices,
@@ -1504,6 +1575,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
     } else {
         pm4_draw_index_auto(b, model_verts);
     }
+    pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
+    pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
     GPU_TS(4);
     if (g_hdr)
         emit_post(b, color, bg_v);
@@ -2522,8 +2595,11 @@ int main(void) {
     /* Floor normal map at desc[72..79] — procedural 64x64 tangent-space normals */
     build_tsharp_levels(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h, floor_nrm_levels);
     /* ps_floor parallax + fog: height T# desc[92], S# desc[100], camera desc[104]
-       (per frame), then (pom_scale, fog -stops/half^2, h_scale, h_bias) desc[108]
-       and (normal sign x, sign y, 1/POM_FADE, 1/DISPLAY_H) desc[112]. */
+       (xyz per frame, w = log2(FOG_MIN)), then (pom_scale, fog rate, h_scale,
+       h_bias) desc[108] and (normal sign x, sign y, 1/POM_FADE, 1/DISPLAY_H)
+       desc[112]. Fog (ps_floor and ps_shader): weight = min(1, 2^(rate * d +
+       log2(FOG_MIN))) = min(1, FOG_MIN * e^(d / L)), rate = log2(1 / FOG_MIN) /
+       FLOOR_HALF: FOG_MIN at the camera, 100% at the floor edge. */
     build_tsharp_levels(desc + 92, floor_height_tex, floor_hgt_w, floor_hgt_h, floor_hgt_levels);
     build_ssharp_height(desc + 100);
     float nrm_sx = 1.0f, nrm_sy = 1.0f, nrm_cx = 0.0f, nrm_cy = 0.0f;
@@ -2536,10 +2612,10 @@ int main(void) {
         fc[0] = 0.0f;
         fc[1] = 0.0f;
         fc[2] = 0.0f;
-        fc[3] = 0.0f;
+        fc[3] = my_log2(FOG_MIN);
         int range = floor_hgt_hi - floor_hgt_lo;
         fc[4] = (range > 0) ? POM_DEPTH * (FLOOR_UV_MAX / (2.0f * FLOOR_HALF)) : 0.0f;
-        fc[5] = -FOG_EDGE_STOPS / (FLOOR_HALF * FLOOR_HALF);
+        fc[5] = -my_log2(FOG_MIN) / FLOOR_HALF;
         fc[6] = (range > 0) ? 255.0f / (float)range : 0.0f;
         fc[7] = (range > 0) ? -(float)floor_hgt_lo / (float)range : 1.0f;
         fc[8] = nrm_sx;
@@ -3575,28 +3651,7 @@ int main(void) {
            day. Use orig_sun_y to keep the sky correctly dark at night even
            while the moon lights up the scene. */
         float zr, zg, zb, hr, hg, hb;
-        if (orig_sun_y > 0.3f) {
-            /* Full day */
-            zr = 0.10f; zg = 0.25f; zb = 0.60f;
-            hr = 0.65f; hg = 0.82f; hb = 0.95f;
-        } else if (orig_sun_y > -0.2f) {
-            /* Twilight/sunset: fade from day to night with orange horizon */
-            float k = (orig_sun_y + 0.2f) / 0.5f;    /* 0 at night-edge, 1 at full-day edge */
-            if (k < 0) k = 0; if (k > 1) k = 1;
-            /* Zenith darkens */
-            zr = 0.04f + 0.06f * k;
-            zg = 0.06f + 0.19f * k;
-            zb = 0.18f + 0.42f * k;
-            /* Horizon warm orange near sunset */
-            float warm = 1.0f - k;                   /* 1 at night-edge */
-            hr = 0.65f + 0.30f * warm;               /* peaks orange */
-            hg = 0.35f + 0.47f * (1.0f - warm*warm);
-            hb = 0.25f + 0.70f * k;
-        } else {
-            /* Night sky: deep blue, slightly brighter at horizon */
-            zr = 0.01f; zg = 0.02f; zb = 0.06f;
-            hr = 0.03f; hg = 0.04f; hb = 0.10f;
-        }
+        sky_colours(orig_sun_y, &zr, &zg, &zb, &hr, &hg, &hb);
         {
             float *sz = (float*)(desc + 24);
             sz[0] = srgb_to_linear(zr);
@@ -3661,17 +3716,18 @@ int main(void) {
                 sd[2] = body[k][3];
                 sd[3] = 0.0f;
             }
-            /* Sun disc: amber at the horizon -> white at orig_sun_y 0.15 (the
-               light-colour ramp), held amber while it sets. Moon: cool blue. */
+            /* Sun disc: amber at the horizon -> SUN_DAY_* (pale warm) at orig_sun_y
+               0.15, held amber while it sets. Moon: cool blue. At SUN_HDR the core
+               still clips to white; the tint shows on the rim and in the bloom. */
             float kc = orig_sun_y / 0.15f;
             if (kc < 0.0f)
                 kc = 0.0f;
             if (kc > 1.0f)
                 kc = 1.0f;
             float* sc = (float*)(desc + 84);
-            sc[0] = srgb_to_linear(1.00f) * SUN_HDR;
-            sc[1] = srgb_to_linear(0.64f + 0.36f * kc) * SUN_HDR;
-            sc[2] = srgb_to_linear(0.44f + 0.56f * kc) * SUN_HDR;
+            sc[0] = srgb_to_linear(1.00f + (SUN_DAY_R - 1.00f) * kc) * SUN_HDR;
+            sc[1] = srgb_to_linear(0.64f + (SUN_DAY_G - 0.64f) * kc) * SUN_HDR;
+            sc[2] = srgb_to_linear(0.44f + (SUN_DAY_B - 0.44f) * kc) * SUN_HDR;
             sc[3] = 0.0f;
             float* mc = (float*)(desc + 88);
             mc[0] = srgb_to_linear(0.52f) * MOON_HDR;

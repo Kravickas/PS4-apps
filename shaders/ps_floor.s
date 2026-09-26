@@ -503,8 +503,11 @@ v_mov_b32 v80, s30
 v_subrev_f32 v80, s26, v80
 v_mul_f32 v80, v80, v77
 v_add_f32 v80, s26, v80
-v_mul_f32 v81, s41, v36
+v_mul_f32 v81, s41, v37
+v_add_f32 v81, s39, v81
 v_exp_f32 v81, v81
+v_min_f32 v81, 1.0, v81
+v_sub_f32 v81, 1.0, v81
 v_sub_f32 v82, v74, v78
 v_mac_f32 v78, v82, v81
 v_sub_f32 v82, v75, v79
