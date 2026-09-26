@@ -155,14 +155,18 @@
    on hardware (sky clear has writes off), so LESS fails against it; the first
    depth write (clear enabled) crashed in frame 0. Depth = separate step. The
    cube is convex, back-face culled and drawn after the floor. */
-#define SCENE_NO_DEPTH 1
+#define SCENE_NO_DEPTH 0
 
 /* Mip levels for the floor albedo/normal maps (power-of-two sizes only, down to
    16x16; see bmp_loader.h). 1 = no mips, as before. */
 #define FLOOR_TEX_MIPS 9
 
+/* Sun disc edge radius in pixels (1080p). The old disc was 59 px tall and
+   105 px wide (NDC distance on a 16:9 screen); it is now round. */
+#define SUN_DISC_RADIUS_PX 110.0f
+
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "aniso-radeonsi+full-scene"
+#define BUILD_TAG "round-sun+start-of-day"
 #if !defined(RT_TEST) && !defined(DRAW_STOP) && !defined(DRAW_STOP_OFF) && !defined(MINIMAL_TEST)
 #define DRAW_STOP 1
 #endif
@@ -666,15 +670,15 @@ static const uint32_t ps_shader_binary_WPOS_UV[] __attribute__((aligned(256))) =
 // attr0.x = clip_x, attr0.y = clip_y (screen-space)
 // Sky PS: dynamic day/sunset/night gradient + warm sun disc
 // Loads:
-//   s[4:7]   sun_NDC at desc[16] (xyz=NDC pos, w=radius²)
+//   s[4:7]   sun at desc[16]: x (aspect-scaled NDC), y (NDC), z = disc radius²
 //   s[8:11]  zenith RGB at desc[24]
 //   s[12:15] horizon RGB at desc[28]
 //   s[16:19] light_color RGB at desc[32]
 // Pipeline:
 //   t = 0.5*(1 - clip_y)    // gradient param: 0=top, 1=bottom
 //   sky.rgb = lerp(zenith, horizon, t)
-//   d² = (clip_x - sun_x)² + (clip_y - sun_y)²
-//   sun_factor = (max(0, 1 - d²*radius))² * 2 → sharper falloff
+//   d² = (clip_x - sun_x)² + (clip_y - sun_y)²   (clip_x/sun_x pre-scaled by W/H)
+//   sun_factor = clamp(1 - d²/radius², 0, 1)²      (decoded: dwords 35-45)
 //   output.rgb = lerp(sky, light_color, sun_factor)
 // Hash CAFE00E2 (camera-locked but with working sun disc).
 static const uint32_t ps_dark_binary[] __attribute__((aligned(256))) = {
@@ -1213,7 +1217,10 @@ static void build_static_vb(float *vb,
         int i=v*12;
         bg[i]=bp[v][0];bg[i+1]=bp[v][1];bg[i+2]=bp[v][2];bg[i+3]=bp[v][3];
         bg[i+4]=0.0f;bg[i+5]=0.0f;bg[i+6]=0.0f;bg[i+7]=0.0f; /* zero normal = no lighting */
-        bg[i+8]=bp[v][0]; bg[i+9]=bp[v][1]; bg[i+10]=0.0f; bg[i+11]=0.0f; /* clip_x, clip_y */
+        /* attr0 = (clip_x * aspect, clip_y): ps_dark uses attr0.x ONLY for the
+           sun distance (dword 35, v_sub_f32 v26, v2, v19), so scaling it and the
+           sun's x by the aspect ratio makes the disc round in pixels. */
+        bg[i+8]=bp[v][0]*((float)DISPLAY_W/(float)DISPLAY_H); bg[i+9]=bp[v][1]; bg[i+10]=0.0f; bg[i+11]=0.0f;
     }
 
     // Cube verts at offset 320 (after MVP slot)
@@ -1725,17 +1732,30 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_OVERRIDE,0);
     pm4_set_context_reg(b,0x00B,0x3F800000u); // CTX_DEPTH_CLEAR = 1.0f
     pm4_set_context_reg(b,CTX_DB_Z_INFO,3u);
+    /* CIK takes the depth layout from DB_DEPTH_INFO (radeonsi si_init_depth_surface,
+       chip_class >= CIK: ARRAY_MODE/PIPE_CONFIG/bank fields from the tile-mode
+       entry; DB_Z_INFO.TILE_MODE_INDEX is SI-only). Never written before, it was
+       0 = ARRAY_LINEAR_GENERAL, which addrlib never uses for depth. PS4 table
+       entry Depth1DThin (5) = ARRAY_1D_TILED_THIN1, PIPE_CONFIG P8_32x32_16x16
+       (shadPS4 tiling.cpp). 1D needs pitch/height % 8 (SiLib micro-tiled
+       alignment): 1920x1080x4 = 8294400 B, inside the allocation. Bank fields
+       do not apply to 1D. ADDR5_SWIZZLE_MASK = !tc_compatible_htile = 1. */
+    pm4_set_context_reg(b,CTX_DB_DEPTH_INFO,(1u<<0)|(2u<<4)|(12u<<8));
     pm4_set_context_reg(b,CTX_DB_STENCIL_INFO,0);
     { uint32_t z=(uint32_t)((uint64_t)(uintptr_t)depth>>8);
       uint32_t d[4]={z,0,z,0};
       pm4_set_context_regs(b,CTX_DB_Z_READ_BASE,d,4); }
     pm4_set_context_reg(b,CTX_DB_DEPTH_SIZE,((DISPLAY_W/8)-1)|(((DISPLAY_H/8)-1)<<11));
     pm4_set_context_reg(b,CTX_DB_DEPTH_SLICE,(DISPLAY_W*DISPLAY_H/64)-1);
-    /* No depth write: the clear only writes through the depth write path (game
-       clear: DB_RENDER_CONTROL=3, DB_DEPTH_CONTROL=0x777), but enabling it (0x76)
-       killed the app in frame 0 - first GPU write to this depth surface. Depth is
-       its own ladder step; until then nothing writes depth. */
-    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(7u<<4));
+#if SCENE_NO_DEPTH
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(7u<<4));   /* no depth write */
+#else
+    /* Clear-by-draw, the game's pattern (DB_RENDER_CONTROL=3 + 0x777) minus
+       stencil: Z enable | Z write | ALWAYS. The clear only writes through the
+       depth write path. Previously this crashed in frame 0 - with DB_DEPTH_INFO
+       unset (linear general). */
+    pm4_set_context_reg(b,CTX_DEPTH_CONTROL,(1u<<1)|(1u<<2)|(7u<<4));
+#endif
 
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,0); /* no culling for BG */
 #endif
@@ -3324,7 +3344,11 @@ int main(void) {
     int cube_rotation_enabled = 1;  // Start button toggles this (default: spinning)
     float cube_angle_y = 0.0f;       // accumulator (advances only when enabled)
     float cube_angle_x = 0.0f;
-    float sun_angle = 3.0f;  // start at sunset: sun low on western horizon
+    /* Start of the day: sun_angle 0 is the first day frame (sun_y = 0, so
+       is_night = (sun_y < 0) is false) - the sun on the eastern horizon.
+       The default camera faces west, so the sun itself comes into view later,
+       near sunset. */
+    float sun_angle = 0.0f;
     float sun_speed = 0.0027f;  // 40% slower than 0.0045 (= 76% slower than original 0.01125)
     uint32_t prev_buttons = 0;
 
@@ -4004,13 +4028,14 @@ int main(void) {
             float cy = mvp[4]*sx + mvp[5]*sy2 + mvp[6]*sz + mvp[7];
             float cw = mvp[12]*sx + mvp[13]*sy2 + mvp[14]*sz + mvp[15];
             float *sd = (float*)(desc + 16);
-            /* Disc radius: SUN doubled (0.006 → 0.012 = 200% of original).
-               MOON at 75% of new sun size = 0.009.
-               sd[2] is the radius value sampled by the sky PS for the bright
-               disc blend. */
-            float disc_radius = is_night ? 0.009f : 0.012f;
+            /* ps_dark: f = clamp(1 - d^2 / sd[2], 0, 1)^2 with d measured in
+               aspect-corrected NDC (x * W/H, y) - so sd[2] is the disc edge
+               radius SQUARED, in units of half the screen height. Moon keeps
+               the previous moon/sun ratio of this value (0.75). */
+            const float sun_r = SUN_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
+            float disc_radius = sun_r * sun_r * (is_night ? 0.75f : 1.0f);
             if (cw > 0.01f) {
-                sd[0] = cx / cw; sd[1] = cy / cw;
+                sd[0] = (cx / cw) * ((float)DISPLAY_W / (float)DISPLAY_H); sd[1] = cy / cw;
                 sd[2] = disc_radius; sd[3] = 1.0f;
             } else {
                 sd[0] = 99.0f; sd[1] = 99.0f;
@@ -4661,6 +4686,16 @@ int main(void) {
             LP(" gcu="); p+=lg_i64(L+p,GTD(3,4));
             LP(" gtot="); p+=lg_i64(L+p,GTD(0,4));
             #undef GTD
+            /* Depth tile (0,0): the first 256 B in 1D tiling = the top-left 8x8
+               pixels, where only the sky draws. 0x3f800000 = DB_DEPTH_CLEAR
+               substituted; 0x3f7fbe77 = the sky quad's own z (0.999). */
+            if (depth) {
+                const volatile uint32_t *dz = (const volatile uint32_t *)depth;
+                uint32_t dmin = 0xFFFFFFFFu, dmax = 0;
+                for (int q = 0; q < 64; q++) { uint32_t v = dz[q]; if (v < dmin) dmin = v; if (v > dmax) dmax = v; }
+                LP(" dz0min="); p+=lg_hex(L+p,dmin);
+                LP(" dz0max="); p+=lg_hex(L+p,dmax);
+            }
             LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv);
             L[p++]='\n';
             #undef LP

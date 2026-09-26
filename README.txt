@@ -1,4 +1,56 @@
 ============================================================
+ROUND, BIGGER SUN; START OF THE DAY  (build=round-sun+start-of-day)
+============================================================
+ps_dark decoded (CI opcodes from LLVM VOP1/2/3Instructions.td gfx6_gfx7):
+    t = 0.5*(1 - clip_y);  sky = zenith + (horizon - zenith)*t
+    d^2 = (clip_x - desc[16])^2 + (clip_y - desc[17])^2
+    f = clamp(1 - d^2/desc[18], 0, 1)^2;  out = sky + (light - sky)*f
+  (the old notes said w=radius^2 and *2 - both wrong; it is z, no *2)
+  attr0.x (clip_x) is used ONLY for the sun distance (dword 35).
+Old disc: d in NDC on 16:9 -> 105 px wide, 59 px tall (ellipse).
+Now: the sky quad's clip_x and the sun's x are both multiplied by W/H, so d is
+in pixel-proportional units -> round. SUN_DISC_RADIUS_PX 110 -> desc[18] =
+(110/540)^2 = 0.0415 (was 0.012); moon keeps its 0.75 ratio (0.0311).
+No shader change.
+
+Start: sun_angle 0 = start of the day (first frame with sun_y >= 0, sun on
+the eastern horizon). Camera unchanged (faces west), so the sun disc comes
+into view later, near sunset.
+
+Note from the depth step: near 0.01 / far 500 puts z = 0.999 at only ~10
+units. If the trace shows dz0 = 0x3f7fbe77 (clear not substituted), most of
+the floor would fail LESS - dz0 = 0x3f800000 means the clear works.
+
+============================================================
+DEPTH ON: 1D-TILED DEPTH SURFACE  (build=depth-1d-tiled)
+============================================================
+Full scene + radeonsi aniso: works.
+
+Why depth crashed before: on CIK the DB takes its layout from DB_DEPTH_INFO
+(radeonsi si_init_depth_surface, chip_class >= CIK: ARRAY_MODE / PIPE_CONFIG /
+bank fields from the tile-mode entry; DB_Z_INFO.TILE_MODE_INDEX is SI-only).
+We never wrote DB_DEPTH_INFO, so it stayed at its CLEAR_STATE value 0 =
+ARRAY_LINEAR_GENERAL. CI addrlib only ever gives depth the depth table
+entries (2D 0-4, 1D 5, PRT 6), never linear.
+
+Now: DB_DEPTH_INFO = 0xc21 = ADDR5_SWIZZLE_MASK 1 (radeonsi: !tc_compatible
+_htile) | ARRAY_MODE 2 (ARRAY_1D_TILED_THIN1) | PIPE_CONFIG 12
+(P8_32x32_16x16) - the PS4 table entry Depth1DThin (5) per shadPS4
+tiling.cpp. Field positions gfx_7_2_sh_mask.h, enums gfx_7_2_enum.h.
+1D tiling needs pitch and height % 8 (SiLib micro-tiled alignment; base =
+pipe interleave): 1920x1080x4 = 8294400 B fits the allocation (8306688 B,
+64 KB aligned). DB_DEPTH_SIZE (239,134) / SLICE 32399 already matched.
+Sky: DB_DEPTH_CONTROL 0x76 (Z write, ALWAYS) with DEPTH_CLEAR_ENABLE - the
+game's clear minus stencil. Floor and cube: 0x16 (LESS + write).
+SCENE_NO_DEPTH 0.
+
+Diagnostic: trace fields dz0min / dz0max = min/max of depth tile (0,0)
+(first 256 B = top-left 8x8 pixels, only the sky draws there):
+  0x3f800000 = DB_DEPTH_CLEAR substituted (clear works without HTILE)
+  0x3f7fbe77 = the sky quad's own z (0.999): the clear flag is ignored
+               without HTILE; far floor beyond ~z 0.999 would then fail LESS
+
+============================================================
 ANISO = RADEONSI, FULL SCENE  (build=aniso-radeonsi+full-scene)
 ============================================================
 mips+fence-spin result: floor looks better.

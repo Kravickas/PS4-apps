@@ -180,6 +180,7 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define CTX_VS_OUTPUT_CONTROL       0x207
 #define CTX_MODE_CONTROL            0x292  // AMD: PA_SC_MODE_CNTL_0
 #define CTX_INDEX_SIZE              0x29D  // AMD: VGT_DMA_SIZE
+#define CTX_DB_DEPTH_INFO           0x00F  // AMD: DB_DEPTH_INFO
 #define CTX_STAGE_ENABLE            0x2D5  // AMD: VGT_SHADER_STAGES_EN
 #define CTX_AA_CONFIG               0x2F8
 #define CTX_CB_COLOR0_BASE          0x318
