@@ -209,7 +209,9 @@ v_sub_f32 v40, 1.0, v40
 v_max_f32 v40, 0, v40
 v_max_f32 v38, v38, v40
 v_cmp_lt_f32 vcc, 0, v37
-s_cbranch_vccz ui_frost_done
+; SCC = any lane (no VCCZ: its status bit is unreliable on SI/CI)
+s_or_b32 s58, vcc_lo, vcc_hi
+s_cbranch_scc0 ui_frost_done
 ; 5 x 5 bilinear taps, 8 px apart (scene T# s[4:11], bilinear S# s[28:31])
 v_mov_b32 v57, 0
 v_mov_b32 v58, 0
@@ -433,7 +435,9 @@ v_cmp_ge_f32 vcc, 0x3b4d2e1c, v10
 v_cndmask_b32 v18, v18, v21, vcc
 ; >>> ui content: premultiplied sRGB-space texture (dwords 72..79 T#, 80..83 point S#), panels only
 v_cmp_lt_f32 vcc, 0, v37
-s_cbranch_vccz ui_content_done
+; SCC = any lane (no VCCZ: its status bit is unreliable on SI/CI)
+s_or_b32 s58, vcc_lo, vcc_hi
+s_cbranch_scc0 ui_content_done
 image_sample_lz v[40:43], v[4:5], s[68:75], s[76:79] dmask:0xf
 s_waitcnt vmcnt(0)
 v_sub_f32 v39, 1.0, v43

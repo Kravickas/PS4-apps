@@ -177,7 +177,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ui-diag"
+#define BUILD_TAG "ui-fix1"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -2965,6 +2965,12 @@ int main(void) {
         uint32_t* fin = g_post_tab + (POST_PASSES - 1) * 32;
         build_tsharp_tex(fin + 40, &glare_tex);
         build_ssharp_clamp(fin + 48, 1);
+        /* UI slots (dwords 64..83) valid before the first frame (the loading screen runs this
+           pass too): hidden panels and a real T# - the UI buffer, or the glare texture if the
+           UI failed - so no path through the shader can ever sample a null descriptor. */
+        build_tsharp_tex(fin + 72, &glare_tex);
+        build_ssharp_clamp(fin + 80, 0);
+        ui_write_table(fin);
         trace_msg("ck: post tables\n");
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
