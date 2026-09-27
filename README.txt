@@ -1,4 +1,44 @@
 ============================================================
+PS4 HANG DIAGNOSTIC  (build=diag-model-stage)
+============================================================
+PS4 trace of pkg-assets-bc: all six DDS textures load (err 0), the loading
+screen completes (fence 105), then the first main-loop frame never finishes:
+fence stays 105, cpm frozen at 0x12 (main pass past viewport/scissor, never
+0x1F). The shadow pass ends with ACQUIRE_MEM (CB flush, the CP waits), so the
+shadow pass - including the model's vs_model_shadow draw - completed. Left:
+sky, stars (also in the loading frames that completed), floor (first use of
+the BC textures), model (first use of vs_model / ps_model), post.
+This build separates them in one run:
+- MODEL_PATH_FROM_FRAME 120: frames 0-119 draw the loaded model with the old
+  PS4-proven vs_shader / ps_shader (static) while the floor already samples
+  BC1 / BC5 / BC4; at frame 120 vs_model / ps_model switch on ("model draw
+  path enabled ... at f=120" in the trace). Hang before 120 -> floor / BC;
+  hang at 120 -> model path.
+- CP checkpoints 0x13 sky, 0x14 stars, 0x15 floor, 0x16 cube/model drawn.
+- rts= on every trace line: EOP stamps written right now (batch start,
+  shadow, sky, floor, model, post); cleared before the main loop. On a stalled
+  frame the first 0 after a 1 is the draw that hangs.
+Also fixed: with a model loaded, the per-frame "mirror light matrix into the
+floor shadow header" wrote 64 bytes into model vertices 34-35 of the model's
+own shadow VB (the floor shadow draw it served is disabled).
+
+============================================================
+ENGRAVED LOGO AT HALF DEPTH, CUBE ICON, STARTUP TRACE  (build=pkg-assets-bc)
+============================================================
+Prop relief: the logo was raised (background at the bottom of the height
+range), so the whole face read as sunken, and the relief shadow of the raised
+letters fell onto the background in 8 discrete steps - the repeated
+"ShadPS4" copies. Now engraved: height = 1 - ink (background flush with the
+face: no parallax offset, no shadow there), depth halved (D_UV =
+MODEL_POM_DEPTH = 0.0125). ps_model emulation with the real DDS maps, grazing
+light: background pixels darkened by the relief 15.9% before, 0.0% now.
+Icon: tools/make_icon.py - the ShadPS4 badge on a tilted, turned cube
+(yaw -28, pitch 22 deg, mild perspective), transparent background, 512x512
+RGBA; ICON0_PNG entry in the built PKG = sce_sys/icon0.png.
+trace.log (/data/trace.log, fsync per line) now also records bgm_start, each
+model load (path, err, verts) and "model draw path enabled".
+
+============================================================
 PKG ASSETS (/app0/assets), COMPRESSED TEXTURES, APP ICON  (build=pkg-assets-bc)
 ============================================================
 Assets ship inside the PKG and load from /app0/assets/ (no more /data files;

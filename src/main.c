@@ -154,14 +154,20 @@
 /* Imported models (OBJ / STL / PLY): vs_model + ps_model, model transform on the GPU. */
 #define MODEL_FIT_RADIUS                                                                           \
     0.6928203f                    /* scaled to the built-in cube's bounding radius (0.4 * sqrt 3) */
-#define MODEL_POM_DEPTH 0.025f    /* relief depth in UV units (= D_UV in tools/gen_model.py) */
+#define MODEL_POM_DEPTH 0.0125f   /* relief depth in UV units (= D_UV in tools/gen_model.py) */
 #define MODEL_RELIEF 1.0f         /* relief self-shadow strength */
 #define MODEL_SHADOW_OFFSET 0.02f /* shadow lookup: offset along the normal (world units) */
 #define MODEL_SHADOW_BIAS                                                                          \
     (1.5f / 255.0f) /* shadow lookup: depth bias, 1.5 steps of the 8-bit map */
+/* PS4 diagnostic (GPU hang in the first main-loop frame, CP stopped after 0x12):
+   until this frame a loaded model is drawn by the old PS4-proven path (vs_shader
+   / ps_shader, static) while the floor already samples the BC textures; from
+   this frame on vs_model / ps_model. A hang before it blames the floor, at it
+   the model path. 0 = model path from the first frame. */
+#define MODEL_PATH_FROM_FRAME 120
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "pkg-assets-bc"
+#define BUILD_TAG "diag-model-stage"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1512,7 +1518,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_sh_regs(b,SH_VS_USER_DATA_0,bg_v,4);
     pm4_draw_index_auto(b,BG_VERTS);
     GPU_TS(2);
-
+    CPMARK(b, 0x13); /* sky drawn */
 
     /* Sky draw performed the one-shot depth clear. Disable clear flag so subsequent
        draws (floor, cube) render normally against the now-cleared depth buffer. */
@@ -1541,6 +1547,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 4); /* SPI_SHADER_FP16_ABGR */
         pm4_set_sh_regs(b, SH_VS_USER_DATA_0, g_stars_v, 4);
         pm4_draw_index_auto(b, (uint32_t)g_stars_n * 6u);
+        CPMARK(b, 0x14); /* stars drawn */
         pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
         pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 9); /* SPI_SHADER_32_ABGR */
     }
@@ -1567,6 +1574,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x202);
         pm4_set_sh_regs(b,SH_VS_USER_DATA_0,floor_v,4);
         pm4_draw_index_auto(b, FLOOR_VERTS);
+        CPMARK(b, 0x15); /* floor drawn */
         pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
         pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
         GPU_TS(3);
@@ -1620,6 +1628,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
     } else {
         pm4_draw_index_auto(b, model_verts);
     }
+    CPMARK(b, 0x16); /* cube / model drawn */
     pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
     pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
     if (g_model.enabled) {
@@ -2493,6 +2502,14 @@ int main(void) {
     {
         int r = bgm_start(ASSET_DIR "sound/bgm/bgm.wav", cpu_alloc);
         printf("bgm: %d\n", r);
+        char L[64];
+        int p = 0;
+        const char* m = "bgm_start: ";
+        while (*m)
+            L[p++] = *m++;
+        p += lg_i64(L + p, r);
+        L[p++] = '\n';
+        trace_line(L, (unsigned long)p);
     }
 
     /* Textures: DDS from the package (tools/make_textures.py, src/dds_loader.h):
@@ -2879,6 +2896,25 @@ int main(void) {
             } else if (dot[1]=='p' && dot[2]=='l' && dot[3]=='y') {
                 err = ply_load_file(obj_paths[pi], gpu_alloc, &mesh, loading_progress, &load_ctx);
             }
+            {
+                char L[192];
+                int p = 0;
+                const char* m = "model load ";
+                while (*m)
+                    L[p++] = *m++;
+                for (const char* q = obj_paths[pi]; *q && p < 150; q++)
+                    L[p++] = *q;
+                m = " err=";
+                while (*m)
+                    L[p++] = *m++;
+                p += lg_i64(L + p, err);
+                m = " verts=";
+                while (*m)
+                    L[p++] = *m++;
+                p += lg_i64(L + p, err == 0 ? mesh.num_verts : 0);
+                L[p++] = '\n';
+                trace_line(L, (unsigned long)p);
+            }
             if (err == 0 && mesh.num_verts > 0) {
                 printf("Loaded %s: %d verts, %d tris (decimate=%d)\n",
                        obj_paths[pi], mesh.num_verts, mesh.num_tris, mesh.indexed);
@@ -2950,7 +2986,7 @@ int main(void) {
                 g_model_cy = 0.0f;
                 g_model_cz = 0.0f;
                 g_model_radius = 0.8f;
-                g_model.enabled = 1;
+                /* g_model.enabled is switched on in the frame loop (MODEL_PATH_FROM_FRAME). */
                 loaded = 1;
                 model_loaded = 1;
             }
@@ -3212,6 +3248,11 @@ int main(void) {
 #undef TP
         trace_line(T, (unsigned long)p);
     }
+    /* The loading screen wrote EOP stamps 2..5 too: clear them, so a stamp read on
+       a stalled frame (rts= in the trace) is from that frame. */
+    if (g_gpu_ts)
+        for (int q = 0; q < 6; q++)
+            g_gpu_ts[q] = 0;
     while (running) {
         int bi=frame%NUM_FRAMES;
 #if FENCE_SLOTS > 1
@@ -3615,7 +3656,9 @@ int main(void) {
             }
             /* Mirror light_MVP into the shadow_vb's floor-draw header so the
                floor shadow draw reads the same matrix at V#+0. */
-            if (shadow_vb) {
+            if (shadow_vb && !model_loaded) {
+                /* A loaded model has its own shadow_vb without the floor region:
+                   shadow_floor_mvp_off there lands on model vertices. */
                 float *lm2 = (float*)((char*)shadow_vb + shadow_floor_mvp_off);
                 for (int i = 0; i < 16; i++) lm2[i] = lm[i];
             }
@@ -3829,6 +3872,18 @@ int main(void) {
            skipped it would otherwise never update and the checkpoint would look
            frozen for the wrong reason. */
         g_cp_frame = frame;
+        /* MODEL_PATH_FROM_FRAME: see its definition (PS4 hang diagnostic). */
+        if (model_loaded && !g_model.enabled && frame >= MODEL_PATH_FROM_FRAME) {
+            g_model.enabled = 1;
+            char L[80];
+            int p = 0;
+            const char* m = "model draw path enabled (vs_model / ps_model) at f=";
+            while (*m)
+                L[p++] = *m++;
+            p += lg_i64(L + p, (long long)frame);
+            L[p++] = '\n';
+            trace_line(L, (unsigned long)p);
+        }
 
         uint32_t shadow_sz = 0;
         if (shadow_depth && g_shadow_ready) {
@@ -4356,6 +4411,12 @@ int main(void) {
             p += lg_i64(L + p, GTD(0, 5));
 #undef GTD
             LP(" fv="); p+=lg_u64(L+p,(unsigned long long)fv);
+            /* rts: which EOP stamps are written right now - batch start, after
+               shadow, sky, floor, cube/model, post (1 = written). On a stalled
+               frame the first 0 after a 1 brackets the draw that hangs. */
+            LP(" rts=");
+            for (int q = 0; q < 6; q++)
+                L[p++] = (g_gpu_ts && g_gpu_ts[q]) ? '1' : '0';
             L[p++]='\n';
             #undef LP
             trace_line(L,p);

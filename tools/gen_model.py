@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Generates the ShadCube4 prop into OUT_DIR (default .): model.obj (rounded
 cube, per-vertex normals, logo UVs on every face), model.bmp (the logo from
-src/logo_texture.h), model_height.bmp (embossed logo: ink coverage, smoothed)
+src/logo_texture.h), model_height.bmp (engraved logo: 1 - ink coverage, smoothed)
 and model_normal.bmp (from the height at relief depth D_UV, which must equal
 MODEL_POM_DEPTH in src/main.c).  Needs numpy and Pillow.
     python3 gen_model.py [OUT_DIR]"""
 import numpy as np, math, struct, os, re, sys
 from PIL import Image
 H, R, S = 0.9, 0.09, 4          # half size, edge radius, bevel segments per side
-D_UV = 0.025                    # relief depth in UV units (must equal MODEL_POM_DEPTH in main.c)
+D_UV = 0.0125                   # relief depth in UV units (must equal MODEL_POM_DEPTH in main.c)
 MAP = 512                       # height / normal map size
 
 def grid_axis():
@@ -70,7 +70,7 @@ def maps(logo):
     k = np.arange(-6, 7); g = np.exp(-k * k / (2 * 1.5 ** 2)); g /= g.sum()           # Gaussian sigma 1.5 px
     for axis in (0, 1):
         m = sum(g[i] * np.roll(m, k[i], axis=axis) for i in range(len(k)))
-    h = m                                                     # 0 background, 1 logo top
+    h = 1.0 - m                    # engraved: background 1 (flush with the face), logo carved in
     # rows top-down in the image; texture v = up, so d/dv = -(d/drow)
     dhdu = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * (MAP / 2.0)
     dhdv = -(np.roll(h, -1, 0) - np.roll(h, 1, 0)) * (MAP / 2.0)

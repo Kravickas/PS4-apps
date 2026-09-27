@@ -14,6 +14,7 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   gen_model.py       the prop (OBJ + logo albedo / height / normal sources)
   make_bgm.py        audio -> 16-bit stereo 48 kHz WAV with a crossfaded loop seam
   make_gp4.py        PKG project for PkgTool.Core; called by the Makefile
+  make_icon.py       sce_sys/icon0.png: the ShadPS4 badge on a turned cube (transparent)
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px (the packed chain is then
