@@ -1,4 +1,36 @@
 ============================================================
+CUBE EDGE LIGHT FIX  (build=light-fix)
+============================================================
+The rounded edges were whiter than physics allows (ps_model satin, CAFE0135):
+- downward reflections (R.y < 0) showed the bright horizon sky; they now show
+  the floor: ps_floor's own lighting for an unshadowed flat floor,
+  (0.070740275 + 0.929259717 max(0, L.y)) x the floor texture's average albedo
+  (smallest mip, decoded at load: linear 0.147 0.149 0.155) x light colour,
+  blended into the sky over R.y in [-a, a] (smoothstep, a = roughness^2);
+- energy balance: the diffuse light x (1 - F), F the reflection's Fresnel
+  weight (it had diffuse + up to 55 % reflection at grazing angles).
+Checked: lighting tail vs float64 within 9.6e-6 relative; with the satin off
+the whole shader is bit-identical to before; mean downward reflection 0.102 ->
+0.014. RSRC1 unchanged (0x318). desc[158] = 1 / (2a), desc[160..162] = ground.
+
+============================================================
+SMALLER SUN  (build=sun-half)
+============================================================
+Sun disc radius 93.5 -> 46.75 px (half the diameter; with SUN_HDR and bloom it
+read much larger); the moon keeps 93.5 px (own constant MOON_DISC_RADIUS_PX).
+The flare's sun-visibility rays follow the new sun radius.
+
+============================================================
+COMPACT PANELS  (build=ui-compact)
+============================================================
+Panels 10 px from the screen edges (was 40), line pitch 38 px (was 50), text
+19 px URW Gothic Demi = cap height 14 px, the PS4 debug overlay's text size
+measured on a 1080p screenshot (its "T" is 14 px); icons 30 px (scaled with
+the text, centred on the cap height; 44 px would overlap the new pitch).
+Value column and leaderboard width follow the text widths. "Day speed" is
+now "Time of day speed". Inner padding unchanged (UI_PAD 22).
+
+============================================================
 STARTUP CRASH FIX  (build=ui-branchfix)
 ============================================================
 Crash on the first loading frame (GPU fault) since the first lens flare build.

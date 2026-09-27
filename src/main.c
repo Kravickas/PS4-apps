@@ -127,9 +127,10 @@
 #define DISPLAY_W       1920
 #define DISPLAY_H       1080
 
-/* Sun disc edge radius in pixels (1080p). The old disc was 59 px tall and
-   105 px wide (NDC distance on a 16:9 screen); it is now round. */
-#define SUN_DISC_RADIUS_PX 93.5f
+/* Sun and moon disc edge radii in pixels (1080p). The sun is half the moon's size
+   (was 93.5, the same as the moon): with SUN_HDR and bloom it reads much larger. */
+#define SUN_DISC_RADIUS_PX 46.75f
+#define MOON_DISC_RADIUS_PX 93.5f
 
 /* Linear HDR pipeline: the scene renders to RGBA16F, bloom runs at quarter
    resolution, the composite writes the sRGB display buffer (videoout format
@@ -177,7 +178,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ui-branchfix"
+#define BUILD_TAG "light-fix"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1341,6 +1342,79 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
     return t;
 }
 
+/* Linear average of the floor albedo (set at load): the floor colour in ps_model's ground
+   reflection. Default = the grey fallback texel (sRGB 128). */
+static float g_floor_albedo[3] = {0.2158605f, 0.2158605f, 0.2158605f};
+
+/* Average linear colour of a texture's smallest mip. BC1 (data format 35) as in D3D: RGB565
+   endpoints widened by bit replication; c0 > c1: c2 = (2 c0 + c1) / 3, c3 = (c0 + 2 c1) / 3,
+   else c2 = (c0 + c1) / 2, c3 transparent black; sRGB decoded after interpolation. Levels are
+   stored consecutively (dds_loader.h), so the last level starts after the others' blocks; the
+   tiled block order does not matter for an average. A single-level RGBA8 texture (the load
+   fallback) averages its texels. Returns 0 if the format is not handled (out unchanged). */
+static int tex_average_linear(const Tex* t, float out[3]) {
+    const unsigned char* p = (const unsigned char*)t->pixels;
+    double acc[3] = {0.0, 0.0, 0.0};
+    long n = 0;
+    if (!p)
+        return 0;
+    if (t->dfmt == 35u) {
+        int last = t->levels - 1;
+        unsigned long off = 0;
+        for (int l = 0; l < last; l++) {
+            int lw = t->w >> l, lh = t->h >> l;
+            lw = lw < 1 ? 1 : lw;
+            lh = lh < 1 ? 1 : lh;
+            off += (unsigned long)((lw + 3) / 4) * (unsigned long)((lh + 3) / 4) * 8u;
+        }
+        int w = t->w >> last, h = t->h >> last;
+        w = w < 1 ? 1 : w;
+        h = h < 1 ? 1 : h;
+        int blocks = ((w + 3) / 4) * ((h + 3) / 4);
+        const unsigned char* b = p + off;
+        for (int k = 0; k < blocks; k++, b += 8) {
+            unsigned c0 = b[0] | ((unsigned)b[1] << 8), c1 = b[2] | ((unsigned)b[3] << 8);
+            float pal[4][3];
+            const unsigned cc[2] = {c0, c1};
+            for (int e = 0; e < 2; e++) {
+                unsigned r5 = (cc[e] >> 11) & 31u, g6 = (cc[e] >> 5) & 63u, b5 = cc[e] & 31u;
+                pal[e][0] = (float)((r5 << 3) | (r5 >> 2));
+                pal[e][1] = (float)((g6 << 2) | (g6 >> 4));
+                pal[e][2] = (float)((b5 << 3) | (b5 >> 2));
+            }
+            for (int c = 0; c < 3; c++) {
+                if (c0 > c1) {
+                    pal[2][c] = (2.0f * pal[0][c] + pal[1][c]) / 3.0f;
+                    pal[3][c] = (pal[0][c] + 2.0f * pal[1][c]) / 3.0f;
+                } else {
+                    pal[2][c] = 0.5f * (pal[0][c] + pal[1][c]);
+                    pal[3][c] = 0.0f;
+                }
+            }
+            float lin[4][3];
+            for (int q = 0; q < 4; q++)
+                for (int c = 0; c < 3; c++)
+                    lin[q][c] = srgb_to_linear(pal[q][c] / 255.0f);
+            unsigned idx =
+                b[4] | ((unsigned)b[5] << 8) | ((unsigned)b[6] << 16) | ((unsigned)b[7] << 24);
+            for (int i = 0; i < 16; i++, n++) {
+                unsigned q = (idx >> (2 * i)) & 3u;
+                for (int c = 0; c < 3; c++)
+                    acc[c] += lin[q][c];
+            }
+        }
+    } else if (t->dfmt == 0x0Au && t->levels == 1) {
+        for (long i = 0; i < (long)t->w * t->h; i++, n++)
+            for (int c = 0; c < 3; c++)
+                acc[c] += srgb_to_linear((float)p[i * 4 + c] / 255.0f);
+    }
+    if (n == 0)
+        return 0;
+    for (int c = 0; c < 3; c++)
+        out[c] = (float)(acc[c] / (double)n);
+    return 1;
+}
+
 /* T# for a Tex: build_tsharp_levels with the texture's DATA_FORMAT (word1 25:20),
    NUM_FORMAT (word1 29:26) and TILING_INDEX (word3 24:20). */
 static void build_tsharp_tex(uint32_t* t, const Tex* x) {
@@ -1789,7 +1863,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
       build_vsharp(cube_v,(char*)vb_base+MVP_OFF,(uint32_t)(vb_total > MVP_OFF ? vb_total - MVP_OFF : VERT_BUF_SIZE - MVP_OFF));
       if (g_model.enabled) {
           /* vs_model: V# + M in s[0:15] (16 user SGPRs); v0-v48, s0-s15 + VCC ->
-             52 VGPRs, 24 SGPRs = 0x8C. ps_model: v0-v97, s0-s95 + VCC -> 100
+             52 VGPRs, 24 SGPRs = 0x8C. ps_model: v0-v97, s0-s99 + VCC -> 100
              VGPRs, 104 SGPRs = 0x318. Three params: param2 = tangent, handedness. */
           uint64_t a = (uint64_t)(uintptr_t)g_model.vs;
           uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x8Cu, (16u << 1)};
@@ -2724,6 +2798,21 @@ int main(void) {
     Tex cube_nrm = load_tex(ASSET_DIR "images/cube/normal.dds", k_flat, 0);
     Tex cube_hgt = load_tex(ASSET_DIR "images/cube/height.dds", k_white, 0);
     Tex floor_alb = load_tex(ASSET_DIR "images/floor/albedo.dds", k_grey, 9);
+    {
+        int ok = tex_average_linear(&floor_alb, g_floor_albedo);
+        char L[96];
+        int p = 0;
+        const char* m = "floor albedo average (linear x1000): ";
+        while (*m)
+            L[p++] = *m++;
+        for (int c = 0; c < 3; c++) {
+            p += lg_i64(L + p, (long long)(g_floor_albedo[c] * 1000.0f + 0.5f));
+            L[p++] = c < 2 ? ' ' : (ok ? '\n' : '?');
+        }
+        if (!ok)
+            L[p++] = '\n';
+        trace_line(L, (unsigned long)p);
+    }
     /* Lens flare rays (tools/make_glare.py); black fallback = no rays. */
     static const unsigned char k_black[4] = {0, 0, 0, 0};
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
@@ -2758,7 +2847,7 @@ int main(void) {
     /* Also ONION: the descriptor table is rebuilt by the CPU and read by the
        GPU in the same frame. */
     uint32_t* desc = (uint32_t*)gpu_alloc_typed(
-        1024, 0x100, MEM_TYPE_ONION); /* 256 dwords: ps_model uses up to desc[151] */
+        1024, 0x100, MEM_TYPE_ONION); /* 256 dwords: ps_model uses up to desc[163] */
     if (!desc) FATAL_EXIT("descriptor alloc failed");
     g_gpu_ts = (volatile uint64_t *)gpu_alloc_typed(0x1000, 0x100, MEM_TYPE_ONION);
     build_tsharp_tex(desc, &cube_alb); /* sRGB: colour texture -> linear on sampling */
@@ -2865,7 +2954,7 @@ int main(void) {
         mc[11] = 1.0f - MODEL_F0;
         mc[12] = MODEL_F0;
         mc[13] = (g > MODEL_F0 ? g : MODEL_F0) - MODEL_F0;
-        mc[14] = 0.0f;
+        mc[14] = 0.5f / a; /* desc[158]: the ground / sky blend spans R.y in [-a, a] */
         mc[15] = 0.0f;
     }
 
@@ -3977,6 +4066,15 @@ int main(void) {
             lc[1] = srgb_to_linear(light_g);
             lc[2] = srgb_to_linear(light_b);
             lc[3] = 1.0f;
+            /* desc[160..162]: the floor as ps_model's downward reflections see it - ps_floor's
+               lighting for an unshadowed flat floor, (0.070740275 + 0.929259717 max(0, L.y)) x
+               average albedo x light colour, L = desc[12..14] (same constants and inputs). */
+            const float* ld = (const float*)(desc + 12);
+            float e = 0.070740275f + 0.929259717f * (ld[1] > 0.0f ? ld[1] : 0.0f);
+            float* gr = (float*)(desc + 160);
+            for (int c = 0; c < 3; c++)
+                gr[c] = g_floor_albedo[c] * lc[c] * e;
+            gr[3] = 0.0f;
         }
 
         /* Dynamic sky colors based on REAL sun elevation (orig_sun_y, before
@@ -4021,12 +4119,13 @@ int main(void) {
            instead of vanishing when its centre crosses the horizon. Lighting
            and shadows stay with the body above the horizon (desc[12], light
            MVP). Placement as before: sun = direction x the day magnitude ramp,
-           moon = anti-sun x 0.69, both x 100; the moon disc has the sun's radius (same
-           apparent size: 400x smaller, 400x closer). ps_dark: f = clamp(1 - d^2 /
-           radius^2, 0, 1)^2, d in aspect-corrected NDC (x * W/H, y). */
+           moon = anti-sun x 0.69, both x 100; radii SUN_DISC_RADIUS_PX and
+           MOON_DISC_RADIUS_PX. ps_dark: f = clamp(1 - d^2 / radius^2, 0, 1)^2, d in
+           aspect-corrected NDC (x * W/H, y). */
         {
             float *mvp = (float*)((char*)vb + MVP_OFF);
             const float sun_r = SUN_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
+            const float moon_r = MOON_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
             float mag = 0.98f + 0.40f * (orig_sun_y / 0.15f);
             if (mag < 0.98f)
                 mag = 0.98f;
@@ -4034,7 +4133,7 @@ int main(void) {
                 mag = 1.38f;
             const float body[2][4] = {
                 {sun_dx * mag, sun_dy * mag, sun_dz * mag, sun_r * sun_r},
-                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, sun_r * sun_r}};
+                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, moon_r * moon_r}};
             for (int k = 0; k < 2; k++) {
                 float bx = body[k][0] * 100, by = body[k][1] * 100, bz = body[k][2] * 100;
                 float cx = mvp[0] * bx + mvp[1] * by + mvp[2] * bz + mvp[3];

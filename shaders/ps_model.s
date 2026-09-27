@@ -15,6 +15,7 @@ s_load_dwordx8 s[56:63], s[0:1], 0x28
 s_load_dwordx4 s[64:67], s[0:1], 0x50
 s_load_dwordx16 s[68:83], s[0:1], 0x30
 s_load_dwordx8 s[88:95], s[0:1], 0x98
+s_load_dwordx4 s[96:99], s[0:1], 0xa0
 v_interp_p1_f32 v10, v0, attr0.x
 v_interp_p2_f32 v10, v1, attr0.x
 v_interp_p1_f32 v11, v0, attr0.y
@@ -700,34 +701,59 @@ v_mul_f32 v97, v97, v94
 v_mul_f32 v97, v97, v58
 v_mul_f32 v97, v97, v85
 v_mul_f32 v97, v97, v66
-v_mac_f32 v40, s52, v97
-v_mac_f32 v41, s53, v97
-v_mac_f32 v42, s54, v97
-v_mul_f32 v62, v95, v69
-v_add_f32 v62, v62, v62
-v_sub_f32 v62, v62, v35
-v_max_f32 v62, 0, v62
-v_min_f32 v62, 1.0, v62
+; energy balance: the diffuse light x (1 - F), F = desc[156] + desc[157] (1 - N.V)^5 (the sky reflection's weight)
 v_sub_f32 v63, 1.0, v95
 v_mul_f32 v64, v63, v63
 v_mul_f32 v64, v64, v64
 v_mul_f32 v64, v64, v63
 v_mul_f32 v64, s93, v64
 v_add_f32 v64, s92, v64
+v_sub_f32 v65, 1.0, v64
+v_mul_f32 v40, v40, v65
+v_mul_f32 v41, v41, v65
+v_mul_f32 v42, v42, v65
+v_mac_f32 v40, s52, v97
+v_mac_f32 v41, s53, v97
+v_mac_f32 v42, s54, v97
+; sky reflection: R.y = 2 (N.V) N.y - V.y; sky = horizon + (zenith - horizon) clamp(R.y, 0, 1);
+; below the horizon the floor (desc[160..162]): env = ground + (sky - ground) b,
+; b = smoothstep(clamp(R.y desc[158] + 0.5, 0, 1)), desc[158] = 1 / (2 a): the blend spans R.y in [-a, a]
+v_mul_f32 v62, v95, v69
+v_add_f32 v62, v62, v62
+v_sub_f32 v62, v62, v35
+v_max_f32 v61, 0, v62
+v_min_f32 v61, 1.0, v61
+v_mul_f32 v60, s94, v62
+v_add_f32 v60, 0.5, v60
+v_max_f32 v60, 0, v60
+v_min_f32 v60, 1.0, v60
+v_mul_f32 v63, v60, v60
+v_mul_f32 v59, -2.0, v60
+v_add_f32 v59, 0x40400000, v59
+v_mul_f32 v60, v63, v59
 v_mov_b32 v65, s24
 v_subrev_f32 v65, s28, v65
-v_mul_f32 v65, v65, v62
+v_mul_f32 v65, v65, v61
 v_add_f32 v65, s28, v65
+v_subrev_f32 v65, s96, v65
+v_mul_f32 v65, v65, v60
+v_add_f32 v65, s96, v65
 v_mac_f32 v40, v65, v64
 v_mov_b32 v65, s25
 v_subrev_f32 v65, s29, v65
-v_mul_f32 v65, v65, v62
+v_mul_f32 v65, v65, v61
 v_add_f32 v65, s29, v65
+v_subrev_f32 v65, s97, v65
+v_mul_f32 v65, v65, v60
+v_add_f32 v65, s97, v65
 v_mac_f32 v41, v65, v64
 v_mov_b32 v65, s26
 v_subrev_f32 v65, s30, v65
-v_mul_f32 v65, v65, v62
+v_mul_f32 v65, v65, v61
 v_add_f32 v65, s30, v65
+v_subrev_f32 v65, s98, v65
+v_mul_f32 v65, v65, v60
+v_add_f32 v65, s98, v65
 v_mac_f32 v42, v65, v64
 v_mul_f32 v87, s32, v38
 v_add_f32 v87, s39, v87

@@ -11,15 +11,20 @@
 #define UI_W 1920
 #define UI_H 1080
 #define UI_BUFS 3
-#define UI_X0 40 /* left panel origin */
-#define UI_Y0 40
-#define UI_PAD 22
-#define UI_LH 50        /* line height */
-#define UI_VALUE_DX 220 /* value column of the always-visible lines */
-#define UI_LABEL_DX (2 * (UI_ICON_PX + 2) + 12)
-#define UI_LB_W 420    /* leaderboard width, top right */
-#define UI_CLEAR_W 900 /* areas cleared before each redraw (left panel / leaderboard) */
-#define UI_CLEAR_H 900
+#define UI_X0 10 /* panel margin from the screen edges */
+#define UI_Y0 10
+#define UI_PAD 22       /* inside the panels */
+#define UI_LH 38        /* line pitch */
+#define UI_GAP 14       /* extra gap before the controls list */
+#define UI_VALUE_GAP 16 /* between the widest label and the value column */
+#define UI_LABEL_DX (2 * (UI_ICON_PX + 2) + 10)
+/* Icons are centred on the text's cap height; lines reserve room for both. */
+#define UI_ICON_ABOVE (UI_FONT_CAP / 2 + UI_ICON_PX / 2)
+#define UI_ICON_BELOW (UI_ICON_PX - UI_ICON_ABOVE)
+#define UI_LINE_ABOVE (UI_ICON_ABOVE > UI_FONT_ASCENT ? UI_ICON_ABOVE : UI_FONT_ASCENT)
+#define UI_LINE_BELOW (UI_ICON_BELOW > UI_FONT_DESCENT ? UI_ICON_BELOW : UI_FONT_DESCENT)
+#define UI_CLEAR_W 760 /* areas cleared before each redraw (left panel / leaderboard) */
+#define UI_CLEAR_H 640
 
 typedef struct {
     const unsigned char* atlas; /* RGBA8, UI_ATLAS_W x UI_ATLAS_H, straight alpha */
@@ -129,7 +134,7 @@ static int ui_text(unsigned char* dst, int x, int y, const char* s, const unsign
 
 static void ui_icon(unsigned char* dst, int x, int baseline, int id) {
     ui_blit(dst, ui_icon_rect[id][0], ui_icon_rect[id][1], UI_ICON_PX, UI_ICON_PX, x,
-            baseline - UI_FONT_ASCENT - 10, 0, 256);
+            baseline - UI_ICON_ABOVE, 0, 256);
 }
 
 static int ui_fmt_int(char* p, long v) {
@@ -187,10 +192,12 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
     int nb = (g_ui.cur + 1) % UI_BUFS;
     unsigned char* b = g_ui.buf[nb];
     ui_clear(b, 0, 0, UI_CLEAR_W, UI_CLEAR_H);
-    ui_clear(b, UI_W - UI_LB_W - 80, 0, UI_LB_W + 80, 300);
+    ui_clear(b, UI_W - 600, 0, 600, 200);
 
     /* left panel: always-visible lines */
-    int x = UI_X0 + UI_PAD, y = UI_Y0 + UI_PAD + UI_FONT_ASCENT + 8, wmax = 0;
+    int x = UI_X0 + UI_PAD, y = UI_Y0 + UI_PAD + UI_LINE_ABOVE, wmax = 0;
+    int w1 = ui_text_width("Camera speed"), w2 = ui_text_width("Time of day speed");
+    int value_dx = (w1 > w2 ? w1 : w2) + UI_VALUE_GAP;
     ui_icon(b, x, y, UI_ICON_OPTIONS);
     int cx = ui_text(b, x + UI_ICON_PX + 6, y, "to show / hide controls", white);
     wmax = cx - x;
@@ -203,12 +210,12 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         n++;
     v[n] = '%';
     v[n + 1] = 0;
-    ui_text(b, x + UI_VALUE_DX, y, v, white);
+    ui_text(b, x + value_dx, y, v, white);
     y += UI_LH;
-    ui_text(b, x, y, "Day speed", white);
+    ui_text(b, x, y, "Time of day speed", white);
     v[0] = (char)UI_CHAR_TIMES;
     ui_fmt_int(v + 1, day_mult);
-    cx = ui_text(b, x + UI_VALUE_DX, y, v, white);
+    cx = ui_text(b, x + value_dx, y, v, white);
     if (day_frozen)
         ui_text(b, cx + 14, y, "(frozen)", grey);
     if (g_ui.controls) {
@@ -227,7 +234,7 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
             {{UI_ICON_L_2D, -1}, "Move"},
             {{UI_ICON_R_2D, -1}, "Look"},
         };
-        y += UI_LH + 18;
+        y += UI_LH + UI_GAP;
         for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
             int ix = x;
             for (int i = 0; i < 2 && rows[r].icons[i] >= 0; i++) {
@@ -242,7 +249,7 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         y -= UI_LH;
     }
     float x0 = (float)UI_X0, y0 = (float)UI_Y0, x1 = (float)(x + wmax + UI_PAD),
-          y1 = (float)(y + 14 + UI_PAD);
+          y1 = (float)(y + UI_LINE_BELOW + UI_PAD);
     g_ui.rect[0] = 0.5f * (x0 + x1);
     g_ui.rect[1] = 0.5f * (y0 + y1);
     g_ui.rect[2] = 0.5f * (x1 - x0);
@@ -250,10 +257,6 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
 
     /* leaderboard (top right): this session's play time until multiplayer scores exist */
     if (g_ui.leaderboard) {
-        int lx0 = UI_W - UI_X0 - UI_LB_W, ly = UI_Y0 + UI_PAD + UI_FONT_ASCENT + 8;
-        ui_text(b, lx0 + UI_PAD, ly, "Leaderboard", white);
-        ly += UI_LH + 6;
-        ui_text(b, lx0 + UI_PAD, ly, "You", white);
         char t[24], *q = t;
         q += ui_fmt_int(q, (long)(play_s / 3600));
         *q++ = ':';
@@ -263,10 +266,18 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         *q++ = (char)('0' + (play_s % 60) / 10);
         *q++ = (char)('0' + play_s % 10);
         *q = 0;
+        int lw = ui_text_width("Multiplayer scores soon"),
+            lw2 = ui_text_width("You") + 40 + ui_text_width(t);
+        if (lw2 > lw)
+            lw = lw2;
+        int lx0 = UI_W - UI_X0 - lw - 2 * UI_PAD, ly = UI_Y0 + UI_PAD + UI_LINE_ABOVE;
+        ui_text(b, lx0 + UI_PAD, ly, "Leaderboard", white);
+        ly += UI_LH;
+        ui_text(b, lx0 + UI_PAD, ly, "You", white);
         ui_text(b, UI_W - UI_X0 - UI_PAD - ui_text_width(t), ly, t, white);
         ly += UI_LH;
         ui_text(b, lx0 + UI_PAD, ly, "Multiplayer scores soon", grey);
-        float lx1 = (float)(UI_W - UI_X0), ly1 = (float)(ly + 14 + UI_PAD);
+        float lx1 = (float)(UI_W - UI_X0), ly1 = (float)(ly + UI_LINE_BELOW + UI_PAD);
         g_ui.rect[4] = 0.5f * ((float)lx0 + lx1);
         g_ui.rect[5] = 0.5f * ((float)UI_Y0 + ly1);
         g_ui.rect[6] = 0.5f * (lx1 - (float)lx0);
