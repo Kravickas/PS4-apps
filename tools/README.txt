@@ -14,7 +14,10 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   gen_model.py       the prop (OBJ + logo albedo / height / normal sources)
   make_bgm.py        audio -> 16-bit stereo 48 kHz WAV with a crossfaded loop seam
   make_gp4.py        PKG project for PkgTool.Core; called by the Makefile
-  make_icon.py       sce_sys/icon0.png: the ShadPS4 badge on a turned cube (transparent)
+  make_icon.py       sce_sys/icon0.png: the in-game rounded cube (cube.obj) with the blue
+                     badge (badge_1024.png) on each face, satin; no arguments needed
+  make_glare.py      assets/images/flare/glare.dds: the lens flare's uneven rays
+                     (diffraction by front-element scratches and dust, spectral)
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
@@ -27,3 +30,9 @@ this project).
 
 logo_2048.png: the cube prop's logo (badge + wordmark in the logo's font), the
 input of gen_model.py for the albedo, the engraving height and the normal map.
+badge_1024.png: the ShadPS4 badge rebuilt at 1024 px from the original logo artwork
+(shad.png), used by make_icon.py.
+
+make_ui_atlas.py FONT: assets/ui/ui_atlas.bin + src/ui_atlas.h - glyphs of the logo's font
+(URW Gothic Demi, 28 px) and the DS4 button icons in ui_icons/ (from the user's DS4 icon
+pack), used by the on-screen panels (src/ui.h). The font is not shipped; pass its path.

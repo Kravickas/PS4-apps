@@ -11,6 +11,7 @@ Output layout:
   models/cube/cube.obj                       gen_model.py
   images/cube/albedo.dds  normal.dds  height.dds   (logo 2048: BC1 sRGB, BC5, BC4)
   images/floor/albedo.dds normal.dds  height.dds   (BC1 sRGB, BC5, BC4)
+  images/flare/glare.dds                     make_glare.py (lens flare rays, RGBA8 sRGB)
   sound/bgm/bgm.wav                          make_bgm.py
 Needs numpy, Pillow, quicktex and ffmpeg."""
 import argparse, glob, os, shutil, subprocess, sys, tempfile
@@ -36,7 +37,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets"))
     a = ap.parse_args()
     out = os.path.abspath(a.out)
-    for d in ("models/cube", "images/cube", "images/floor", "sound/bgm"):
+    for d in ("models/cube", "images/cube", "images/floor", "images/flare", "sound/bgm"):
         os.makedirs(os.path.join(out, d), exist_ok=True)
     tex = os.path.join(HERE, "make_textures.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +54,7 @@ def main():
         "--height", find(a.floor, "floor_displacement"))
     run(tex, "height", find(a.floor, "floor_displacement"), os.path.join(floor, "height.dds"))
     run(os.path.join(HERE, "make_bgm.py"), a.music, os.path.join(out, "sound/bgm/bgm.wav"))
+    run(os.path.join(HERE, "make_glare.py"), os.path.join(out, "images/flare/glare.dds"))
 
 
 if __name__ == "__main__":

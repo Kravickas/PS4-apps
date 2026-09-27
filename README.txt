@@ -1,4 +1,63 @@
 ============================================================
+CONTROLS + ON-SCREEN PANELS  (build=ui-controls)
+============================================================
+Cross freeze/unfreeze cube | Circle show/hide leaderboard | Square freeze/unfreeze
+day and night | Triangle reset camera | L1 / R1 day and night slower / faster
+(x1 x2 x4 x6 .. x20, held: repeats after 0.4 s every 0.15 s) | L2 / R2 camera
+down / up | D-pad up / down camera speed (1% .. 2500%, 100% = the old default) |
+D-pad left / right move the sun | OPTIONS show/hide controls | sticks move /
+look | L1+R1+L2+R2 held: quit. L3 / R3 unbound. Removed: the dead jump (Cross)
+and the sprint toggle (Square).
+Panels (src/ui.h): top left always "Press OPTIONS to show / hide controls",
+camera speed %, day speed (frozen); the controls list on OPTIONS (hidden at
+start); top right the leaderboard on CIRCLE (this session's play time until
+multiplayer scores exist). Text in the logo's font + DS4 icons from
+assets/ui/ui_atlas.bin (tools/make_ui_atlas.py), laid out by the CPU into a
+triple-buffered 1920x1080 texture only when the content changes. Frosted glass
+in ps_post_final (CAFE0218, RSRC1 0x291): under the rounded panel rects the
+sharp scene is swapped for a 5 x 5 bilinear blur (bloom and flare stay), x 0.62
++ a light tint, bright 1.5 px edge; then the UI texture over it. Waves that
+touch no panel skip all of it. Checked: panels hidden -> bit-identical output;
+outside panels exact; inside vs float64 within 2.4e-6; layout run on the host.
+
+============================================================
+PHOTOGRAPHIC LENS FLARE + BADGE ICON  (build=flare-photo)
+============================================================
+Lens flare matched to a reference photo (uneven soft rays, warm glow and haze,
+soft round ghosts), ps_post_final CAFE0217, RSRC1 0x1C9:
+- rays: assets/images/flare/glare.dds (tools/make_glare.py) - far-field
+  diffraction (FFT, 450..660 nm) of a front element with 180 random hairline
+  scratches and 160 dust specks (as Ritschel et al. 2009 model the eye's
+  corona): each scratch throws a streak perpendicular to it, longer
+  wavelengths reach further; times the sun's flux x GLARE 0.09, convolved with
+  the sun's disc, softened, faded at the edge; 512x512 RGBA8 sRGB covering
+  1.2 image heights around the sun, stored / 4;
+- the first flare's six soft ghosts; glow 1.4 / (1 + (rho/0.08)^2) and veil
+  0.22 / (1 + (rho/0.40)^2); all x sun colour x visibility x edge fade;
+- knobs in main.c: FLARE_STRENGTH, FLARE_GHOSTS, FLARE_RAYS, FLARE_GLOW,
+  FLARE_VEIL; skipped by a scalar branch when the sun is hidden.
+The physically traced flare (real-lens ghost paths, iris starburst) was
+replaced at the user's request; the anamorphic streak and halo ring are gone.
+Checked: strength 0 -> bit-identical to the shader without flare; flare term
+(ghosts + texture + glow + veil) vs float64 within 2.8e-5.
+Icon: the in-game rounded cube with only the blue badge on each face
+(tools/badge_1024.png from the original artwork), 8 px white margin so the
+rounded edges stay white. No asset changed.
+
+============================================================
+APP ICON = THE IN-GAME PROP  (build=icon-prop)
+============================================================
+sce_sys/icon0.png is now rendered by tools/make_icon.py from the game's own
+data: assets/models/cube/cube.obj (rounded cube, edge radius 0.09 of 0.90) with
+tools/logo_2048.png, the engraving normal map (gen_model.maps) and the satin
+highlight (roughness 0.45, F0 0.04). Same view and framing as the previous icon
+(yaw -28, pitch 22, 90% of the canvas); lighting solved in linear light so flat
+white faces keep the previous levels (sRGB 1.00 / 0.90 / 0.72 top / front /
+right). 4x supersampled, perspective-correct, z-buffered; 512x512 RGBA.
+Checked: projected badge centres on the front and top faces land on badge
+pixels. No asset changed.
+
+============================================================
 SUN / MOON  (build=sun-moon)
 ============================================================
 Sun disc 15% smaller: SUN_DISC_RADIUS_PX 110 -> 93.5 (sky disc and the lens

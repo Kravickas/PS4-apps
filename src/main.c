@@ -163,10 +163,21 @@
 #define MODEL_ROUGHNESS 0.45f /* satin finish: GGX roughness (0 mirror .. 1 matte) */
 #define MODEL_F0 0.04f        /* Fresnel reflectance at normal incidence (paint / plastic) */
 #define FLARE_STRENGTH 1.0f   /* lens flare: 0 off; x sun colour x visibility x edge fade */
+#define MOVE_SPEED_100 0.02f  /* camera speed shown as 100% (the previous default) */
+#define DAY_REPEAT_DELAY 0.40f /* L1 / R1 held: first repeat after this (s) */
+#define DAY_REPEAT_EVERY 0.15f /* then one step every this (s) */
+/* Day and night multiples for L1 / R1 (x1 = one day in ~39 s). */
+static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
+#define DAY_MULT_COUNT ((int)(sizeof(k_day_mults) / sizeof(k_day_mults[0])))
+#define FLARE_GHOSTS 1.0f     /* soft ghosts (the first flare's six) */
+#define FLARE_RAYS 1.0f       /* uneven rays (glare texture, tools/make_glare.py) */
+#define FLARE_GLOW 1.4f       /* glow around the sun: FLARE_GLOW / (1 + (rho / 0.08)^2) */
+#define FLARE_VEIL 0.22f      /* wide warm haze: FLARE_VEIL / (1 + (rho / 0.40)^2) */
+#define GLARE_STORE_MAX 4.0f  /* glare.dds stores value / this (STORE_MAX in make_glare.py) */
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "logo-badge-orig"
+#define BUILD_TAG "ui-controls"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1297,8 +1308,10 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
     f[2] = c;
     f[3] = d;
 }
+#include "ui.h"
+
 static void build_post_tables(uint32_t* tab) {
-    my_memset(tab, 0, (POST_PASSES + 1) * 32 * 4); /* + final pass dwords 32..63 (flare) */
+    my_memset(tab, 0, (POST_PASSES + 2) * 32 * 4); /* + final pass dwords 32..95 (flare, UI) */
     uint32_t* t = tab;
     for (int i = 0; i < BLOOM_LEVELS; i++, t += 32) {
         float w = g_bloom_w[i], h = g_bloom_h[i];
@@ -1404,7 +1417,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
-#define PS_POST_FINAL_RSRC1 ((5u << 6) | 8u) /* v32, s39 + VCC (lens flare) */
+#define PS_POST_FINAL_RSRC1 ((10u << 6) | 17u) /* v69, s79 + VCC (lens flare, UI panels) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -2631,6 +2644,21 @@ int main(void) {
     Tex cube_nrm = load_tex(ASSET_DIR "images/cube/normal.dds", k_flat, 0);
     Tex cube_hgt = load_tex(ASSET_DIR "images/cube/height.dds", k_white, 0);
     Tex floor_alb = load_tex(ASSET_DIR "images/floor/albedo.dds", k_grey, 9);
+    /* Lens flare rays (tools/make_glare.py); black fallback = no rays. */
+    static const unsigned char k_black[4] = {0, 0, 0, 0};
+    Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
+    /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
+    int ui_err = ui_init();
+    {
+        char L[48];
+        int p = 0;
+        const char* m = "ui_init: ";
+        while (*m)
+            L[p++] = *m++;
+        p += lg_i64(L + p, (long long)ui_err);
+        L[p++] = '\n';
+        trace_line(L, (unsigned long)p);
+    }
     Tex floor_nrm = load_tex(ASSET_DIR "images/floor/normal.dds", k_flat, 0);
     Tex floor_hgt = load_tex(ASSET_DIR "images/floor/height.dds", k_white, 0);
 
@@ -2844,10 +2872,14 @@ int main(void) {
         g_bloom_b[i] = gpu_alloc(sz, 0x10000);
         post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
     }
-    g_post_tab = (uint32_t*)gpu_alloc_typed((POST_PASSES + 1) * 32 * 4, 0x100, MEM_TYPE_ONION);
-    if (post_ok && g_post_tab)
+    g_post_tab = (uint32_t*)gpu_alloc_typed((POST_PASSES + 2) * 32 * 4, 0x100, MEM_TYPE_ONION);
+    if (post_ok && g_post_tab) {
         build_post_tables(g_post_tab);
-    else
+        /* Final pass (ps_post_final): glare T# at dwords 40..47, bilinear clamp S# at 48..51. */
+        uint32_t* fin = g_post_tab + (POST_PASSES - 1) * 32;
+        build_tsharp_tex(fin + 40, &glare_tex);
+        build_ssharp_clamp(fin + 48, 1);
+    } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
     /* Copy cube verts into shadow VB at offset 0x50 */
     if (shadow_vb) {
@@ -3154,14 +3186,12 @@ int main(void) {
     float cam_yaw = -1.5708f, cam_pitch = 0.0f;
     float cam_x = 3.5f, cam_y = 0.55f, cam_z = 0.8f;
     float move_speed = 0.02f;
-    float vel_y = 0;           /* vertical velocity (gravity/jump) */
     float ground_y = -0.05f;   /* ground level */
     float eye_height = 0.15f;  /* camera height above ground */
-    int on_ground = 1;
-    int sprint = 0;
-    float gravity = -0.004f;
-    float jump_vel = 0.06f;
-    int auto_spin = 0;  // 1=spinning camera (no longer Start-toggleable; reserved)
+    int day_frozen = 0;        /* Square */
+    int day_step = 0;          /* index into k_day_mults (L1 / R1) */
+    float day_hold = 0.0f;     /* L1 / R1 auto-repeat timer */
+    float play_time_s = 0.0f;  /* this session, for the leaderboard */
     int cube_rotation_enabled = 1;  // Start button toggles this (default: spinning)
     float cube_angle_y = 0.0f;       // accumulator (advances only when enabled)
     float cube_angle_x = 0.0f;
@@ -3432,31 +3462,56 @@ int main(void) {
         uint32_t pressed = pad.buttons & ~prev_buttons;
         prev_buttons = pad.buttons;
 
-        // Cross: toggle auto-spin
-        /* Cross = jump */
-        if ((pressed & PAD_CROSS) && on_ground) {
-            vel_y = jump_vel;
-            on_ground = 0;
+        /* Controls (the on-screen list, src/ui.h, shows the same):
+           Cross     freeze / unfreeze the cube      Circle  show / hide the leaderboard
+           Square    freeze / unfreeze day and night Triangle reset the camera
+           L1 / R1   day and night slower / faster (k_day_mults; held: repeats)
+           L2 / R2   camera down / up                 D-pad up / down: camera speed
+           D-pad left / right: move the sun           OPTIONS: show / hide controls
+           sticks: move / look; L1 + R1 + L2 + R2 held together: quit (above). */
+        if (pressed & PAD_CROSS)
+            cube_rotation_enabled = !cube_rotation_enabled;
+        if (pressed & PAD_CIRCLE)
+            g_ui.leaderboard = !g_ui.leaderboard;
+        if (pressed & PAD_SQUARE)
+            day_frozen = !day_frozen;
+        if (pressed & PAD_OPTIONS)
+            g_ui.controls = !g_ui.controls;
+        if (pressed & PAD_TRI) {
+            cam_yaw = -1.5708f;
+            cam_pitch = 0;
+            cam_x = 3.5f;
+            cam_y = 0.55f;
+            cam_z = 0.8f;
         }
-        /* Square = sprint toggle */
-        if (pressed & 0x8000) sprint = !sprint;
-        /* Options/Start = toggle cube rotation pause/resume */
-        if (pressed & PAD_OPTIONS) cube_rotation_enabled = !cube_rotation_enabled;
-        // Triangle: reset camera to default sunset view
-        if (pressed & PAD_TRI) { cam_yaw=-1.5708f; cam_pitch=0; cam_x=3.5f; cam_y=0.55f; cam_z=0.8f; vel_y=0; on_ground=1; sprint=0; }
+        if (pad.buttons & PAD_R2)
+            cam_y += move_speed * 60.0f * dt_sec;
+        if (pad.buttons & PAD_L2)
+            cam_y -= move_speed * 60.0f * dt_sec;
+        /* L1 / R1: one step per press; held, repeats after DAY_REPEAT_DELAY every DAY_REPEAT_EVERY
+         */
+        {
+            int dir = (pad.buttons & PAD_R1) ? 1 : (pad.buttons & PAD_L1) ? -1 : 0;
+            if (pressed & (PAD_L1 | PAD_R1)) {
+                day_step += dir;
+                day_hold = -DAY_REPEAT_DELAY;
+            } else if (dir) {
+                day_hold += dt_sec;
+                if (day_hold >= DAY_REPEAT_EVERY) {
+                    day_step += dir;
+                    day_hold = 0.0f;
+                }
+            }
+            if (day_step < 0)
+                day_step = 0;
+            if (day_step >= DAY_MULT_COUNT)
+                day_step = DAY_MULT_COUNT - 1;
+        }
 
-        // L1/R1: zoom
-        if (pad.buttons & PAD_R1) cam_y += move_speed * 60.0f * dt_sec;
-        if (pad.buttons & PAD_L1) cam_y -= move_speed * 60.0f * dt_sec;
-
-        // Left stick: orbit camera
+        /* Left stick: move forward/back + strafe (per second: x60 of the old per-frame step) */
         float lx = ((float)pad.lx - 128.0f) / 128.0f;
         float ly = ((float)pad.ly - 128.0f) / 128.0f;
-        /* Left stick: move forward/back + strafe */
-        /* All movement is per-SECOND now. move_speed was a per-frame step, so
-           x60 keeps the original feel at 60fps while making it frame-rate
-           independent. */
-        float spd = (sprint ? move_speed * 3.0f : move_speed) * 60.0f * dt_sec;
+        float spd = move_speed * 60.0f * dt_sec;
         if (ly > 0.15f || ly < -0.15f) {
             cam_x += my_sin(cam_yaw) * (-ly) * spd;
             cam_z -= my_cos(cam_yaw) * (-ly) * spd;
@@ -3466,32 +3521,38 @@ int main(void) {
             cam_z += my_sin(cam_yaw) * lx * spd;
         }
 
-        // Right stick: pan camera
+        /* Right stick: look around */
         float rx = ((float)pad.rx - 128.0f) / 128.0f;
         float ry = ((float)pad.ry - 128.0f) / 128.0f;
-        /* Right stick: look around */
-        if (rx > 0.15f || rx < -0.15f) cam_yaw   += rx * 2.4f * dt_sec;  /* was 0.04/frame */
-        if (ry > 0.15f || ry < -0.15f) cam_pitch += ry * 1.8f * dt_sec;  /* was 0.03/frame */
-        if (cam_pitch > 1.5f) cam_pitch = 1.5f;
-        if (cam_pitch < -1.5f) cam_pitch = -1.5f;
+        if (rx > 0.15f || rx < -0.15f)
+            cam_yaw += rx * 2.4f * dt_sec;
+        if (ry > 0.15f || ry < -0.15f)
+            cam_pitch += ry * 1.8f * dt_sec;
+        if (cam_pitch > 1.5f)
+            cam_pitch = 1.5f;
+        if (cam_pitch < -1.5f)
+            cam_pitch = -1.5f;
 
-        // D-pad: fine rotation
-        /* D-pad: speed control + precise movement */
-        if (pad.buttons & PAD_UP)    move_speed *= 1.02f;
-        if (pad.buttons & PAD_DOWN)  move_speed *= 0.98f;
-        if (move_speed < 0.001f) move_speed = 0.001f;
-        if (move_speed > 0.5f) move_speed = 0.5f;
-        if (pad.buttons & PAD_LEFT)  cam_yaw -= 1.2f * dt_sec;   /* was 0.02/frame */
-        if (pad.buttons & PAD_RIGHT) cam_yaw += 1.2f * dt_sec;   /* was 0.02/frame */
+        /* D-pad up / down: camera speed (x1.02 / x0.98 per frame held), 1% .. 2500% of
+         * MOVE_SPEED_100 */
+        if (pad.buttons & PAD_UP)
+            move_speed *= 1.02f;
+        if (pad.buttons & PAD_DOWN)
+            move_speed *= 0.98f;
+        if (move_speed < 0.01f * MOVE_SPEED_100)
+            move_speed = 0.01f * MOVE_SPEED_100;
+        if (move_speed > 0.5f)
+            move_speed = 0.5f;
 
-        // Auto-spin
-        if (auto_spin) cam_yaw += 1.2f * dt_sec;                 /* was 0.02/frame */
-
-        /* Sun controls: L3 toggles auto-orbit, L2/R2 manual rotation */
-        if (pressed & 0x0002) sun_speed = (sun_speed > 0.001f) ? 0.0f : 0.0027f; /* L3 toggle */
-        if (pad.buttons & 0x0100) sun_angle -= 0.2592f * dt_sec; /* L2 held = sun left, 40% slower */
-        if (pad.buttons & 0x0200) sun_angle += 0.2592f * dt_sec; /* R2 held = sun right */
-        sun_angle += sun_speed * 60.0f * dt_sec;   /* sun_speed was per-frame */
+        /* Day and night: D-pad left / right held moves the sun; otherwise it runs at the
+           chosen multiple unless frozen. */
+        if (pad.buttons & PAD_LEFT)
+            sun_angle -= 0.2592f * dt_sec;
+        if (pad.buttons & PAD_RIGHT)
+            sun_angle += 0.2592f * dt_sec;
+        if (!day_frozen)
+            sun_angle += sun_speed * (float)k_day_mults[day_step] * 60.0f * dt_sec;
+        play_time_s += dt_sec;
         /* Wrap every accumulator once per frame, after all increments. */
         sun_angle    = wrap_2pi(sun_angle);
         cam_yaw      = wrap_2pi(cam_yaw);
@@ -3929,10 +3990,11 @@ int main(void) {
             mc[2] = srgb_to_linear(0.84f) * MOON_HDR;
             mc[3] = 0.0f;
         }
-        /* Lens flare (ps_post_final, final pass table dwords 28..32): sun position
-           (u, v: pixel / size, v down) and strength = sun colour x FLARE_STRENGTH x
-           visible fraction of the disc x edge fade. desc[16..17] = sun NDC x aspect, y
-           (99 behind the camera); desc[84..86] = sun colour x SUN_HDR. */
+        /* Lens flare (ps_post_final, final pass table dwords 28..39): sun position
+           (u, v: pixel / size, v down), strength = sun colour x FLARE_STRENGTH x visible
+           fraction of the disc x edge fade, and the gains FLARE_GHOSTS / RAYS / GLOW /
+           VEIL. desc[16..17] = sun NDC x aspect, y (99 behind the camera); desc[84..86] =
+           sun colour x SUN_HDR. */
         if (g_post_tab) {
             float* ft = (float*)(g_post_tab + (POST_PASSES - 1) * 32 + 28);
             const float* sd = (const float*)(desc + 16);
@@ -3957,9 +4019,16 @@ int main(void) {
             ft[2] = k * scl[0];
             ft[3] = k * scl[1];
             ft[4] = k * scl[2];
-            ft[5] = 0.0f;
-            ft[6] = 0.0f;
-            ft[7] = 0.0f;
+            ft[5] = FLARE_GHOSTS; /* dwords 33..36: gains; 37..39 spare; 40..51 glare T# / S# */
+            ft[6] = FLARE_RAYS * GLARE_STORE_MAX;
+            ft[7] = FLARE_GLOW;
+            ft[8] = FLARE_VEIL;
+            ft[9] = 0.0f;
+            ft[10] = 0.0f;
+            ft[11] = 0.0f;
+            ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_mults[day_step],
+                      day_frozen, (unsigned long)play_time_s);
+            ui_write_table(g_post_tab + (POST_PASSES - 1) * 32);
         }
 
         /* Build main DCB (samples shadow_depth but doesn't write it).

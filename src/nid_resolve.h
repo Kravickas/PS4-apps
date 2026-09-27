@@ -173,7 +173,11 @@ struct OrbisPadData {
 #define PAD_L1 0x0400
 #define PAD_R1 0x0800
 #define PAD_TRI 0x1000
+#define PAD_L2 0x0100
+#define PAD_R2 0x0200
+#define PAD_CIRCLE 0x2000
 #define PAD_CROSS 0x4000
+#define PAD_SQUARE 0x8000
 
 /* Memory freeing */
 extern int sceKernelMunmap(void *addr, unsigned long len);
