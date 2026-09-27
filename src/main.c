@@ -3255,7 +3255,6 @@ int main(void) {
         printf("scePadOpen failed: 0x%x, userId=%d\n", pad_handle, userId);
     }
     struct OrbisPadData pad;
-    int pad_ok = 0;          /* only trust pad.buttons after a successful read */
     my_memset(&pad, 0, sizeof(pad));
     pad.lx = 128;
     pad.ly = 128;
@@ -3364,7 +3363,7 @@ int main(void) {
        flipped a buffer the GPU might still have been rendering into. */
     uint32_t fv = *fence + 1;
     int running = 1;
-    int quit_reason = 0;   /* 0=still running, 1=system quit event, 2=pad combo */
+    int quit_reason = 0; /* 0=still running, 1=system quit event */
     /* Batch state: sub-frames accumulate into one command buffer (pm4), which
        is submitted once every BATCH_FRAMES. dcb_slot alternates so the GPU is
        never reading the buffer we are refilling. */
@@ -3538,13 +3537,8 @@ int main(void) {
 
         // Read gamepad
         if (pad_handle >= 0)
-            pad_ok = (scePadRead(pad_handle, &pad, 1) >= 0);
+            scePadRead(pad_handle, &pad, 1);
         uint64_t t_pad = tstamp();
-
-        /* Manual quit fallback: hold all four triggers (L1+R1+L2+R2) together.
-           Guarantees a clean exit + teardown regardless of the system-event
-           path, so the app never hangs the OS on close. */
-        if (pad_ok && (pad.buttons & 0x0F00) == 0x0F00) { running = 0; quit_reason = 2; }
 
         // Button edge detection (pressed this frame, not last)
         uint32_t pressed = pad.buttons & ~prev_buttons;
@@ -3556,7 +3550,7 @@ int main(void) {
            L1 / R1   day and night slower / faster (k_day_mults; held: repeats)
            L2 / R2   camera down / up                 D-pad up / down: camera speed
            D-pad left / right: move the sun           OPTIONS: show / hide controls
-           sticks: move / look; L1 + R1 + L2 + R2 held together: quit (above). */
+           sticks: move / look. */
         if (pressed & PAD_CROSS)
             cube_rotation_enabled = !cube_rotation_enabled;
         if (pressed & PAD_CIRCLE)

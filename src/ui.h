@@ -191,9 +191,8 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
 
     /* left panel: always-visible lines */
     int x = UI_X0 + UI_PAD, y = UI_Y0 + UI_PAD + UI_FONT_ASCENT + 8, wmax = 0;
-    int cx = ui_text(b, x, y, "Press ", white);
-    ui_icon(b, cx, y, UI_ICON_OPTIONS);
-    cx = ui_text(b, cx + UI_ICON_PX + 6, y, "to show / hide controls", white);
+    ui_icon(b, x, y, UI_ICON_OPTIONS);
+    int cx = ui_text(b, x + UI_ICON_PX + 6, y, "to show / hide controls", white);
     wmax = cx - x;
     char v[32];
     y += UI_LH;
@@ -214,31 +213,28 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         ui_text(b, cx + 14, y, "(frozen)", grey);
     if (g_ui.controls) {
         static const struct {
-            int icons[4];
+            int icons[2];
             const char* label;
         } rows[] = {
-            {{UI_ICON_CROSS, -1, -1, -1}, "Freeze / unfreeze cube"},
-            {{UI_ICON_CIRCLE, -1, -1, -1}, "Show / hide leaderboard"},
-            {{UI_ICON_SQUARE, -1, -1, -1}, "Freeze / unfreeze day and night"},
-            {{UI_ICON_TRIANGLE, -1, -1, -1}, "Reset camera"},
-            {{UI_ICON_L1, UI_ICON_R1, -1, -1}, "Day and night slower / faster"},
-            {{UI_ICON_L2, UI_ICON_R2, -1, -1}, "Camera down / up"},
-            {{UI_ICON_DPAD_UP, UI_ICON_DPAD_DOWN, -1, -1}, "Camera speed up / down"},
-            {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT, -1, -1}, "Move the sun (time of day)"},
-            {{UI_ICON_L_2D, -1, -1, -1}, "Move"},
-            {{UI_ICON_R_2D, -1, -1, -1}, "Look"},
-            {{UI_ICON_OPTIONS, -1, -1, -1}, "Show / hide controls"},
-            {{UI_ICON_L1, UI_ICON_R1, UI_ICON_L2, UI_ICON_R2}, "Hold all four: quit"},
+            {{UI_ICON_CROSS, -1}, "Freeze / unfreeze cube"},
+            {{UI_ICON_CIRCLE, -1}, "Show / hide leaderboard"},
+            {{UI_ICON_SQUARE, -1}, "Freeze / unfreeze day and night"},
+            {{UI_ICON_TRIANGLE, -1}, "Reset camera"},
+            {{UI_ICON_L1, UI_ICON_R1}, "Day and night slower / faster"},
+            {{UI_ICON_L2, UI_ICON_R2}, "Camera down / up"},
+            {{UI_ICON_DPAD_UP, UI_ICON_DPAD_DOWN}, "Camera speed up / down"},
+            {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT}, "Move the sun (time of day)"},
+            {{UI_ICON_L_2D, -1}, "Move"},
+            {{UI_ICON_R_2D, -1}, "Look"},
         };
         y += UI_LH + 18;
         for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
-            int ix = x, ni = 0;
-            for (int i = 0; i < 4 && rows[r].icons[i] >= 0; i++, ni++) {
+            int ix = x;
+            for (int i = 0; i < 2 && rows[r].icons[i] >= 0; i++) {
                 ui_icon(b, ix, y, rows[r].icons[i]);
                 ix += UI_ICON_PX + 2;
             }
-            int lx = x + (ni > 2 ? ni * (UI_ICON_PX + 2) + 12 : UI_LABEL_DX);
-            cx = ui_text(b, lx, y, rows[r].label, white);
+            cx = ui_text(b, x + UI_LABEL_DX, y, rows[r].label, white);
             if (cx - x > wmax)
                 wmax = cx - x;
             y += UI_LH;

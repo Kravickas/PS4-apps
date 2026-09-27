@@ -6,9 +6,9 @@ day and night | Triangle reset camera | L1 / R1 day and night slower / faster
 (x1 x2 x4 x6 .. x20, held: repeats after 0.4 s every 0.15 s) | L2 / R2 camera
 down / up | D-pad up / down camera speed (1% .. 2500%, 100% = the old default) |
 D-pad left / right move the sun | OPTIONS show/hide controls | sticks move /
-look | L1+R1+L2+R2 held: quit. L3 / R3 unbound. Removed: the dead jump (Cross)
-and the sprint toggle (Square).
-Panels (src/ui.h): top left always "Press OPTIONS to show / hide controls",
+look. L3 / R3 unbound. Removed: the dead jump (Cross), the sprint toggle
+(Square) and the L1+R1+L2+R2 hold-to-quit (quit via the system menu).
+Panels (src/ui.h): top left always "[OPTIONS] to show / hide controls",
 camera speed %, day speed (frozen); the controls list on OPTIONS (hidden at
 start); top right the leaderboard on CIRCLE (this session's play time until
 multiplayer scores exist). Text in the logo's font + DS4 icons from
