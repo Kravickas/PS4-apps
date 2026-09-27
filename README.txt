@@ -1,4 +1,88 @@
 ============================================================
+PKG ASSETS (/app0/assets), COMPRESSED TEXTURES, APP ICON  (build=pkg-assets-bc)
+============================================================
+Assets ship inside the PKG and load from /app0/assets/ (no more /data files;
+only trace.log is still written to /data/ShadCube4/):
+  images/floor/{albedo,normal,height}.dds   images/cube/{albedo,normal,height}.dds
+  models/cube/cube.obj                        sound/bgm/bgm.wav
+Rebuild with tools/build_assets.py (see tools/README.txt).
+
+Textures are DDS, read straight into GPU memory (src/dds_loader.h):
+- floor: albedo BC1 sRGB (PSNR 39.5 dB), normal BC5 (mean 1.1 deg), height BC4
+  (stretched to 0..1; mean error 0.03/255). Floor 150 MB of BMP -> 45 MB; VRAM
+  ~267 MB -> ~45 MB. The source normal map had 144k non-unit texels
+  (lengths 0.04..1.16); they are normalised.
+- cube: logo albedo stays RGBA8 sRGB (BC1 max error 121 on the text), normal
+  BC5, height BC4.
+- mips stop at 32 px: then the packed DDS chain equals the LINEAR_ALIGNED
+  layout (shadPS4 ImageSizeLinearAligned / addrlib ported and compared for all
+  six textures; a 16 px level would need padding).
+- rows bottom-up (v 0 = image bottom, as the BMP loader and OBJ UVs had it).
+- BC5 has no z: ps_floor / ps_model rebuild z = sqrt(1 - x^2 - y^2) (vs the
+  previous shaders with RGB normals: max relative diff 3.1e-6).
+- normal-map convention and height range are fixed offline, so the runtime
+  estimator and the BMP loader are gone.
+App icon: sce_sys/icon0.png 512x512 (was 1x1): the ShadPS4 badge from shadPS4
+src/resources/shadps4.png (closest to the embedded logo's badge), corners
+filled with the badge's navy.
+PKG: create-gp4 writes a fixed dir tree (assets/{audio,fonts,images,misc,
+videos}) and PkgTool.Core fails for files in other folders; tools/make_gp4.py
+declares every folder. Verified here: make all -> 50 MB PKG; pkg_extract gives
+eboot.bin and all 8 assets byte-identical; ICON0_PNG entry = icon0.png;
+PARAM_SFO title / ids correct. Needs sce_sys/about/right.sprx (not included).
+Build: 0 warnings, no import change, 16/16 shaders match; main.c: only main
+changed (+ dds_load, load_tex, build_tsharp_tex; BMP code removed).
+
+============================================================
+LOGO PROP (OBJ + GPU TRANSFORM + PARALLAX), LOOPING MUSIC  (build=model-prop)
+============================================================
+Copy assets/* to /data/ShadCube4/ (see assets/README.txt).
+
+Prop: tools/gen_model.py -> model.obj (rounded cube, edge radius 5%, exact vn,
+logo UVs), model.bmp (logo), model_height.bmp (embossed logo), model_normal.bmp.
+- Importer: OBJ vn were never counted, so every model got averaged normals; now
+  the file's normals are used (smoothing is the fallback). OBJ/STL/PLY write a
+  tangent + handedness into free vertex slots (src/tangent.h, from the loader's
+  arrays: the VB is write-combined memory and is not read back).
+- vs_model / vs_model_shadow: model transform M in VS user SGPRs s4..s15; the
+  prop moves exactly like the cube (ROTATE_XY, max diff 2e-7), scaled to its
+  bounding radius (the generated cube becomes exactly +-0.4), at y = 0.4;
+  Options toggles the rotation. Any loaded model now does this.
+- ps_model: 16-layer parallax on the embossed logo, relief self-shadow toward
+  the light, normal map (signs measured at load), shadow map with a normal
+  offset + 1.5-step depth bias (8-bit shadow map: without it 1521/3000 test
+  pixels shadowed themselves, with it 0), fog as floor / cube. Every feature
+  off: bit-identical to ps_shader.
+- Knobs: MODEL_POM_DEPTH (= D_UV in gen_model.py), MODEL_RELIEF,
+  MODEL_SHADOW_OFFSET, MODEL_SHADOW_BIAS, MODEL_FIT_RADIUS.
+- Descriptor table 128 -> 256 dwords (model slots desc[128..151]).
+Fixed: SPI_VS_OUT_CONFIG.VS_EXPORT_COUNT is bits 5:1 (AMD header, shadPS4
+regs_shader.h). The old value 1 meant one param export while the VS exports
+two; now 1 << 1 (two params) and 2 << 1 for the model's three.
+Music: src/bgm.c plays bgm.wav (16-bit stereo 48 kHz) on the main audio port
+from its own thread (256-frame grains, two alternating buffers), looping,
+started before the texture loads. tools/make_bgm.py decodes gaplessly and
+crossfades the last 10 ms into the first 10 ms: the MP3's first samples carry
+a transient (prediction residual 1476 vs the track's 99.9% of 462); after the
+fold every residual across the wrap is within the track's own range (<= 72nd
+percentile). Loop 6.99 s. Host test: 3 loops streamed bit-identical to the WAV;
+mono / 44.1 kHz / missing files rejected (-7 / -7 / -1).
+Build: 0 warnings; imports +sceAudioOutInit/Open/Output (libSceAudioOut);
+16/16 shaders match; main.c changed build_dcb, build_shadow_dcb, main.
+
+============================================================
+FOG 3% MINIMUM, 100% AT 290  (build=fog-3-290)
+============================================================
+FOG_MIN 0.07 -> 0.03 and new FOG_FULL 290 (distance of 100% fog; was the
+floor edge, 300). Weight = min(1, FOG_MIN * e^(d / L)), L = FOG_FULL /
+ln(1 / FOG_MIN) = 82.7: 3.0% at 0, 4.1% at 25, 5.5% at 50, 10% at 100,
+18% at 150, 34% at 200, 62% at 250, 100% from 290 on. Constants only
+(desc[107] = log2(FOG_MIN), desc[109] = log2(1 / FOG_MIN) / FOG_FULL);
+shaders unchanged. Checks: both shaders within 6e-7 of the formula, cube ==
+floor, exactly 1 from 290 on; build 0 warnings, no import change, code
+identical apart from the constant values.
+
+============================================================
 FLOOR 50% LARGER, PARALLAX TO 90 UNITS, FOG TO THE NEW EDGE
 (build=floor-300)
 ============================================================

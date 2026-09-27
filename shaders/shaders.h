@@ -4,6 +4,7 @@
 #include "ps_blue.h"
 #include "ps_dark.h"
 #include "ps_floor.h"
+#include "ps_model.h"
 #include "ps_post_blur.h"
 #include "ps_post_comp.h"
 #include "ps_post_down.h"
@@ -14,3 +15,5 @@
 #include "ps_stars.h"
 #include "vs_shader.h"
 #include "vs_shadow.h"
+#include "vs_model.h"
+#include "vs_model_shadow.h"

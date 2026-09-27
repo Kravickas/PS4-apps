@@ -10,6 +10,7 @@
  */
 
 #include "loaders.h"
+#include "tangent.h"
 
 #define OBJ_CHUNK (64 * 1024 * 1024)
 
@@ -399,6 +400,8 @@ static int p1_line(const char *s, const char *e, void *ud) {
     P1Ctx *c = (P1Ctx*)ud;
     if (*s == 'v' && s+1 < e && s[1] == ' ') c->nv++;
     else if (*s == 'v' && s+1 < e && s[1] == 't' && s+2 < e && s[2] == ' ') c->nt++;
+    else if (*s == 'v' && s + 2 < e && s[1] == 'n' && s[2] == ' ')
+        c->nn++; /* vn: read in pass 2 */
     else if (*s == 'f' && s+1 < e && (s[1]==' '||s[1]=='\t')) {
         const char *p = s+2; int fvc = 0;
         while (p<e) { while(p<e&&(*p==' '||*p=='\t'))p++; if(p<e&&*p!='\n'&&*p!='\r'){fvc++;while(p<e&&*p!=' '&&*p!='\t'&&*p!='\n'&&*p!='\r')p++;} else break; }
@@ -433,34 +436,95 @@ static int p2_line(const char *s, const char *e, void *ud) {
 }
 
 /* Pass 3 context: emit faces */
-typedef struct { const float *px, *py, *pz, *snx, *sny, *snz, *tu, *tv; int nv, nt; float *out; int nout; float cr,cg,cb; const MtlTable *mtl; } P3Ctx;
-static int p3_emit_smooth_uv(const char *p, const char *end,
-                          const float *px, const float *py, const float *pz,
-                          const float *snx, const float *sny, const float *snz,
-                          const float *tu, const float *tv, int nv, int nt, float *out) {
-    int fv[64], ft[64], fvc = 0;
+typedef struct {
+    const float *px, *py, *pz, *snx, *sny, *snz, *tu, *tv, *nnx, *nny, *nnz;
+    int nv, nt, nn;
+    float* out;
+    int nout;
+    float cr, cg, cb;
+    const MtlTable* mtl;
+} P3Ctx;
+/* One face (fan-triangulated). Per corner: position; the file's normal (vn,
+   normalised) when the corner references one, else the smoothed normal of its
+   position; UV (vt) or 0. Tangent frame per triangle (tangent.h) into o[3],
+   o[7], o[10], o[11] for vs_model / ps_model. Write-only into out. */
+static int p3_emit_smooth_uv(const char* p, const char* end, const P3Ctx* c, float* out) {
+    int fv[64], ft[64], fnn[64], fvc = 0;
+    const int nv = c->nv, nt = c->nt, nn = c->nn;
     while(p<end&&*p!='\n'&&*p!='\r'&&fvc<64){
         while(p<end&&(*p==' '||*p=='\t'))p++;
         if(p>=end||*p=='\n'||*p=='\r')break;
         int vi=obj_atoi(&p,end);
-        int ti=-1;
-        if(p<end&&*p=='/'){p++;if(p<end&&*p!='/')ti=obj_atoi(&p,end);if(p<end&&*p=='/'){p++;obj_atoi(&p,end);}}
+        int ti = -1, ni = 0;
+        if (p < end && *p == '/') {
+            p++;
+            if (p < end && *p != '/')
+                ti = obj_atoi(&p, end);
+            if (p < end && *p == '/') {
+                p++;
+                ni = obj_atoi(&p, end);
+            }
+        }
         if(vi<0)vi=nv+vi+1; vi--;
         if(ti>0)ti--; else if(ti==0)ti=-1;
-        if(vi>=0&&vi<nv){fv[fvc]=vi;ft[fvc]=ti;fvc++;}
+        if (ni < 0)
+            ni = nn + ni + 1;
+        ni--;
+        if (vi >= 0 && vi < nv) {
+            fv[fvc] = vi;
+            ft[fvc] = ti;
+            fnn[fvc] = ni;
+            fvc++;
+        }
     }
     if(fvc<3)return 0;
     int n=0;
     for(int t=0;t<fvc-2;t++){
-        int idx[3]={fv[0],fv[t+1],fv[t+2]};
-        int tidx[3]={ft[0],ft[t+1],ft[t+2]};
+        const int corner[3] = {0, t + 1, t + 2};
+        float P[3][3], UV[3][2], N[3][3], TF[3][4];
+        int has_uv = 1;
         for(int k=0;k<3;k++){
-            float*o=out+n*OBJ_STRIDE; int ii=idx[k]; int ti=tidx[k];
-            o[0]=px[ii];o[1]=py[ii];o[2]=pz[ii];o[3]=1;
-            o[4]=snx[ii];o[5]=sny[ii];o[6]=snz[ii];o[7]=0;
-            o[8]=(ti>=0&&ti<nt)?tu[ti]:0;
-            o[9]=(ti>=0&&ti<nt)?tv[ti]:0;
-            o[10]=0; o[11]=0;
+            int ii = fv[corner[k]], ti = ft[corner[k]], ni = fnn[corner[k]];
+            P[k][0] = c->px[ii];
+            P[k][1] = c->py[ii];
+            P[k][2] = c->pz[ii];
+            if (ti >= 0 && ti < nt) {
+                UV[k][0] = c->tu[ti];
+                UV[k][1] = c->tv[ti];
+            } else {
+                UV[k][0] = 0;
+                UV[k][1] = 0;
+                has_uv = 0;
+            }
+            float nx = c->snx[ii], ny = c->sny[ii], nz = c->snz[ii];
+            if (c->nnx && ni >= 0 && ni < nn) {
+                float fx = c->nnx[ni], fy = c->nny[ni], fz = c->nnz[ni];
+                float l = obj_sqrtf(fx * fx + fy * fy + fz * fz);
+                if (l > 1e-12f) {
+                    nx = fx / l;
+                    ny = fy / l;
+                    nz = fz / l;
+                }
+            }
+            N[k][0] = nx;
+            N[k][1] = ny;
+            N[k][2] = nz;
+        }
+        tangent_tri((const float(*)[3])P, (const float(*)[2])UV, (const float(*)[3])N, has_uv, TF);
+        for (int k = 0; k < 3; k++) {
+            float* o = out + n * OBJ_STRIDE;
+            o[0] = P[k][0];
+            o[1] = P[k][1];
+            o[2] = P[k][2];
+            o[3] = TF[k][3];
+            o[4] = N[k][0];
+            o[5] = N[k][1];
+            o[6] = N[k][2];
+            o[7] = TF[k][0];
+            o[8] = UV[k][0];
+            o[9] = UV[k][1];
+            o[10] = TF[k][1];
+            o[11] = TF[k][2];
             n++;
         }
     }
@@ -477,7 +541,7 @@ static int p3_line(const char *s, const char *e, void *ud) {
     }
     if (*s == 'f' && s+1 < e && (s[1]==' '||s[1]=='\t')) {
         int base = c->nout;
-        c->nout += p3_emit_smooth_uv(s+2, e, c->px, c->py, c->pz, c->snx, c->sny, c->snz, c->tu, c->tv, c->nv, c->nt, c->out + c->nout * OBJ_STRIDE);
+        c->nout += p3_emit_smooth_uv(s + 2, e, c, c->out + c->nout * OBJ_STRIDE);
         /* UVs stored per-vertex from vt indices */
     }
     return 0;
@@ -638,7 +702,8 @@ int obj_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned lo
             mtl_table.m[mi].b = hc[hi].b;
         }
     }
-    P3Ctx p3 = { px, py, pz, snx, sny, snz, tu, tv, vi, nti, verts, 0, 0.8f, 0.8f, 0.8f, &mtl_table };
+    P3Ctx p3 = {px,  py, pz,    snx,   sny,   snz, tu,   tv,   nnx,  nny,
+                nnz, vi, p2.ti, p2.ni, verts, 0,   0.8f, 0.8f, 0.8f, &mtl_table};
     pg.pass = 3;
     pg.msg = "Building triangles";
     obj_stream_pass(path, p3_line, &p3, &pg);

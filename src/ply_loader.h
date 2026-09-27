@@ -1,3 +1,4 @@
+#include "tangent.h"
 /* ply_loader.h — ASCII PLY loader
  * Supports: element vertex N (x,y,z + optional nx,ny,nz)
  *           element face M (property list uchar int vertex_index/vertex_indices)
@@ -226,8 +227,26 @@ int ply_load_file(const char* path, void* (*alloc_fn)(unsigned long, unsigned lo
                 o[0]=px[ii];o[1]=py[ii];o[2]=pz[ii];o[3]=1;
                 if(snx){o[4]=snx[ii];o[5]=sny[ii];o[6]=snz[ii];}
                 else{o[4]=0;o[5]=1;o[6]=0;}
-                o[7]=0;
-                o[8]=0.8f;o[9]=0.8f;o[10]=0.8f;o[11]=1.0f;
+                /* No UVs: tangent perpendicular to the normal (tangent.h). */
+                {
+                    float tn[3], tg[3];
+                    tn[0] = snx ? snx[ii] : 0.0f;
+                    tn[1] = snx ? sny[ii] : 1.0f;
+                    tn[2] = snx ? snz[ii] : 0.0f;
+                    float tl = tn[0] * tn[0] + tn[1] * tn[1] + tn[2] * tn[2];
+                    if (tl > 1e-12f)
+                        tangent_perp(tn, tg);
+                    else {
+                        tg[0] = 1.0f;
+                        tg[1] = 0.0f;
+                        tg[2] = 0.0f;
+                    }
+                    o[7] = tg[0];
+                    o[10] = tg[1];
+                    o[11] = tg[2];
+                }
+                o[8] = 0.8f;
+                o[9] = 0.8f;
                 nout++;
             }
         }

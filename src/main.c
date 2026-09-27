@@ -114,7 +114,8 @@
 
 #define SET_AFFINITY 1
 
-#include "bmp_loader.h"
+#include "bgm.h"
+#include "dds_loader.h"
 #include "loaders.h"
 #include "logo_texture.h"
 #include "nid_resolve.h"
@@ -125,10 +126,6 @@
 
 #define DISPLAY_W       1920
 #define DISPLAY_H       1080
-
-/* Mip levels for the floor albedo/normal maps (power-of-two sizes only, down to
-   16x16; see bmp_loader.h). 1 = no mips, as before. */
-#define FLOOR_TEX_MIPS 9
 
 /* Sun disc edge radius in pixels (1080p). The old disc was 59 px tall and
    105 px wide (NDC distance on a 16:9 screen); it is now round. */
@@ -147,14 +144,24 @@
    and distance fog toward the sky gradient. */
 #define POM_DEPTH 0.05f      /* relief depth in world units (a texture tile is 4 units) */
 #define POM_FADE 90.0f       /* parallax fades to zero by this distance */
-#define FOG_MIN 0.07f /* fog at distance 0; grows as FOG_MIN * e^(d / L), 100% at FLOOR_HALF */
+#define FOG_MIN 0.03f        /* fog at distance 0; grows as FOG_MIN * e^(d / L) */
+#define FOG_FULL 290.0f      /* distance where the fog reaches 100% (floor edge is FLOOR_HALF) */
 /* Midday sun disc colour (sRGB); amber at the horizon ramps to this. */
 #define SUN_DAY_R 1.00f
 #define SUN_DAY_G 0.97f
 #define SUN_DAY_B 0.87f
 
+/* Imported models (OBJ / STL / PLY): vs_model + ps_model, model transform on the GPU. */
+#define MODEL_FIT_RADIUS                                                                           \
+    0.6928203f                    /* scaled to the built-in cube's bounding radius (0.4 * sqrt 3) */
+#define MODEL_POM_DEPTH 0.025f    /* relief depth in UV units (= D_UV in tools/gen_model.py) */
+#define MODEL_RELIEF 1.0f         /* relief self-shadow strength */
+#define MODEL_SHADOW_OFFSET 0.02f /* shadow lookup: offset along the normal (world units) */
+#define MODEL_SHADOW_BIAS                                                                          \
+    (1.5f / 255.0f) /* shadow lookup: depth bias, 1.5 steps of the 8-bit map */
+
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "floor-300"
+#define BUILD_TAG "pkg-assets-bc"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -484,14 +491,6 @@ static void trace_msg(const char *s);
 #define DATA_DIR_NEW "/data/ShadCube4/"   /* primary */
 #define DATA_DIR_OLD "/data/Shadcube4/"   /* alternate capitalisation, harmless */
 static char g_path_buf[2][256];
-static const char *asset_path(int slot, const char *name) {
-    char *d = g_path_buf[slot & 1]; int i = 0;
-    const char *p = (slot & 2) ? DATA_DIR_OLD : DATA_DIR_NEW;
-    while (*p && i < 200) d[i++] = *p++;
-    while (*name && i < 250) d[i++] = *name++;
-    d[i] = 0;
-    return d;
-}
 static int lg_i64(char *o, long long v);
 static void trace_line(const char *buf, unsigned long n);
 /* Write a phase marker, but only for the batches around the observed crash
@@ -638,6 +637,11 @@ static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
    EVERYTHING in GARLIC, including the DCBs the command processor reads and
    the EOP fence the CPU polls. CPU write-combine stores into a buffer the CP
    reads, with no sceGnmFlushGarlic, is not a guaranteed-visible arrangement. */
+static void* gpu_alloc_typed(unsigned long size, unsigned long align, int memtype);
+/* CPU-read data (cached, coherent): the background-music PCM. */
+static void* cpu_alloc(unsigned long size, unsigned long align) {
+    return gpu_alloc_typed(size, align, MEM_TYPE_ONION);
+}
 static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtype) {
     unsigned long phys = 0; void *addr = 0;   /* matches sceKernelAllocateDirectMemory's unsigned long* out-param */
     size = (size + 0x3FFF) & ~0x3FFFUL;
@@ -930,9 +934,9 @@ static int build_stars(float* out) {
 static void build_vsharp(uint32_t *v, void *base, uint32_t size) {
     build_vsharp_strided(v, base, size, 0);
 }
-/* levels > 1: a mip chain laid out by bmp_load (LINEAR_ALIGNED, see
-   bmp_loader.h). SQ_IMG_RSRC_WORD3 (gfx_7_2_sh_mask.h): LAST_LEVEL @16,
-   POW2_PAD @25 - radeonsi sets POW2_PAD(last_level > 0) on GFX6-8. */
+/* levels > 1: a mip chain in LINEAR_ALIGNED layout (see dds_loader.h). SQ_IMG_RSRC_WORD3
+   (gfx_7_2_sh_mask.h): LAST_LEVEL @16, POW2_PAD @25 - radeonsi sets POW2_PAD(last_level > 0) on
+   GFX6-8. */
 static void build_tsharp_levels(uint32_t *t, void *tex, int w, int h, int levels) {
     uint64_t a=(uint64_t)(uintptr_t)tex;
     my_memset(t,0,32);
@@ -1091,44 +1095,63 @@ static void sky_colours(float y, float* zr, float* zg, float* zb, float* hr, flo
     }
 }
 
-/* Normal-map channel convention, from the data: a tangent-space normal tilts
-   away from rising height, n ~ (-dH/du, -dH/dv, 1) with u along texel columns
-   and v along texel rows (both textures load rows in file order). Correlate
-   the normal map's red / green with the height map's slopes at 4096 pseudo-
-   random points of level 0 (a regular grid can alias with regular features,
-   e.g. miss every mortar line of a tile pattern); a negative correlation means
-   that channel points the other way (e.g. green = -v). +1 when the
-   correlation is too weak to decide. */
-static void normal_map_convention(const unsigned char* nrm, int nw, int nh,
-                                  const unsigned char* hgt, int hw, int hh, float* sx, float* sy,
-                                  float* cx, float* cy) {
-    float xy = 0, yy = 0, nxx = 0, nyy = 0, huu = 0, hvv = 0;
-    uint32_t seed = 0x2545F491u;
-    for (int k = 0; k < 4096; k++) {
-        seed = seed * 1664525u + 1013904223u;
-        int x = (int)((uint64_t)(seed >> 8) * (uint64_t)hw >> 24);
-        seed = seed * 1664525u + 1013904223u;
-        int y = (int)((uint64_t)(seed >> 8) * (uint64_t)hh >> 24);
-        int xm = (x + hw - 1) % hw, xp = (x + 1) % hw, ym = (y + hh - 1) % hh, yp = (y + 1) % hh;
-        float du = ((float)hgt[((unsigned long)y * hw + xp) * 4] -
-                    (float)hgt[((unsigned long)y * hw + xm) * 4]) *
-                   0.5f;
-        float dv = ((float)hgt[((unsigned long)yp * hw + x) * 4] -
-                    (float)hgt[((unsigned long)ym * hw + x) * 4]) *
-                   0.5f;
-        const unsigned char* t = nrm + ((unsigned long)(y * nh / hh) * nw + (x * nw / hw)) * 4;
-        float nx = (float)t[0] / 127.5f - 1.0f, ny = (float)t[1] / 127.5f - 1.0f;
-        xy += nx * -du;
-        yy += ny * -dv;
-        nxx += nx * nx;
-        nyy += ny * ny;
-        huu += du * du;
-        hvv += dv * dv;
+/* Model draw (set once a model has loaded): vs_model / vs_model_shadow get the
+   model transform M (3 rows of 4 floats) in VS user SGPRs s4..s15 after the V#;
+   ps_model draws it. enabled = 0 -> the built-in cube path (vs_shader, ps_shader). */
+static struct {
+    int enabled;
+    const void* vs;
+    const void* vs_shadow;
+    const void* ps;
+    float m[12];
+} g_model;
+
+/* Packaged assets: the PKG's assets/ folder is mounted at /app0 (read-only). */
+#define ASSET_DIR "/app0/assets/"
+
+/* A texture for one T#: a DDS from the package (tools/make_textures.py), or a
+   1x1 RGBA8 fallback texel. */
+typedef struct {
+    void* pixels;
+    int w, h, levels;
+    uint32_t dfmt, nfmt; /* SQ_IMG_RSRC_WORD1 DATA_FORMAT / NUM_FORMAT */
+    int err;             /* dds_load result, 0 = loaded */
+} Tex;
+
+static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t fallback_nfmt) {
+    Tex t;
+    DdsTexture d;
+    t.err = dds_load(path, gpu_alloc, &d);
+    if (t.err == 0) {
+        t.pixels = d.pixels;
+        t.w = d.width;
+        t.h = d.height;
+        t.levels = d.levels;
+        t.dfmt = d.data_format;
+        t.nfmt = d.num_format;
+    } else {
+        unsigned char* q = (unsigned char*)gpu_alloc(4, 0x1000);
+        q[0] = fallback[0];
+        q[1] = fallback[1];
+        q[2] = fallback[2];
+        q[3] = fallback[3];
+        t.pixels = q;
+        t.w = 1;
+        t.h = 1;
+        t.levels = 1;
+        t.dfmt = 0x0A; /* 8_8_8_8 */
+        t.nfmt = fallback_nfmt;
     }
-    *cx = (nxx > 0 && huu > 0) ? xy / my_sqrt(nxx * huu) : 0.0f;
-    *cy = (nyy > 0 && hvv > 0) ? yy / my_sqrt(nyy * hvv) : 0.0f;
-    *sx = (*cx < -0.1f) ? -1.0f : 1.0f;
-    *sy = (*cy < -0.1f) ? -1.0f : 1.0f;
+    printf("texture %s: %d (%dx%d, %d levels, format 0x%x/%u)\n", path, t.err, t.w, t.h, t.levels,
+           t.dfmt, t.nfmt);
+    return t;
+}
+
+/* T# for a Tex: build_tsharp_levels with the texture's DATA_FORMAT (word1 25:20)
+   and NUM_FORMAT (word1 29:26). */
+static void build_tsharp_tex(uint32_t* t, const Tex* x) {
+    build_tsharp_levels(t, x->pixels, x->w, x->h, x->levels);
+    t[1] = (t[1] & ~((0x3Fu << 20) | (0xFu << 26))) | (x->dfmt << 20) | (x->nfmt << 26);
 }
 
 /* Height-map sampler: wrap, bilinear, linear mips (MIP_FILTER 2 @ word2[27:26]). */
@@ -1442,7 +1465,9 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_COLOR_SHADER_MASK,0xF);
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);           /* attr0: VS param 0 -> PS slot 0 */
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0+1,1);         /* attr1: VS param 1 -> PS slot 1 */
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,1);          /* 2 param exports (export_count_min_one=1) */
+    /* SPI_VS_OUT_CONFIG: VS_EXPORT_COUNT (bits 5:1) = param exports - 1. Two params:
+       (1 << 1). The old value 1 set only the reserved bit 0 (= one export). */
+    pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 1u << 1);
     pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);
     pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
     pm4_set_context_reg(b,CTX_NUM_INTERP,2);                /* 2 attrs: {u,v,ny,nz} and {wpos.xyzw} */
@@ -1563,7 +1588,27 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Draw 2: Model with real MVP. Sun at V#+0x40 read via s_buffer_load
     { uint32_t cube_v[4];
       build_vsharp(cube_v,(char*)vb_base+MVP_OFF,(uint32_t)(vb_total > MVP_OFF ? vb_total - MVP_OFF : VERT_BUF_SIZE - MVP_OFF));
-      pm4_set_sh_regs(b,SH_VS_USER_DATA_0,cube_v,4); }
+      if (g_model.enabled) {
+          /* vs_model: V# + M in s[0:15] (16 user SGPRs); v0-v48, s0-s15 + VCC ->
+             52 VGPRs, 24 SGPRs = 0x8C. ps_model: v0-v97, s0-s87 + VCC -> 100
+             VGPRs, 96 SGPRs = 0x2D8. Three params: param2 = tangent, handedness. */
+          uint64_t a = (uint64_t)(uintptr_t)g_model.vs;
+          uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x8Cu, (16u << 1)};
+          pm4_set_sh_regs(b, SH_VS_PGM_LO, r, 4);
+          uint32_t ud[16];
+          my_memcpy(ud, cube_v, 16);
+          my_memcpy(ud + 4, g_model.m, 48);
+          pm4_set_sh_regs(b, SH_VS_USER_DATA_0, ud, 16);
+          a = (uint64_t)(uintptr_t)g_model.ps;
+          uint32_t p[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x2D8u, (2u << 1)};
+          pm4_set_sh_regs(b, SH_PS_PGM_LO, p, 4);
+          pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 2u << 1); /* three params */
+          pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0 + 2, 2);
+          pm4_set_context_reg(b, CTX_NUM_INTERP, 3);
+      } else {
+          pm4_set_sh_regs(b, SH_VS_USER_DATA_0, cube_v, 4);
+      }
+    }
     /* ps_shader reads POS_Y (v2) for the fog colour: PERSP_CENTER | POS_Y_FLOAT.
        (The loading screen's ps_blue writes v2 before reading it.) */
     pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x202);
@@ -1577,6 +1622,14 @@ static uint32_t build_dcb(struct PM4Builder *b,
     }
     pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
     pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
+    if (g_model.enabled) {
+        /* Back to vs_shader and two params: the post passes draw with it. */
+        uint64_t a = (uint64_t)(uintptr_t)vs;
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0xCBu, (4u << 1)};
+        pm4_set_sh_regs(b, SH_VS_PGM_LO, r, 4);
+        pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 1u << 1);
+        pm4_set_context_reg(b, CTX_NUM_INTERP, 2);
+    }
     GPU_TS(4);
     if (g_hdr)
         emit_post(b, color, bg_v);
@@ -1722,7 +1775,8 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        PS_INPUT_CNTL_0 maps attr0→slot0, attr1→slot1. */
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0,0);
     pm4_set_context_reg(b,CTX_PS_INPUT_CNTL_0+1,1);
-    pm4_set_context_reg(b,CTX_VS_OUTPUT_CONFIG,1);   /* 2 param exports */
+    pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG,
+                        1u << 1);                    /* two params (VS_EXPORT_COUNT, bits 5:1) */
     pm4_set_context_reg(b,CTX_PS_INPUT_ENA,0x02);    /* PERSP_CENTER_ENA */
     pm4_set_context_reg(b,CTX_PS_INPUT_ADDR,0x02);
     pm4_set_context_reg(b,CTX_NUM_INTERP,2);
@@ -1788,13 +1842,29 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
        the front face's depth value. */
     pm4_set_context_reg(b,CTX_POLYGON_CONTROL,(1u<<1));
 
-    pm4_set_sh_regs(b,SH_VS_USER_DATA_0,shadow_vb_v,4);
+    if (g_model.enabled) {
+        /* vs_model_shadow: V# + M in s[0:15]; v0-v47, s0-s15 + VCC = 0x8B. */
+        uint64_t a = (uint64_t)(uintptr_t)g_model.vs_shadow;
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x8Bu, (16u << 1)};
+        pm4_set_sh_regs(b, SH_VS_PGM_LO, r, 4);
+        uint32_t ud[16];
+        my_memcpy(ud, shadow_vb_v, 16);
+        my_memcpy(ud + 4, g_model.m, 48);
+        pm4_set_sh_regs(b, SH_VS_USER_DATA_0, ud, 16);
+    } else {
+        pm4_set_sh_regs(b, SH_VS_USER_DATA_0, shadow_vb_v, 4);
+    }
     if (is_indexed && ib_ptr && num_indices > 0) {
         pm4_index_type(b, 1);
         pm4_draw_index_2(b, (uint32_t)num_indices,
                          (uint64_t)(uintptr_t)ib_ptr, (uint32_t)num_indices);
     } else {
         pm4_draw_index_auto(b, model_verts);
+    }
+    if (g_model.enabled) {
+        uint64_t a = (uint64_t)(uintptr_t)vs;
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0xCBu, (4u << 1)};
+        pm4_set_sh_regs(b, SH_VS_PGM_LO, r, 4);
     }
 
     /* Floor as shadow caster was producing severe shadow acne — every floor
@@ -2417,102 +2487,35 @@ int main(void) {
        Shadow VS reads from V# base + 0x00 (same as normal VS), but we swap
        what's at that offset for the shadow pass. */
 
-    /* Try loading BMP texture, fallback to logo */
-    void *tex = 0; int tex_w = LOGO_WIDTH, tex_h = LOGO_HEIGHT;
+    /* Background music: bgm.wav (tools/make_bgm.py), looped on its own thread
+       from here on - through the loading screen. ONION: the thread reads it on
+       the CPU. */
     {
-        BmpTexture bmp;
-        const char *bmp_paths[] = { DATA_DIR_NEW "texture.bmp", DATA_DIR_NEW "model.bmp",
-                                    DATA_DIR_OLD "texture.bmp", DATA_DIR_OLD "model.bmp", 0 };
-        for (int bi = 0; bmp_paths[bi]; bi++) {
-            if (bmp_load(bmp_paths[bi], gpu_alloc, &bmp, 1) == 0) {
-                tex = bmp.pixels; tex_w = bmp.width; tex_h = bmp.height;
-                break;
-            }
-        }
-    }
-    if (!tex) {
-        /* No texture file on disk — fall back to the embedded shadPS4 logo
-           (256×256 RGBA8 from logo_texture.h). Previous code created a 1×1
-           white pixel here, which is why the cube rendered solid white when
-           texture.bmp was missing. */
-        tex = gpu_alloc(LOGO_SIZE, 0x1000);
-        my_memcpy(tex, logo_rgba, LOGO_SIZE);
-        tex_w = LOGO_WIDTH; tex_h = LOGO_HEIGHT;
+        int r = bgm_start(ASSET_DIR "sound/bgm/bgm.wav", cpu_alloc);
+        printf("bgm: %d\n", r);
     }
 
-    /* Floor albedo texture. */
-    void *floor_albedo_tex = 0;
-    int floor_tex_w = 1, floor_tex_h = 1, floor_tex_levels = 1;
-    {
-        BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_albedo.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0 ||
-            bmp_load(asset_path(2,"floor_albedo.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0)) {
-            floor_albedo_tex = bmp.pixels;
-            floor_tex_w = bmp.width; floor_tex_h = bmp.height; floor_tex_levels = bmp.levels;
-        }
+    /* Textures: DDS from the package (tools/make_textures.py, src/dds_loader.h):
+       images/floor/ and images/cube/ hold albedo (BC1 sRGB; the logo stays
+       RGBA8 sRGB), normal (BC5: x, y; the shaders rebuild z; stored in the
+       engine convention +u / +v) and height (BC4, stretched to 0..1). Fallbacks
+       keep everything drawable: the embedded logo for the cube, mid-grey for the
+       floor, a flat normal and a white height (= parallax off). */
+    static const unsigned char k_grey[4] = {128, 128, 128, 255};
+    static const unsigned char k_flat[4] = {128, 128, 255, 255};
+    static const unsigned char k_white[4] = {255, 255, 255, 255};
+    Tex cube_alb = load_tex(ASSET_DIR "images/cube/albedo.dds", k_white, 9);
+    if (cube_alb.err) {
+        cube_alb.pixels = gpu_alloc(LOGO_SIZE, 0x1000);
+        my_memcpy(cube_alb.pixels, logo_rgba, LOGO_SIZE);
+        cube_alb.w = LOGO_WIDTH;
+        cube_alb.h = LOGO_HEIGHT;
     }
-    if (!floor_albedo_tex) {
-        /* Fallback to mid-grey 1×1 so floor still renders something visible. */
-        floor_albedo_tex = gpu_alloc(4, 0x1000);
-        unsigned char *p = (unsigned char*)floor_albedo_tex;
-        p[0]=128; p[1]=128; p[2]=128; p[3]=255;
-        floor_tex_w = 1; floor_tex_h = 1;
-    }
-
-    /* Floor normal map texture from BMP. Tangent-space normal map: each
-       pixel encodes (n.x*0.5+0.5, n.y*0.5+0.5, n.z*0.5+0.5) in RGB.
-       Floor PS samples this at desc[72..79] and uses it for per-fragment
-       Lambert lighting.
-
-       Falls back to a 1×1 "no-bump" texel encoding the unit Z normal
-       (0.5, 0.5, 1.0 → byte (128, 128, 255)) so floor still renders if
-       the BMP file is missing. */
-    void *floor_normal_tex = 0;
-    int floor_nrm_w = 1, floor_nrm_h = 1, floor_nrm_levels = 1;
-    {
-        BmpTexture bmp;
-        if ((bmp_load(asset_path(0,"floor_normal.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0 ||
-            bmp_load(asset_path(2,"floor_normal.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) == 0)) {
-            floor_normal_tex = bmp.pixels;
-            floor_nrm_w = bmp.width; floor_nrm_h = bmp.height; floor_nrm_levels = bmp.levels;
-        }
-    }
-    if (!floor_normal_tex) {
-        floor_normal_tex = gpu_alloc(4, 0x1000);
-        unsigned char *p = (unsigned char*)floor_normal_tex;
-        p[0]=128; p[1]=128; p[2]=255; p[3]=255;   /* flat tangent normal */
-        floor_nrm_w = 1; floor_nrm_h = 1;
-    }
-
-    /* Floor height map (floor_displacement.bmp, R = height) for parallax
-       occlusion mapping in ps_floor, on the same UVs as the albedo / normal map.
-       GPU texture with mips; the loader records the R range and ps_floor
-       normalises with (h - lo) / (hi - lo). Missing: 1x1 white, no parallax. */
-    void* floor_height_tex = 0;
-    int floor_hgt_w = 1, floor_hgt_h = 1, floor_hgt_levels = 1;
-    int floor_hgt_lo = 0, floor_hgt_hi = 0;
-    {
-        BmpTexture bmp;
-        if (bmp_load(asset_path(0, "floor_displacement.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) ==
-                0 ||
-            bmp_load(asset_path(2, "floor_displacement.bmp"), gpu_alloc, &bmp, FLOOR_TEX_MIPS) ==
-                0) {
-            floor_height_tex = bmp.pixels;
-            floor_hgt_w = bmp.width;
-            floor_hgt_h = bmp.height;
-            floor_hgt_levels = bmp.levels;
-            floor_hgt_lo = bmp.rmin;
-            floor_hgt_hi = bmp.rmax;
-        }
-    }
-    if (!floor_height_tex) {
-        floor_height_tex = gpu_alloc(4, 0x1000);
-        unsigned char* p = (unsigned char*)floor_height_tex;
-        p[0] = 255;
-        p[1] = 255;
-        p[2] = 255;
-        p[3] = 255;
-    }
+    Tex cube_nrm = load_tex(ASSET_DIR "images/cube/normal.dds", k_flat, 0);
+    Tex cube_hgt = load_tex(ASSET_DIR "images/cube/height.dds", k_white, 0);
+    Tex floor_alb = load_tex(ASSET_DIR "images/floor/albedo.dds", k_grey, 9);
+    Tex floor_nrm = load_tex(ASSET_DIR "images/floor/normal.dds", k_flat, 0);
+    Tex floor_hgt = load_tex(ASSET_DIR "images/floor/height.dds", k_white, 0);
 
     /* desc buffer layout:
          desc[0..7]    texture T#              (byte 0..31)
@@ -2529,11 +2532,11 @@ int main(void) {
        512 bytes = 128 dwords gives headroom. */
     /* Also ONION: the descriptor table is rebuilt by the CPU and read by the
        GPU in the same frame. */
-    uint32_t *desc=(uint32_t*)gpu_alloc_typed(512,0x100,MEM_TYPE_ONION);
+    uint32_t* desc = (uint32_t*)gpu_alloc_typed(
+        1024, 0x100, MEM_TYPE_ONION); /* 256 dwords: ps_model uses up to desc[151] */
     if (!desc) FATAL_EXIT("descriptor alloc failed");
     g_gpu_ts = (volatile uint64_t *)gpu_alloc_typed(0x1000, 0x100, MEM_TYPE_ONION);
-    build_tsharp(desc,tex,tex_w,tex_h);
-    desc[1] |= 9u << 26;          /* NUM_FORMAT SRGB: colour texture -> linear on sampling */
+    build_tsharp_tex(desc, &cube_alb); /* sRGB: colour texture -> linear on sampling */
     build_ssharp_aniso(desc+8);   /* 16× anisotropic — used by cube + floor */
     /* Second sampler at desc[80..83]: PCF depth-compare sampler for the floor
        PS (CAFE100C) projective shadow lookup. Works in tandem with:
@@ -2584,44 +2587,48 @@ int main(void) {
         build_tsharp(desc + 40, shadow_depth, SHADOW_W, SHADOW_H);
     }
 
-    /* Floor PBR T#s at desc[64..71] (albedo) and desc[72..79] (normal).
-       BMP files are LINEAR pixel arrays. Use tile_mode=8 (DisplayLinearAligned)
-       per shadPS4's TileMode enum in tiling.h. Earlier I used 13 (Thin1DThin, a
-       TILED layout) which caused shadPS4 to de-tile nonexistent tiles — that's
-       why the texture looked streaked/washed.
-       build_tsharp already sets 8 so no patching needed. */
-    build_tsharp_levels(desc + 64, floor_albedo_tex, floor_tex_w, floor_tex_h, floor_tex_levels);
-    desc[65] |= 9u << 26; /* albedo: NUM_FORMAT SRGB (the normal map stays UNORM data) */
-    /* Floor normal map at desc[72..79] — procedural 64x64 tangent-space normals */
-    build_tsharp_levels(desc + 72, floor_normal_tex, floor_nrm_w, floor_nrm_h, floor_nrm_levels);
-    /* ps_floor parallax + fog: height T# desc[92], S# desc[100], camera desc[104]
-       (xyz per frame, w = log2(FOG_MIN)), then (pom_scale, fog rate, h_scale,
-       h_bias) desc[108] and (normal sign x, sign y, 1/POM_FADE, 1/DISPLAY_H)
-       desc[112]. Fog (ps_floor and ps_shader): weight = min(1, 2^(rate * d +
-       log2(FOG_MIN))) = min(1, FOG_MIN * e^(d / L)), rate = log2(1 / FOG_MIN) /
-       FLOOR_HALF: FOG_MIN at the camera, 100% at the floor edge. */
-    build_tsharp_levels(desc + 92, floor_height_tex, floor_hgt_w, floor_hgt_h, floor_hgt_levels);
+    /* Floor T#s: albedo desc[64], normal desc[72], height desc[92] (sampler desc[100]). */
+    build_tsharp_tex(desc + 64, &floor_alb);
+    build_tsharp_tex(desc + 72, &floor_nrm);
+    /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
+       then (pom_scale, fog rate, h_scale, h_bias) desc[108] and (normal sign x,
+       sign y, 1/POM_FADE, 1/DISPLAY_H) desc[112]. Fog (ps_floor, ps_shader,
+       ps_model): weight = min(1, 2^(rate * d + log2(FOG_MIN))) = min(1, FOG_MIN *
+       e^(d / L)), rate = log2(1 / FOG_MIN) / FOG_FULL. Heights arrive stretched
+       to 0..1 and normals in the engine convention (tools/make_textures.py). */
+    build_tsharp_tex(desc + 92, &floor_hgt);
     build_ssharp_height(desc + 100);
-    float nrm_sx = 1.0f, nrm_sy = 1.0f, nrm_cx = 0.0f, nrm_cy = 0.0f;
-    if (floor_hgt_hi > floor_hgt_lo && floor_nrm_w > 1 && floor_hgt_w > 1)
-        normal_map_convention((const unsigned char*)floor_normal_tex, floor_nrm_w, floor_nrm_h,
-                              (const unsigned char*)floor_height_tex, floor_hgt_w, floor_hgt_h,
-                              &nrm_sx, &nrm_sy, &nrm_cx, &nrm_cy);
     {
         float* fc = (float*)(desc + 104);
         fc[0] = 0.0f;
         fc[1] = 0.0f;
         fc[2] = 0.0f;
         fc[3] = my_log2(FOG_MIN);
-        int range = floor_hgt_hi - floor_hgt_lo;
-        fc[4] = (range > 0) ? POM_DEPTH * (FLOOR_UV_MAX / (2.0f * FLOOR_HALF)) : 0.0f;
-        fc[5] = -my_log2(FOG_MIN) / FLOOR_HALF;
-        fc[6] = (range > 0) ? 255.0f / (float)range : 0.0f;
-        fc[7] = (range > 0) ? -(float)floor_hgt_lo / (float)range : 1.0f;
-        fc[8] = nrm_sx;
-        fc[9] = nrm_sy;
+        fc[4] = floor_hgt.err ? 0.0f : POM_DEPTH * (FLOOR_UV_MAX / (2.0f * FLOOR_HALF));
+        fc[5] = -my_log2(FOG_MIN) / FOG_FULL;
+        fc[6] = floor_hgt.err ? 0.0f : 1.0f;
+        fc[7] = floor_hgt.err ? 1.0f : 0.0f;
+        fc[8] = 1.0f;
+        fc[9] = 1.0f;
         fc[10] = 1.0f / POM_FADE;
         fc[11] = 1.0f / (float)DISPLAY_H;
+    }
+    /* Model maps: normal T# desc[128] (sampler desc[8]), height T# desc[136]
+       (sampler desc[100]); constants desc[144] = (pom_scale, h_scale, h_bias,
+       relief) and desc[148] = (normal sign x, sign y, shadow offset, shadow depth
+       bias). Without a height map parallax and relief are off. */
+    build_tsharp_tex(desc + 128, &cube_nrm);
+    build_tsharp_tex(desc + 136, &cube_hgt);
+    {
+        float* mc = (float*)(desc + 144);
+        mc[0] = cube_hgt.err ? 0.0f : MODEL_POM_DEPTH;
+        mc[1] = cube_hgt.err ? 0.0f : 1.0f;
+        mc[2] = cube_hgt.err ? 1.0f : 0.0f;
+        mc[3] = cube_hgt.err ? 0.0f : MODEL_RELIEF;
+        mc[4] = 1.0f;
+        mc[5] = 1.0f;
+        mc[6] = MODEL_SHADOW_OFFSET;
+        mc[7] = MODEL_SHADOW_BIAS;
     }
 
     /* VB layout:
@@ -2751,6 +2758,12 @@ int main(void) {
         my_memcpy(dst, src, sizeof(src));
     UPLOAD_SHADER(ps_dark_gpu,          ps_dark_binary);
     UPLOAD_SHADER(ps_floor_gpu,         ps_floor_binary);
+    UPLOAD_SHADER(ps_model_gpu, ps_model_binary);
+    UPLOAD_SHADER(vs_model_gpu, vs_model_binary);
+    UPLOAD_SHADER(vs_model_shadow_gpu, vs_model_shadow_binary);
+    g_model.ps = ps_model_gpu;
+    g_model.vs = vs_model_gpu;
+    g_model.vs_shadow = vs_model_shadow_gpu;
     UPLOAD_SHADER(ps_shadow_gpu,        ps_shadow_binary);
     UPLOAD_SHADER(ps_shadow_clear_gpu,  ps_shadow_clear_binary);
     UPLOAD_SHADER(ps_blue_gpu,          ps_blue_binary);
@@ -2832,18 +2845,14 @@ int main(void) {
        Default to built-in cube (±0.4). Updated after OBJ load. */
     float g_model_cx = 0.0f, g_model_cy = 0.0f, g_model_cz = 0.0f;
     float g_model_radius = 0.8f;  /* cube radius ~0.7, round up */
+    float model_fit_radius =
+        1.0f; /* loaded model: bbox half diagonal (scaled to MODEL_FIT_RADIUS) */
 
     /* --- Load 3D model using obj_loader.h --- */
     {
-        static const char *obj_paths[] = {
-            DATA_DIR_NEW "model.obj",   DATA_DIR_OLD "model.obj",
-            DATA_DIR_NEW "mesh.obj",    DATA_DIR_OLD "mesh.obj",
-            DATA_DIR_NEW "object.obj",  DATA_DIR_OLD "object.obj",
-            DATA_DIR_NEW "scene.obj",   DATA_DIR_OLD "scene.obj",
-            DATA_DIR_NEW "bugatti.obj", DATA_DIR_OLD "bugatti.obj",
-            DATA_DIR_NEW "car.obj",     DATA_DIR_OLD "car.obj",
-            0
-        };
+        /* The prop shipped in the package (tools/gen_model.py); the loader is
+           picked by extension (.obj / .stl / .ply). */
+        static const char* obj_paths[] = {ASSET_DIR "models/cube/cube.obj", 0};
         struct LoadCtx load_ctx;
         load_ctx.vs = vs; load_ctx.ps = ps;
         load_ctx.vb_v = vb_v; load_ctx.bg_v = bg_v;
@@ -2933,6 +2942,15 @@ int main(void) {
                     g_model_radius = diag * 0.5f;
                     if (g_model_radius < 0.1f) g_model_radius = 0.1f;
                 }
+                /* The model moves like the built-in cube (vs_model transform: scaled to
+                   the cube's bounding radius, lifted to its height, same rotation), so
+                   the light-space framing is the cube's: centre 0, radius 0.8. */
+                model_fit_radius = g_model_radius;
+                g_model_cx = 0.0f;
+                g_model_cy = 0.0f;
+                g_model_cz = 0.0f;
+                g_model_radius = 0.8f;
+                g_model.enabled = 1;
                 loaded = 1;
                 model_loaded = 1;
             }
@@ -3175,36 +3193,21 @@ int main(void) {
         while (*_q)                                                                                \
             T[p++] = *_q++;                                                                        \
     } while (0)
-        TP("floor tex alb=");
-        p += lg_i64(T + p, floor_tex_w);
-        TP("x");
-        p += lg_i64(T + p, floor_tex_h);
-        TP(" levels=");
-        p += lg_i64(T + p, floor_tex_levels);
-        TP(" nrm=");
-        p += lg_i64(T + p, floor_nrm_w);
-        TP("x");
-        p += lg_i64(T + p, floor_nrm_h);
-        TP(" levels=");
-        p += lg_i64(T + p, floor_nrm_levels);
-        TP(" hgt=");
-        p += lg_i64(T + p, floor_hgt_w);
-        TP("x");
-        p += lg_i64(T + p, floor_hgt_h);
-        TP(" levels=");
-        p += lg_i64(T + p, floor_hgt_levels);
-        TP(" range=");
-        p += lg_i64(T + p, floor_hgt_lo);
-        TP("..");
-        p += lg_i64(T + p, floor_hgt_hi);
-        TP(" nrm_sign=");
-        p += lg_i64(T + p, (long long)nrm_sx);
-        TP(",");
-        p += lg_i64(T + p, (long long)nrm_sy);
-        TP(" corr_x1000=");
-        p += lg_i64(T + p, (long long)(nrm_cx * 1000.0f));
-        TP(",");
-        p += lg_i64(T + p, (long long)(nrm_cy * 1000.0f));
+        const Tex* tl[6] = {&floor_alb, &floor_nrm, &floor_hgt, &cube_alb, &cube_nrm, &cube_hgt};
+        static const char* tn[6] = {"floor alb=", " nrm=", " hgt=", " cube alb=", " nrm=", " hgt="};
+        TP("textures (dds_load, size, levels, format): ");
+        for (int k = 0; k < 6; k++) {
+            TP(tn[k]);
+            p += lg_i64(T + p, tl[k]->err);
+            TP(",");
+            p += lg_i64(T + p, tl[k]->w);
+            TP("x");
+            p += lg_i64(T + p, tl[k]->h);
+            TP(",");
+            p += lg_i64(T + p, tl[k]->levels);
+            TP(",");
+            p += lg_i64(T + p, tl[k]->dfmt);
+        }
         TP("\n");
 #undef TP
         trace_line(T, (unsigned long)p);
@@ -3387,6 +3390,19 @@ int main(void) {
                Lifting the center to Y=0.4 puts the lowest corner at ~Y=-0.29,
                clear of the floor. */
             const float cube_world_y = 0.4f;
+            if (model_loaded) {
+                /* Model transform for vs_model / vs_model_shadow: the cube's motion
+                   (ROTATE_XY below: yaw, then pitch) at the cube's size and height,
+                   M = T(0, cube_world_y, 0) * R * s. */
+                float sc = MODEL_FIT_RADIUS / model_fit_radius;
+                const float R[3][3] = {
+                    {cy_, 0.0f, sy_}, {sx_ * sy_, cx_, -sx_ * cy_}, {-cx_ * sy_, sx_, cx_ * cy_}};
+                for (int row = 0; row < 3; row++) {
+                    for (int col = 0; col < 3; col++)
+                        g_model.m[row * 4 + col] = R[row][col] * sc;
+                    g_model.m[row * 4 + 3] = (row == 1) ? cube_world_y : 0.0f;
+                }
+            }
             float *cb = (float*)((char*)vb + CUBE_DATA_OFF);
             /* Only the built-in cube: with a model loaded, vb + CUBE_DATA_OFF is the
                model's first 36 vertices, and rewriting them drew the cube inside

@@ -1,3 +1,4 @@
+#include "tangent.h"
 /* stl_loader.h — Binary + ASCII STL loader
  * Produces same output as obj_loader: smooth vertex normals, VB at OBJ_DATA_OFF
  *
@@ -85,6 +86,18 @@ int stl_load_binary(const char* path, void* (*alloc_fn)(unsigned long, unsigned 
             nl=obj_sqrtf(nx*nx+ny*ny+nz*nz);
         }
         if (nl>1e-6f){nx/=nl;ny/=nl;nz/=nl;}
+        /* No UVs: tangent perpendicular to the face normal (tangent.h). */
+        float tn[3], tg[3];
+        tn[0] = nx;
+        tn[1] = ny;
+        tn[2] = nz;
+        if (nl > 1e-6f)
+            tangent_perp(tn, tg);
+        else {
+            tg[0] = 1.0f;
+            tg[1] = 0.0f;
+            tg[2] = 0.0f;
+        }
 
         for (int v = 0; v < 3; v++) {
             float px = tri[3+v*3], py = tri[4+v*3], pz = tri[5+v*3];
@@ -92,8 +105,14 @@ int stl_load_binary(const char* path, void* (*alloc_fn)(unsigned long, unsigned 
             if(px>maxx)maxx=px; if(py>maxy)maxy=py; if(pz>maxz)maxz=pz;
             int idx = (t*3+v) * OBJ_STRIDE;
             verts[idx]=px; verts[idx+1]=py; verts[idx+2]=pz; verts[idx+3]=1;
-            verts[idx+4]=nx; verts[idx+5]=ny; verts[idx+6]=nz; verts[idx+7]=0;
-            verts[idx+8]=0.8f; verts[idx+9]=0.8f; verts[idx+10]=0.8f; verts[idx+11]=1.0f;
+            verts[idx + 4] = nx;
+            verts[idx + 5] = ny;
+            verts[idx + 6] = nz;
+            verts[idx + 7] = tg[0];
+            verts[idx + 8] = 0.8f;
+            verts[idx + 9] = 0.8f;
+            verts[idx + 10] = tg[1];
+            verts[idx + 11] = tg[2];
         }
     }
 

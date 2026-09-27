@@ -85,8 +85,12 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
-	$(PKG)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
+# ---- Packaged assets: every file under assets/ ships at /app0/assets/ (tools/build_assets.py).
+#      tools/make_gp4.py declares every directory (create-gp4's fixed tree breaks nested ones). ----
+ASSETS      := $(shell find assets -type f 2>/dev/null | LC_ALL=C sort)
+
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES) $(ASSETS)
+	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) $^
 
 $(CONTENT_ID).pkg: pkg.gp4
 	$(PKG)/PkgTool.Core pkg_build $< .
