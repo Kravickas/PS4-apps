@@ -9,7 +9,7 @@
 
 Output layout:
   models/cube/cube.obj                       gen_model.py
-  images/cube/albedo.dds  normal.dds  height.dds   (logo: RGBA8, BC5, BC4)
+  images/cube/albedo.dds  normal.dds  height.dds   (logo 2048: BC1 sRGB, BC5, BC4)
   images/floor/albedo.dds normal.dds  height.dds   (BC1 sRGB, BC5, BC4)
   sound/bgm/bgm.wav                          make_bgm.py
 Needs numpy, Pillow, quicktex and ffmpeg."""
@@ -43,7 +43,7 @@ def main():
         run(os.path.join(HERE, "gen_model.py"), tmp)
         shutil.copyfile(os.path.join(tmp, "model.obj"), os.path.join(out, "models/cube/cube.obj"))
         cube = os.path.join(out, "images/cube")
-        run(tex, "albedo", os.path.join(tmp, "model.bmp"), os.path.join(cube, "albedo.dds"), "--raw")
+        run(tex, "albedo", os.path.join(tmp, "model.bmp"), os.path.join(cube, "albedo.dds"))
         run(tex, "normal", os.path.join(tmp, "model_normal.bmp"), os.path.join(cube, "normal.dds"),
             "--height", os.path.join(tmp, "model_height.bmp"))
         run(tex, "height", os.path.join(tmp, "model_height.bmp"), os.path.join(cube, "height.dds"))

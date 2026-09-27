@@ -24,3 +24,6 @@ are stored in the engine convention (+u, +v), measured against the height map.
 
 The PKG also needs sce_sys/about/right.sprx (from the OpenOrbis samples; not in
 this project).
+
+logo_2048.png: the cube prop's logo (badge + wordmark in the logo's font), the
+input of gen_model.py for the albedo, the engraving height and the normal map.

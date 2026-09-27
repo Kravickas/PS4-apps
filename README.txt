@@ -1,4 +1,43 @@
 ============================================================
+SUN / MOON  (build=sun-moon)
+============================================================
+Sun disc 15% smaller: SUN_DISC_RADIUS_PX 110 -> 93.5 (sky disc and the lens
+flare's visibility rays). Moon disc = the sun's radius (was 0.75 x radius^2):
+same apparent size - 400x smaller, 400x closer. Moonlight -10%: night light
+magnitude MOON_LIGHT 0.621 (was 0.69); the moon's placement factor (0.69) is
+unchanged. No asset changed.
+
+============================================================
+LOGO 2048 + SATIN + LENS FLARE  (build=logo-satin-flare)
+============================================================
+PS4 bc-tiled run: 15712 frames at 16.67 ms, no stall, model path on at f=120;
+floor pass ~200k GPU ticks (was ~520k with RGBA8). The staged start is removed
+(model path from the first frame again); checkpoints and rts= stay.
+(The first 2048 build used shadPS4 src/resources/shadps4.png for the badge - a
+different version: cyan triangle, teal bracket. Replaced by the original's.)
+Logo (tools/logo_2048.png, used by gen_model.py): the badge rebuilt at 1024 px
+from the original ShadPS4 logo artwork (shad.png: all four symbols azure
+(20, 159, 251), vertical linear gradient; layered coverage, crisp edges; back at
+256 px mean error 1.4/255) + "ShadPS4" set in URW
+Gothic Demi - the logo's font (Avant Garde Gothic Demi; picked by fitting 21 fonts
+to the 256 px logo: NCC 0.79, next 0.50); outline, drop shadow and badge halo
+fitted by least squares to that logo. Cube maps now 2048: albedo BC1 (49.4 dB),
+normal BC5, height BC4; engraving = distance-field bevel (10 px) on the logo
+ink, depth 25% of before (MODEL_POM_DEPTH = D_UV = 0.003125).
+Satin (ps_model, CAFE0134, RSRC1 0x318): GGX specular (MODEL_ROUGHNESS 0.45),
+Schlick-Smith visibility, Schlick Fresnel (MODEL_F0 0.04) x shadow x relief x
+sun colour, plus a sky reflection (horizon..zenith by R.y) x roughness-aware
+Fresnel. Fresnel weights 0 -> bit-identical; term vs float64 within 2.1e-6.
+Lens flare (ps_post_final, CAFE0214, RSRC1 0x148): six ghosts on the
+sun-centre axis, a horizontal streak and a halo, in linear light before the
+clamp; strength = sun colour x FLARE_STRENGTH x visibility x edge fade
+(FLARE_EDGE). Visibility (CPU, exact for this scene): 29 rays through the sun
+disc weighted by ps_dark's disc profile, against the floor as generated
+(paraboloid, +-300) and the prop's box through its transform. Strength 0 ->
+bit-identical; shader term vs float64 within 1.4e-6; occlusion test = float64
+on 200k rays; post table + 1 block (final pass dwords 28..35).
+
+============================================================
 BC TEXTURES TILED (PS4 HANG FIX)  (build=bc-tiled)
 ============================================================
 diag-model-stage trace: hang in the first frame before the model path

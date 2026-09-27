@@ -129,13 +129,14 @@
 
 /* Sun disc edge radius in pixels (1080p). The old disc was 59 px tall and
    105 px wide (NDC distance on a 16:9 screen); it is now round. */
-#define SUN_DISC_RADIUS_PX 110.0f
+#define SUN_DISC_RADIUS_PX 93.5f
 
 /* Linear HDR pipeline: the scene renders to RGBA16F, bloom runs at quarter
    resolution, the composite writes the sRGB display buffer (videoout format
    A8R8G8B8Srgb). Values are linear light; 1.0 = display white. */
 #define SUN_HDR 4.0f         /* sun disc colour x this (desc[84]) */
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
+#define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
 #define BLOOM_INTENSITY 0.25f
 #define EXPOSURE 1.0f
@@ -154,20 +155,18 @@
 /* Imported models (OBJ / STL / PLY): vs_model + ps_model, model transform on the GPU. */
 #define MODEL_FIT_RADIUS                                                                           \
     0.6928203f                    /* scaled to the built-in cube's bounding radius (0.4 * sqrt 3) */
-#define MODEL_POM_DEPTH 0.0125f   /* relief depth in UV units (= D_UV in tools/gen_model.py) */
+#define MODEL_POM_DEPTH 0.003125f  /* relief depth in UV units (= D_UV in tools/gen_model.py) */
 #define MODEL_RELIEF 1.0f         /* relief self-shadow strength */
 #define MODEL_SHADOW_OFFSET 0.02f /* shadow lookup: offset along the normal (world units) */
 #define MODEL_SHADOW_BIAS                                                                          \
     (1.5f / 255.0f) /* shadow lookup: depth bias, 1.5 steps of the 8-bit map */
-/* PS4 diagnostic (GPU hang in the first main-loop frame, CP stopped after 0x12):
-   until this frame a loaded model is drawn by the old PS4-proven path (vs_shader
-   / ps_shader, static) while the floor already samples the BC textures; from
-   this frame on vs_model / ps_model. A hang before it blames the floor, at it
-   the model path. 0 = model path from the first frame. */
-#define MODEL_PATH_FROM_FRAME 120
+#define MODEL_ROUGHNESS 0.45f /* satin finish: GGX roughness (0 mirror .. 1 matte) */
+#define MODEL_F0 0.04f        /* Fresnel reflectance at normal incidence (paint / plastic) */
+#define FLARE_STRENGTH 1.0f   /* lens flare: 0 off; x sun colour x visibility x edge fade */
+#define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "bc-tiled"
+#define BUILD_TAG "logo-badge-orig"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -400,6 +399,12 @@ static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
 static uint32_t* g_post_tab = 0;
+/* Prop box for the lens flare occlusion test: model-space bounds and the world
+   transform (3x4 rows) of the loaded model, or of the built-in cube (+-0.4). */
+static float g_prop_lo[3] = {-0.4f, -0.4f, -0.4f};
+static float g_prop_hi[3] = {0.4f, 0.4f, 0.4f};
+static float g_prop_m[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                             0.0f, 0.4f, 0.0f, 0.0f, 1.0f, 0.0f};
 static void* g_ps_post_down_gpu = 0;
 static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
@@ -806,6 +811,96 @@ static void build_static_vb(float* vb) {
     }
 }
 
+/* Lens flare occlusion: does the ray o + t d (t > 0) hit the floor or the prop?
+   Floor as generated: y = -0.5 - (x^2 + z^2) / 40000 over +-FLOOR_HALF, so
+   g(t) = c + b t + a t^2 with a = (dx^2 + dz^2) / 40000, b = dy + (ox dx + oz dz) /
+   20000, c = oy + 0.5 + (ox^2 + oz^2) / 40000 (a ~ 1e-5: roots in the stable form
+   q = -(b + sign(b) sqrt(b^2 - 4ac)) / 2, t = q / a, c / q). Prop: the ray in
+   model space (A^-1 (o - t), A^-1 d, A = the 3x3 of g_prop_m) against the bounds
+   (slabs). */
+static int flare_ray_blocked(const float* o, const float* d) {
+    float a = (d[0] * d[0] + d[2] * d[2]) / 40000.0f;
+    float b = d[1] + (o[0] * d[0] + o[2] * d[2]) / 20000.0f;
+    float c = o[1] + 0.5f + (o[0] * o[0] + o[2] * o[2]) / 40000.0f;
+    float disc = b * b - 4.0f * a * c;
+    if (disc >= 0.0f) {
+        float q = -0.5f * (b + (b >= 0.0f ? my_sqrt(disc) : -my_sqrt(disc)));
+        float r[2] = {a > 0.0f ? q / a : -1.0f, q != 0.0f ? c / q : -1.0f};
+        for (int k = 0; k < 2; k++) {
+            if (r[k] <= 0.0f)
+                continue;
+            float x = o[0] + r[k] * d[0], z = o[2] + r[k] * d[2];
+            if (x >= -FLOOR_HALF && x <= FLOOR_HALF && z >= -FLOOR_HALF && z <= FLOOR_HALF)
+                return 1;
+        }
+    }
+    const float* m = g_prop_m;
+    float c00 = m[5] * m[10] - m[6] * m[9], c01 = m[6] * m[8] - m[4] * m[10];
+    float c02 = m[4] * m[9] - m[5] * m[8];
+    float det = m[0] * c00 + m[1] * c01 + m[2] * c02;
+    if (det == 0.0f)
+        return 0;
+    float inv[9] = {c00, m[2] * m[9] - m[1] * m[10], m[1] * m[6] - m[2] * m[5],
+                    c01, m[0] * m[10] - m[2] * m[8], m[2] * m[4] - m[0] * m[6],
+                    c02, m[1] * m[8] - m[0] * m[9],  m[0] * m[5] - m[1] * m[4]};
+    float p[3] = {o[0] - m[3], o[1] - m[7], o[2] - m[11]}, po[3], dm[3];
+    for (int k = 0; k < 3; k++) {
+        po[k] = (inv[k * 3] * p[0] + inv[k * 3 + 1] * p[1] + inv[k * 3 + 2] * p[2]) / det;
+        dm[k] = (inv[k * 3] * d[0] + inv[k * 3 + 1] * d[1] + inv[k * 3 + 2] * d[2]) / det;
+    }
+    float t0 = 0.0f, t1 = 1e30f;
+    for (int k = 0; k < 3; k++) {
+        if (dm[k] == 0.0f) {
+            if (po[k] < g_prop_lo[k] || po[k] > g_prop_hi[k])
+                return 0;
+            continue;
+        }
+        float ta = (g_prop_lo[k] - po[k]) / dm[k], tb = (g_prop_hi[k] - po[k]) / dm[k];
+        if (ta > tb) {
+            float tt = ta;
+            ta = tb;
+            tb = tt;
+        }
+        if (ta > t0)
+            t0 = ta;
+        if (tb < t1)
+            t1 = tb;
+        if (t0 > t1)
+            return 0;
+    }
+    return 1;
+}
+
+/* Visible fraction of the sun disc: 29 rays from the camera through a 7 x 7 grid
+   inside the disc (SUN_DISC_RADIUS_PX around NDC (nx, ny)), weighted by ps_dark's
+   disc profile (1 - d^2 / r^2)^2. Rays from build_mvp's basis: d = f + r nx aspect /
+   fov + u ny / fov. */
+static float flare_visibility(float yaw, float pitch, const float* cam, float nx, float ny) {
+    float sy = my_sin(yaw), cy = my_cos(yaw), sp = my_sin(pitch), cp = my_cos(pitch);
+    const float f[3] = {sy * cp, -sp, -cy * cp}, r[3] = {cy, 0.0f, sy},
+                u[3] = {sy * sp, cp, -cy * sp};
+    float aspect = (float)DISPLAY_W / (float)DISPLAY_H;
+    float fov = my_cos(0.3054f) / my_sin(0.3054f);
+    float rn = SUN_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
+    float wsum = 0.0f, vis = 0.0f;
+    for (int j = -3; j <= 3; j++)
+        for (int i = -3; i <= 3; i++) {
+            int q = i * i + j * j;
+            if (q >= 9)
+                continue;
+            float w = 1.0f - (float)q / 9.0f;
+            w *= w;
+            float px = nx + (float)i / 3.0f * rn / aspect, py = ny + (float)j / 3.0f * rn;
+            float d[3];
+            for (int k = 0; k < 3; k++)
+                d[k] = f[k] + r[k] * px * aspect / fov + u[k] * py / fov;
+            wsum += w;
+            if (!flare_ray_blocked(cam, d))
+                vis += w;
+        }
+    return vis / wsum;
+}
+
 /* FPS free-fly camera: position + yaw/pitch → view-projection matrix */
 static void build_mvp(float *mvp, float yaw, float pitch,
                       float cx, float cy, float cz) {
@@ -1203,7 +1298,7 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
     f[3] = d;
 }
 static void build_post_tables(uint32_t* tab) {
-    my_memset(tab, 0, POST_PASSES * 32 * 4);
+    my_memset(tab, 0, (POST_PASSES + 1) * 32 * 4); /* + final pass dwords 32..63 (flare) */
     uint32_t* t = tab;
     for (int i = 0; i < BLOOM_LEVELS; i++, t += 32) {
         float w = g_bloom_w[i], h = g_bloom_h[i];
@@ -1309,7 +1404,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
-#define PS_POST_FINAL_RSRC1 ((4u << 6) | 5u) /* v21, s31 + VCC */
+#define PS_POST_FINAL_RSRC1 ((5u << 6) | 8u) /* v32, s39 + VCC (lens flare) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -1602,8 +1697,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
       build_vsharp(cube_v,(char*)vb_base+MVP_OFF,(uint32_t)(vb_total > MVP_OFF ? vb_total - MVP_OFF : VERT_BUF_SIZE - MVP_OFF));
       if (g_model.enabled) {
           /* vs_model: V# + M in s[0:15] (16 user SGPRs); v0-v48, s0-s15 + VCC ->
-             52 VGPRs, 24 SGPRs = 0x8C. ps_model: v0-v97, s0-s87 + VCC -> 100
-             VGPRs, 96 SGPRs = 0x2D8. Three params: param2 = tangent, handedness. */
+             52 VGPRs, 24 SGPRs = 0x8C. ps_model: v0-v97, s0-s95 + VCC -> 100
+             VGPRs, 104 SGPRs = 0x318. Three params: param2 = tangent, handedness. */
           uint64_t a = (uint64_t)(uintptr_t)g_model.vs;
           uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x8Cu, (16u << 1)};
           pm4_set_sh_regs(b, SH_VS_PGM_LO, r, 4);
@@ -1612,7 +1707,7 @@ static uint32_t build_dcb(struct PM4Builder *b,
           my_memcpy(ud + 4, g_model.m, 48);
           pm4_set_sh_regs(b, SH_VS_USER_DATA_0, ud, 16);
           a = (uint64_t)(uintptr_t)g_model.ps;
-          uint32_t p[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x2D8u, (2u << 1)};
+          uint32_t p[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x318u, (2u << 1)};
           pm4_set_sh_regs(b, SH_PS_PGM_LO, p, 4);
           pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 2u << 1); /* three params */
           pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0 + 2, 2);
@@ -2651,6 +2746,19 @@ int main(void) {
         mc[5] = 1.0f;
         mc[6] = MODEL_SHADOW_OFFSET;
         mc[7] = MODEL_SHADOW_BIAS;
+        /* Satin finish (ps_model desc[152..157]): a = roughness^2; a^2, k = a / 2, sun
+           Fresnel F0 + (1 - F0) (1 - V.H)^5, sky Fresnel F0 + (max(1 - r, F0) - F0)
+           (1 - N.V)^5. */
+        float a = MODEL_ROUGHNESS * MODEL_ROUGHNESS;
+        float g = 1.0f - MODEL_ROUGHNESS;
+        mc[8] = a * a;
+        mc[9] = 0.5f * a;
+        mc[10] = MODEL_F0;
+        mc[11] = 1.0f - MODEL_F0;
+        mc[12] = MODEL_F0;
+        mc[13] = (g > MODEL_F0 ? g : MODEL_F0) - MODEL_F0;
+        mc[14] = 0.0f;
+        mc[15] = 0.0f;
     }
 
     /* VB layout:
@@ -2736,7 +2844,7 @@ int main(void) {
         g_bloom_b[i] = gpu_alloc(sz, 0x10000);
         post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
     }
-    g_post_tab = (uint32_t*)gpu_alloc_typed(POST_PASSES * 32 * 4, 0x100, MEM_TYPE_ONION);
+    g_post_tab = (uint32_t*)gpu_alloc_typed((POST_PASSES + 1) * 32 * 4, 0x100, MEM_TYPE_ONION);
     if (post_ok && g_post_tab)
         build_post_tables(g_post_tab);
     else
@@ -2978,6 +3086,12 @@ int main(void) {
                     g_model_cx = (minx + maxx) * 0.5f;
                     g_model_cy = (miny + maxy) * 0.5f;
                     g_model_cz = (minz + maxz) * 0.5f;
+                    g_prop_lo[0] = minx;
+                    g_prop_lo[1] = miny;
+                    g_prop_lo[2] = minz;
+                    g_prop_hi[0] = maxx;
+                    g_prop_hi[1] = maxy;
+                    g_prop_hi[2] = maxz;
                     float dx = maxx - minx, dy = maxy - miny, dz = maxz - minz;
                     float diag = my_sqrt(dx*dx + dy*dy + dz*dz);
                     g_model_radius = diag * 0.5f;
@@ -2991,7 +3105,8 @@ int main(void) {
                 g_model_cy = 0.0f;
                 g_model_cz = 0.0f;
                 g_model_radius = 0.8f;
-                /* g_model.enabled is switched on in the frame loop (MODEL_PATH_FROM_FRAME). */
+                g_model.enabled = 1;
+                trace_msg("model draw path enabled (vs_model / ps_model)\n");
                 loaded = 1;
                 model_loaded = 1;
             }
@@ -3449,6 +3564,18 @@ int main(void) {
                     g_model.m[row * 4 + 3] = (row == 1) ? cube_world_y : 0.0f;
                 }
             }
+            {
+                /* The prop's transform for the lens flare occlusion test (model: M above;
+                   built-in cube: the same motion at scale 1). */
+                float sc = model_loaded ? MODEL_FIT_RADIUS / model_fit_radius : 1.0f;
+                const float R[3][3] = {
+                    {cy_, 0.0f, sy_}, {sx_ * sy_, cx_, -sx_ * cy_}, {-cx_ * sy_, sx_, cx_ * cy_}};
+                for (int row = 0; row < 3; row++) {
+                    for (int col = 0; col < 3; col++)
+                        g_prop_m[row * 4 + col] = R[row][col] * sc;
+                    g_prop_m[row * 4 + 3] = (row == 1) ? cube_world_y : 0.0f;
+                }
+            }
             float *cb = (float*)((char*)vb + CUBE_DATA_OFF);
             /* Only the built-in cube: with a model loaded, vb + CUBE_DATA_OFF is the
                model's first 36 vertices, and rewriting them drew the cube inside
@@ -3564,12 +3691,12 @@ int main(void) {
            (sun_y becomes >=0 always after the swap).
 
            Sun magnitude ramp scales the Lambert dot product in cube/floor PS:
-             night                   → 0.60  (moon, 20% brighter than old 0.50)
-             horizon (sun_y=0)       → 0.60  (matches night for seamless transition)
-             rising 0 → sin(20°)=0.342 → linear ramp 0.60 → 1.20
-             above 20° elevation     → 1.20  (peak day, +20% boost over old 1.00)
+             night                   → MOON_LIGHT 0.621 (moon)
+             horizon (sun_y=0)       → 0.98
+             rising 0 → sun_y 0.15   → linear ramp 0.98 → 1.38
+             above sun_y 0.15        → 1.38  (peak day)
 
-           Threshold lowered to 20° so the sun stays at full peak brightness
+           Peak from sun_y 0.15 (8.6°) so the sun stays at full brightness
            for nearly all of the day. Darkening only kicks in during the
            final ~1-2 hours before sunset (or first 1-2 after sunrise). */
         float orig_sun_y = sun_y;
@@ -3579,8 +3706,10 @@ int main(void) {
             sun_x = -sun_x;
             sun_y = -sun_y;
             sun_z = -sun_z;
-            /* Night: 0.69 (was 0.60, +15% brighter as requested) */
-            sun_x *= 0.69f; sun_y *= 0.69f; sun_z *= 0.69f;
+            /* Night: MOON_LIGHT (0.621 = the previous 0.69 - 10%) */
+            sun_x *= MOON_LIGHT;
+            sun_y *= MOON_LIGHT;
+            sun_z *= MOON_LIGHT;
         } else {
             /* Day/twilight: ramp 0.98 at horizon → 1.38 at sun_y >= sin(8.6°) = 0.15.
                Boosted 15% from 0.85→1.20 to 0.98→1.38. Dimming only kicks in at
@@ -3751,7 +3880,8 @@ int main(void) {
            instead of vanishing when its centre crosses the horizon. Lighting
            and shadows stay with the body above the horizon (desc[12], light
            MVP). Placement as before: sun = direction x the day magnitude ramp,
-           moon = anti-sun x 0.69, both x 100. ps_dark: f = clamp(1 - d^2 /
+           moon = anti-sun x 0.69, both x 100; the moon disc has the sun's radius (same
+           apparent size: 400x smaller, 400x closer). ps_dark: f = clamp(1 - d^2 /
            radius^2, 0, 1)^2, d in aspect-corrected NDC (x * W/H, y). */
         {
             float *mvp = (float*)((char*)vb + MVP_OFF);
@@ -3763,7 +3893,7 @@ int main(void) {
                 mag = 1.38f;
             const float body[2][4] = {
                 {sun_dx * mag, sun_dy * mag, sun_dz * mag, sun_r * sun_r},
-                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, sun_r * sun_r * 0.75f}};
+                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, sun_r * sun_r}};
             for (int k = 0; k < 2; k++) {
                 float bx = body[k][0] * 100, by = body[k][1] * 100, bz = body[k][2] * 100;
                 float cx = mvp[0] * bx + mvp[1] * by + mvp[2] * bz + mvp[3];
@@ -3798,6 +3928,38 @@ int main(void) {
             mc[1] = srgb_to_linear(0.64f) * MOON_HDR;
             mc[2] = srgb_to_linear(0.84f) * MOON_HDR;
             mc[3] = 0.0f;
+        }
+        /* Lens flare (ps_post_final, final pass table dwords 28..32): sun position
+           (u, v: pixel / size, v down) and strength = sun colour x FLARE_STRENGTH x
+           visible fraction of the disc x edge fade. desc[16..17] = sun NDC x aspect, y
+           (99 behind the camera); desc[84..86] = sun colour x SUN_HDR. */
+        if (g_post_tab) {
+            float* ft = (float*)(g_post_tab + (POST_PASSES - 1) * 32 + 28);
+            const float* sd = (const float*)(desc + 16);
+            const float* scl = (const float*)(desc + 84);
+            float nx = sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), ny = sd[1];
+            float fu = 0.5f + 0.5f * nx, fv = 0.5f - 0.5f * ny, k = 0.0f;
+            float e = fu < 1.0f - fu ? fu : 1.0f - fu;
+            if (fv < e)
+                e = fv;
+            if (1.0f - fv < e)
+                e = 1.0f - fv;
+            if (sd[0] < 90.0f && e > 0.0f) {
+                float fade = e / FLARE_EDGE;
+                if (fade > 1.0f)
+                    fade = 1.0f;
+                const float cam[3] = {cam_x, cam_y, cam_z};
+                k = FLARE_STRENGTH * fade * fade * (3.0f - 2.0f * fade) *
+                    flare_visibility(cam_yaw, cam_pitch, cam, nx, ny) / SUN_HDR;
+            }
+            ft[0] = fu;
+            ft[1] = fv;
+            ft[2] = k * scl[0];
+            ft[3] = k * scl[1];
+            ft[4] = k * scl[2];
+            ft[5] = 0.0f;
+            ft[6] = 0.0f;
+            ft[7] = 0.0f;
         }
 
         /* Build main DCB (samples shadow_depth but doesn't write it).
@@ -3877,18 +4039,6 @@ int main(void) {
            skipped it would otherwise never update and the checkpoint would look
            frozen for the wrong reason. */
         g_cp_frame = frame;
-        /* MODEL_PATH_FROM_FRAME: see its definition (PS4 hang diagnostic). */
-        if (model_loaded && !g_model.enabled && frame >= MODEL_PATH_FROM_FRAME) {
-            g_model.enabled = 1;
-            char L[80];
-            int p = 0;
-            const char* m = "model draw path enabled (vs_model / ps_model) at f=";
-            while (*m)
-                L[p++] = *m++;
-            p += lg_i64(L + p, (long long)frame);
-            L[p++] = '\n';
-            trace_line(L, (unsigned long)p);
-        }
 
         uint32_t shadow_sz = 0;
         if (shadow_depth && g_shadow_ready) {

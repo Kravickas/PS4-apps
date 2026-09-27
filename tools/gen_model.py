@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Generates the ShadCube4 prop into OUT_DIR (default .): model.obj (rounded
 cube, per-vertex normals, logo UVs on every face), model.bmp (the logo from
-src/logo_texture.h), model_height.bmp (engraved logo: 1 - ink coverage, smoothed)
-and model_normal.bmp (from the height at relief depth D_UV, which must equal
-MODEL_POM_DEPTH in src/main.c).  Needs numpy and Pillow.
+tools/logo_2048.png: the ShadPS4 badge + "ShadPS4" in URW Gothic Demi, the
+logo's font), model_height.bmp (engraved logo: distance-field bevel on
+the logo ink) and model_normal.bmp (from the height at relief depth D_UV, which must
+equal MODEL_POM_DEPTH in src/main.c).  Needs numpy, scipy and Pillow.
     python3 gen_model.py [OUT_DIR]"""
 import numpy as np, math, struct, os, re, sys
 from PIL import Image
 H, R, S = 0.9, 0.09, 4          # half size, edge radius, bevel segments per side
-D_UV = 0.0125                   # relief depth in UV units (must equal MODEL_POM_DEPTH in main.c)
-MAP = 512                       # height / normal map size
+D_UV = 0.003125                  # relief depth in UV units (must equal MODEL_POM_DEPTH in main.c)
+MAP = 2048                      # logo, height and normal map size
+BEVEL_PX = 10                   # engraving wall width at MAP (distance-field bevel)
 
 def grid_axis():
     inner = H - R
@@ -62,40 +64,38 @@ def write_bmp24(path, rgb_top_down):
     info = struct.pack('<IiiHHIIiiII', 40, w, h, 1, 24, 0, len(data), 2835, 2835, 0, 0)
     open(path, 'wb').write(hdr + info + data)
 
-def maps(logo):
-    rgb = logo[:, :, :3].astype(np.float64) / 255.0
-    big = np.asarray(Image.fromarray(logo[:, :, :3]).resize((MAP, MAP), Image.BICUBIC), np.float64) / 255.0
-    lum = 0.2126 * big[..., 0] + 0.7152 * big[..., 1] + 0.0722 * big[..., 2]
-    x = np.clip((1.0 - lum - 0.08) / (0.45 - 0.08), 0, 1); m = x * x * (3 - 2 * x)      # ink coverage
-    k = np.arange(-6, 7); g = np.exp(-k * k / (2 * 1.5 ** 2)); g /= g.sum()           # Gaussian sigma 1.5 px
-    for axis in (0, 1):
-        m = sum(g[i] * np.roll(m, k[i], axis=axis) for i in range(len(k)))
-    h = 1.0 - m                    # engraved: background 1 (flush with the face), logo carved in
-    # rows top-down in the image; texture v = up, so d/dv = -(d/drow)
+def maps():
+    """Logo (tools/logo_2048.png), engraving height and normal map at MAP.
+    Height: the logo ink (dark parts: outline, badge), binarised at its half-ink contour
+    at 2*MAP, carved with a distance-field bevel (smoothstep over BEVEL_PX) and box-filtered
+    to MAP; background 1 (flush with the face), ink carved in. Normals from the height at
+    depth D_UV."""
+    from scipy import ndimage
+    img = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_2048.png")).convert("RGB")
+    rgb = np.asarray(img.resize((MAP, MAP), Image.LANCZOS) if img.size != (MAP, MAP) else img)
+    y = np.asarray(img.convert("L").resize((2 * MAP, 2 * MAP), Image.BICUBIC), np.float64) / 255.0
+    x = np.clip((1.0 - y - 0.08) / (0.45 - 0.08), 0, 1)
+    ink = x * x * (3 - 2 * x)                                   # dark parts of the logo
+    inside = ink > 0.5
+    d = ndimage.distance_transform_edt(inside)                  # px (at 2*MAP) to the ink edge
+    x = np.clip(d / (2.0 * BEVEL_PX), 0, 1)
+    h2 = 1.0 - x * x * (3 - 2 * x)
+    h = h2.reshape(MAP, 2, MAP, 2).mean((1, 3))
     dhdu = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * (MAP / 2.0)
-    dhdv = -(np.roll(h, -1, 0) - np.roll(h, 1, 0)) * (MAP / 2.0)
+    dhdv = -(np.roll(h, -1, 0) - np.roll(h, 1, 0)) * (MAP / 2.0)   # rows top-down, v up
     nx, ny, nz = -D_UV * dhdu, -D_UV * dhdv, np.ones_like(h)
-    l = np.sqrt(nx * nx + ny * ny + nz * nz); nx, ny, nz = nx / l, ny / l, nz / l
-    hq = np.round(h * 255).astype(np.uint8)
-    nrm = np.stack([np.round((c * 0.5 + 0.5) * 255).clip(0, 255) for c in (nx, ny, nz)], -1).astype(np.uint8)
-    return hq, nrm, h
+    l = np.sqrt(nx * nx + ny * ny + nz * nz)
+    nrm = np.stack([np.round((c / l * 0.5 + 0.5) * 255).clip(0, 255) for c in (nx, ny, nz)], -1).astype(np.uint8)
+    return rgb, np.round(h * 255).astype(np.uint8), nrm
 
-def load_logo(path):
-    txt = open(path).read()
-    w = int(re.search(r"#define LOGO_WIDTH (\d+)", txt).group(1))
-    h = int(re.search(r"#define LOGO_HEIGHT (\d+)", txt).group(1))
-    body = txt[txt.index("{") + 1:txt.rindex("}")]
-    v = np.array([int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", body)], np.uint8)
-    return v.reshape(h, w, 4)            # rows top-down, RGBA
 
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "."
-    here = os.path.dirname(os.path.abspath(__file__))
-    logo = load_logo(os.path.join(here, "..", "src", "logo_texture.h"))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     V, VT, VN, F = build()
     write_obj(os.path.join(out, "model.obj"), V, VT, VN, F)
-    write_bmp24(os.path.join(out, "model.bmp"), logo[:, :, :3])
-    hq, nrm, h = maps(logo)
+    rgb, hq, nrm = maps()
+    write_bmp24(os.path.join(out, "model.bmp"), rgb)
     write_bmp24(os.path.join(out, "model_height.bmp"), np.stack([hq] * 3, -1))
     write_bmp24(os.path.join(out, "model_normal.bmp"), nrm)
-    print("model.obj: %d vertices, %d triangles; maps %dx%d" % (len(V), len(F), MAP, MAP))
+    print("model.obj: %d vertices, %d triangles; logo / height / normal %dx%d" % (len(V), len(F), MAP, MAP))
