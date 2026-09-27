@@ -1,4 +1,23 @@
 ============================================================
+STARTUP CRASH FIX  (build=ui-branchfix)
+============================================================
+Crash on the first loading frame (GPU fault) since the first lens flare build.
+Found by bisecting the final pass on the PS4 (ui-bisect, ui-bisect2): the
+bc-tiled final pass ran, the same code + the flare table loads ran, but the
+flare version with its block skipped by a plain s_branch faulted. Root cause:
+the shader-header generator parsed llvm-mc -show-encoding text, which prints
+unresolved label-branch offsets as 'A' placeholders; they were read as hex
+0xA, so every label branch got simm16 0x0A0A (a jump ~10 KB past the shader).
+Only ps_post_final has label branches (3: flare skip, frost skip, UI skip).
+The generator now takes the code from an ELF object (-filetype=obj, fixups
+resolved), refuses leftover relocations, checks every other byte against the
+listing and decodes every branch to confirm it lands on its label. Re-assembling
+all shaders: every branchless header identical, ps_post_final differs only in
+its 3 branch words (now +160, +265, +10). Also kept from the diagnosis: the UI
+T# / rects are valid from the first frame, the frost/UI skips branch on SCC,
+failed direct-memory allocations are logged.
+
+============================================================
 CONTROLS + ON-SCREEN PANELS  (build=ui-controls)
 ============================================================
 Cross freeze/unfreeze cube | Circle show/hide leaderboard | Square freeze/unfreeze

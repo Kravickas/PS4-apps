@@ -177,7 +177,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ui-bisect2"
+#define BUILD_TAG "ui-branchfix"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -420,17 +420,6 @@ static void* g_ps_post_down_gpu = 0;
 static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
-/* Crash bisect (build ui-bisect2): five frames submitted before the model load each run a
-   different final pass; the trace logs the variant before submitting, so the last line names
-   the one that faults. ui-bisect found: bc-tiled final pass ok (also with RSRC1 0x291), the
-   flare-photo final pass faults. 0 = bc-tiled (0x105), 1 = bc-tiled + the four flare table
-   loads, 2 = flare-photo with the flare block skipped unconditionally, 3 = flare-photo without
-   the glare sample, 4 = flare-photo unchanged, 5 = current (flare + UI; everything else). */
-#define FINAL_BISECT_N 5
-#define FINAL_CURRENT 5
-static void* g_final_var_ps[6];
-static uint32_t g_final_var_rsrc1[6];
-static int g_final_variant = FINAL_CURRENT;
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 // === Helpers ===
@@ -1528,7 +1517,7 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
         post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
     post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
-              g_final_var_ps[g_final_variant], g_final_var_rsrc1[g_final_variant], t, bg_v);
+              g_ps_post_final_gpu, PS_POST_FINAL_RSRC1, t, bg_v);
 }
 
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -2535,8 +2524,6 @@ static void loading_progress(float frac, const char* msg, void* ud) {
     uint32_t fv = c->flip_idx + 100;
     *c->fence = 0;
     /* Model PS = ps_blue (white bar), Sky PS = ps_dark (dynamic — will render solid blue from desc) */
-    g_final_variant =
-        c->flip_idx < FINAL_BISECT_N ? (int)c->flip_idx : FINAL_CURRENT; /* before build_dcb */
     uint32_t sz = build_dcb(&pm4, c->vs, c->ps_blue, c->ps_dark, 0, 0,
                             c->vb_v, c->bg_v, 0, 0,
                             c->vb, c->desc, 6, VERT_BUF_SIZE, 0, 0, 0,
@@ -2546,15 +2533,6 @@ static void loading_progress(float frac, const char* msg, void* ud) {
                                  written and every update waited out its timeout */);
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
-    if (c->flip_idx < FINAL_BISECT_N) {
-        static const char* vname[FINAL_BISECT_N] = {
-            "loading frame: variant 0 (bc-tiled final pass) submit\n",
-            "loading frame: variant 1 (bc-tiled + the four flare table loads) submit\n",
-            "loading frame: variant 2 (flare-photo, flare block skipped unconditionally) submit\n",
-            "loading frame: variant 3 (flare-photo without the glare sample) submit\n",
-            "loading frame: variant 4 (flare-photo unchanged) submit\n"};
-        trace_msg(vname[g_final_variant]);
-    }
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
     g_submit_count++;   /* loading submits count toward any kernel-side budget */
     sceGnmSubmitDone();
@@ -2562,8 +2540,6 @@ static void loading_progress(float frac, const char* msg, void* ud) {
        cap the wait so we still reach the main render loop instead of hanging
        here forever. */
     for (int w=0; w<10000 && *c->fence != fv; w++) sceKernelUsleep(100);
-    if (c->flip_idx < FINAL_BISECT_N)
-        trace_msg(*c->fence == fv ? "loading frame: fence ok\n" : "loading frame: fence TIMEOUT\n");
     sceVideoOutSubmitFlip(c->video, bi, 1, 0);
     sceKernelUsleep(16000);
     c->flip_idx++;
@@ -2763,10 +2739,8 @@ int main(void) {
         L[p++] = '\n';
         trace_line(L, (unsigned long)p);
     }
-    mem_report("after ui_init");
     Tex floor_nrm = load_tex(ASSET_DIR "images/floor/normal.dds", k_flat, 0);
     Tex floor_hgt = load_tex(ASSET_DIR "images/floor/height.dds", k_white, 0);
-    mem_report("after textures");
 
     /* desc buffer layout:
          desc[0..7]    texture T#              (byte 0..31)
@@ -2991,7 +2965,6 @@ int main(void) {
         build_tsharp_tex(fin + 72, &glare_tex);
         build_ssharp_clamp(fin + 80, 0);
         ui_write_table(fin);
-        trace_msg("ck: post tables\n");
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
     /* Copy cube verts into shadow VB at offset 0x50 */
@@ -3052,23 +3025,6 @@ int main(void) {
     g_ps_post_blur_gpu = ps_post_blur_gpu;
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
-    UPLOAD_SHADER(ps_post_final_v0_gpu, ps_post_final_v0_binary);
-    UPLOAD_SHADER(ps_post_final_v2_gpu, ps_post_final_v2_binary);
-    UPLOAD_SHADER(ps_post_final_b1_gpu, ps_post_final_b1_binary);
-    UPLOAD_SHADER(ps_post_final_b2_gpu, ps_post_final_b2_binary);
-    UPLOAD_SHADER(ps_post_final_b3_gpu, ps_post_final_b3_binary);
-    g_final_var_ps[0] = ps_post_final_v0_gpu;
-    g_final_var_rsrc1[0] = 0x105u;
-    g_final_var_ps[1] = ps_post_final_b1_gpu;
-    g_final_var_rsrc1[1] = 0x1C5u;
-    g_final_var_ps[2] = ps_post_final_b2_gpu;
-    g_final_var_rsrc1[2] = 0x1C9u;
-    g_final_var_ps[3] = ps_post_final_b3_gpu;
-    g_final_var_rsrc1[3] = 0x1C9u;
-    g_final_var_ps[4] = ps_post_final_v2_gpu;
-    g_final_var_rsrc1[4] = 0x1C9u;
-    g_final_var_ps[5] = ps_post_final_gpu;
-    g_final_var_rsrc1[5] = PS_POST_FINAL_RSRC1;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];
@@ -3140,7 +3096,6 @@ int main(void) {
     float model_fit_radius =
         1.0f; /* loaded model: bbox half diagonal (scaled to MODEL_FIT_RADIUS) */
 
-    mem_report("before model load");
     /* --- Load 3D model using obj_loader.h --- */
     {
         /* The prop shipped in the package (tools/gen_model.py); the loader is
@@ -3156,9 +3111,6 @@ int main(void) {
         load_ctx.flip_idx = 0;
         load_ctx.ps_blue = ps_blue_gpu;
         load_ctx.ps_dark = ps_dark_gpu;
-        /* Crash bisect: one frame per final-pass variant, before the model load. */
-        for (int v = 0; v < FINAL_BISECT_N; v++)
-            loading_progress(0.0f, "bisect", &load_ctx);
         ObjMesh mesh;
         int loaded = 0;
         for (int pi = 0; obj_paths[pi] && !loaded; pi++) {
@@ -3491,7 +3443,6 @@ int main(void) {
       trace_msg(L);
     }
 
-    g_final_variant = FINAL_CURRENT; /* after the loading frames: the current final pass */
     /* MEASURE the pre-loop submit count - never assume it. */
     { char L[96]; int p=0;
       const char *m = "submits before main loop: ";

@@ -9,11 +9,6 @@
 #include "ps_post_comp.h"
 #include "ps_post_down.h"
 #include "ps_post_final.h"
-#include "ps_post_final_v0.h" /* bisect: bc-tiled final pass (CAFE0213) */
-#include "ps_post_final_v2.h" /* bisect: flare-photo final pass (CAFE0217) */
-#include "ps_post_final_b1.h" /* bisect: bc-tiled + flare loads (CAFE0220) */
-#include "ps_post_final_b2.h" /* bisect: flare-photo, block skipped unconditionally (CAFE0221) */
-#include "ps_post_final_b3.h" /* bisect: flare-photo without the glare sample (CAFE0222) */
 #include "ps_shader.h"
 #include "ps_shadow.h"
 #include "ps_shadow_clear.h"
