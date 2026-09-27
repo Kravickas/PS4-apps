@@ -42,7 +42,7 @@ static int ui_load_atlas(const char* path) {
         sceKernelClose(fd);
         return -2;
     }
-    unsigned char* p = (unsigned char*)gpu_alloc(n, 0x1000);
+    unsigned char* p = (unsigned char*)cpu_alloc(n, 0x1000); /* ONION: the CPU reads it */
     unsigned long got = 0;
     while (p && got < n) {
         long k = sceKernelRead(fd, p + got, n - got);
@@ -64,7 +64,8 @@ static int ui_init(void) {
     if (ui_load_atlas(ASSET_DIR "ui/ui_atlas.bin") != 0)
         return -1;
     for (int b = 0; b < UI_BUFS; b++) {
-        g_ui.buf[b] = (unsigned char*)gpu_alloc((unsigned long)UI_W * UI_H * 4, 0x1000);
+        g_ui.buf[b] = (unsigned char*)cpu_alloc((unsigned long)UI_W * UI_H * 4,
+                                                0x1000); /* ONION: blended by the CPU */
         if (!g_ui.buf[b])
             return -2;
         my_memset(g_ui.buf[b], 0, (unsigned long)UI_W * UI_H * 4);

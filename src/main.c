@@ -177,7 +177,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ui-controls"
+#define BUILD_TAG "ui-diag"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -664,13 +664,87 @@ static void* gpu_alloc_typed(unsigned long size, unsigned long align, int memtyp
 static void* cpu_alloc(unsigned long size, unsigned long align) {
     return gpu_alloc_typed(size, align, MEM_TYPE_ONION);
 }
+/* Direct memory: libkernel (shadPS4 memory.cpp: sceKernelGetDirectMemorySize() -> u64;
+   sceKernelAvailableDirectMemorySize(start, end, align, u64* phys, u64* size), NID C0f7TJcbfac).
+   The OpenOrbis header declares the two out-params as values, so these prototypes are ours. */
+extern uint64_t sceKernelGetDirectMemorySize(void);
+extern int32_t sceKernelAvailableDirectMemorySize(uint64_t start, uint64_t end, uint64_t align,
+                                                  uint64_t* phys_out, uint64_t* size_out);
+static unsigned long g_dmem_bytes; /* direct memory allocated through gpu_alloc_typed */
+
+static void dmem_trace(const char* what, unsigned long a, unsigned long b, int memtype, int ret) {
+    char L[200];
+    int p = 0;
+    const char* m = what;
+    while (*m)
+        L[p++] = *m++;
+    p += lg_hex(L + p, a);
+    L[p++] = ' ';
+    p += lg_hex(L + p, b);
+    const char* t = " type ";
+    while (*t)
+        L[p++] = *t++;
+    p += lg_i64(L + p, memtype);
+    t = " ret ";
+    while (*t)
+        L[p++] = *t++;
+    p += lg_hex(L + p, (unsigned long long)(unsigned)ret);
+    t = " ours ";
+    while (*t)
+        L[p++] = *t++;
+    p += lg_hex(L + p, g_dmem_bytes);
+    L[p++] = '\n';
+    trace_line(L, (unsigned long)p);
+}
+
+/* One line: total direct memory, largest free block, and what we allocated so far. */
+static void mem_report(const char* tag) {
+    uint64_t phys = 0, largest = 0;
+    uint64_t total = sceKernelGetDirectMemorySize();
+    int32_t r = sceKernelAvailableDirectMemorySize(0, total, 0x4000, &phys, &largest);
+    char L[200];
+    int p = 0;
+    const char* m = "mem ";
+    while (*m)
+        L[p++] = *m++;
+    while (*tag && p < 60)
+        L[p++] = *tag++;
+    m = ": total ";
+    while (*m)
+        L[p++] = *m++;
+    p += lg_hex(L + p, total);
+    m = " largest free ";
+    while (*m)
+        L[p++] = *m++;
+    p += lg_hex(L + p, largest);
+    m = " ret ";
+    while (*m)
+        L[p++] = *m++;
+    p += lg_hex(L + p, (unsigned long long)(unsigned)r);
+    m = " ours ";
+    while (*m)
+        L[p++] = *m++;
+    p += lg_hex(L + p, g_dmem_bytes);
+    L[p++] = '\n';
+    trace_line(L, (unsigned long)p);
+}
+
 static void *gpu_alloc_typed(unsigned long size, unsigned long align, int memtype) {
     unsigned long phys = 0; void *addr = 0;   /* matches sceKernelAllocateDirectMemory's unsigned long* out-param */
     size = (size + 0x3FFF) & ~0x3FFFUL;
     if (align < 0x4000) align = 0x4000;
-    if (sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, memtype, &phys)) return 0;
-    if (sceKernelMapDirectMemory(&addr, size, PROT_CPU_RW | PROT_GPU_RW, 0, phys, align)) return 0;
+    int r = sceKernelAllocateDirectMemory(0, 0x600000000ULL, size, align, memtype, &phys);
+    if (r) {
+        dmem_trace("ALLOC FAILED (allocate) size/align ", size, align, memtype, r);
+        return 0;
+    }
+    r = sceKernelMapDirectMemory(&addr, size, PROT_CPU_RW | PROT_GPU_RW, 0, phys, align);
+    if (r) {
+        dmem_trace("ALLOC FAILED (map) size/align ", size, align, memtype, r);
+        return 0;
+    }
     my_memset(addr, 0, size);
+    g_dmem_bytes += size;
     return addr;
 }
 
@@ -1245,6 +1319,11 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
         t.tile = d.tile_index;
     } else {
         unsigned char* q = (unsigned char*)gpu_alloc(4, 0x1000);
+        if (!q) {
+            trace_msg("FATAL: texture fallback alloc failed\n");
+            t.pixels = 0;
+            return t;
+        }
         q[0] = fallback[0];
         q[1] = fallback[1];
         q[2] = fallback[2];
@@ -2454,6 +2533,8 @@ static void loading_progress(float frac, const char* msg, void* ud) {
                                  written and every update waited out its timeout */);
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
+    if (c->flip_idx < 3)
+        trace_msg("loading frame: submit\n");
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
     g_submit_count++;   /* loading submits count toward any kernel-side budget */
     sceGnmSubmitDone();
@@ -2461,6 +2542,8 @@ static void loading_progress(float frac, const char* msg, void* ud) {
        cap the wait so we still reach the main render loop instead of hanging
        here forever. */
     for (int w=0; w<10000 && *c->fence != fv; w++) sceKernelUsleep(100);
+    if (c->flip_idx < 3)
+        trace_msg(*c->fence == fv ? "loading frame: fence ok\n" : "loading frame: fence TIMEOUT\n");
     sceVideoOutSubmitFlip(c->video, bi, 1, 0);
     sceKernelUsleep(16000);
     c->flip_idx++;
@@ -2623,6 +2706,7 @@ int main(void) {
         L[p++] = '\n';
         trace_line(L, (unsigned long)p);
     }
+    mem_report("start");
 
     /* Textures: DDS from the package (tools/make_textures.py, src/dds_loader.h):
        images/floor/ and images/cube/ hold albedo (BC1 sRGB; the logo stays
@@ -2659,8 +2743,10 @@ int main(void) {
         L[p++] = '\n';
         trace_line(L, (unsigned long)p);
     }
+    mem_report("after ui_init");
     Tex floor_nrm = load_tex(ASSET_DIR "images/floor/normal.dds", k_flat, 0);
     Tex floor_hgt = load_tex(ASSET_DIR "images/floor/height.dds", k_white, 0);
+    mem_report("after textures");
 
     /* desc buffer layout:
          desc[0..7]    texture T#              (byte 0..31)
@@ -2879,6 +2965,7 @@ int main(void) {
         uint32_t* fin = g_post_tab + (POST_PASSES - 1) * 32;
         build_tsharp_tex(fin + 40, &glare_tex);
         build_ssharp_clamp(fin + 48, 1);
+        trace_msg("ck: post tables\n");
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
     /* Copy cube verts into shadow VB at offset 0x50 */
@@ -3010,6 +3097,7 @@ int main(void) {
     float model_fit_radius =
         1.0f; /* loaded model: bbox half diagonal (scaled to MODEL_FIT_RADIUS) */
 
+    mem_report("before model load");
     /* --- Load 3D model using obj_loader.h --- */
     {
         /* The prop shipped in the package (tools/gen_model.py); the loader is
