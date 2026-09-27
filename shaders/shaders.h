@@ -9,6 +9,8 @@
 #include "ps_post_comp.h"
 #include "ps_post_down.h"
 #include "ps_post_final.h"
+#include "ps_post_final_v0.h" /* bisect: bc-tiled final pass (CAFE0213) */
+#include "ps_post_final_v2.h" /* bisect: flare-photo final pass (CAFE0217) */
 #include "ps_shader.h"
 #include "ps_shadow.h"
 #include "ps_shadow_clear.h"

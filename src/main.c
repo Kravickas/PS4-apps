@@ -177,7 +177,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "ui-fix1"
+#define BUILD_TAG "ui-bisect"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -420,6 +420,13 @@ static void* g_ps_post_down_gpu = 0;
 static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
+/* Crash bisect (build ui-bisect): the first loading frames each run a different final pass;
+   the trace logs the variant before submitting, so the last line names the one that faults.
+   0 = bc-tiled final pass (RSRC1 0x105), 1 = same code with the current RSRC1 0x291,
+   2 = flare-photo final pass (0x1C9), 3 = current (flare + UI, 0x291; main loop). */
+static void* g_final_var_ps[4];
+static uint32_t g_final_var_rsrc1[4];
+static int g_final_variant = 3;
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 // === Helpers ===
@@ -1517,7 +1524,7 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
         post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
     post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
-              g_ps_post_final_gpu, PS_POST_FINAL_RSRC1, t, bg_v);
+              g_final_var_ps[g_final_variant], g_final_var_rsrc1[g_final_variant], t, bg_v);
 }
 
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -2524,6 +2531,7 @@ static void loading_progress(float frac, const char* msg, void* ud) {
     uint32_t fv = c->flip_idx + 100;
     *c->fence = 0;
     /* Model PS = ps_blue (white bar), Sky PS = ps_dark (dynamic — will render solid blue from desc) */
+    g_final_variant = c->flip_idx < 4 ? (int)c->flip_idx : 3; /* before build_dcb records it */
     uint32_t sz = build_dcb(&pm4, c->vs, c->ps_blue, c->ps_dark, 0, 0,
                             c->vb_v, c->bg_v, 0, 0,
                             c->vb, c->desc, 6, VERT_BUF_SIZE, 0, 0, 0,
@@ -2533,8 +2541,14 @@ static void loading_progress(float frac, const char* msg, void* ud) {
                                  written and every update waited out its timeout */);
     const uint32_t *a[1] = { c->pm4_buf };
     uint32_t s2[1] = { sz };
-    if (c->flip_idx < 3)
-        trace_msg("loading frame: submit\n");
+    if (c->flip_idx < 4) {
+        static const char* vname[4] = {
+            "loading frame: variant 0 (bc-tiled final pass, 0x105) submit\n",
+            "loading frame: variant 1 (bc-tiled code, RSRC1 0x291) submit\n",
+            "loading frame: variant 2 (flare-photo final pass, 0x1C9) submit\n",
+            "loading frame: variant 3 (current flare + UI, 0x291) submit\n"};
+        trace_msg(vname[g_final_variant]);
+    }
     sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
     g_submit_count++;   /* loading submits count toward any kernel-side budget */
     sceGnmSubmitDone();
@@ -2542,7 +2556,7 @@ static void loading_progress(float frac, const char* msg, void* ud) {
        cap the wait so we still reach the main render loop instead of hanging
        here forever. */
     for (int w=0; w<10000 && *c->fence != fv; w++) sceKernelUsleep(100);
-    if (c->flip_idx < 3)
+    if (c->flip_idx < 4)
         trace_msg(*c->fence == fv ? "loading frame: fence ok\n" : "loading frame: fence TIMEOUT\n");
     sceVideoOutSubmitFlip(c->video, bi, 1, 0);
     sceKernelUsleep(16000);
@@ -3032,6 +3046,16 @@ int main(void) {
     g_ps_post_blur_gpu = ps_post_blur_gpu;
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
+    UPLOAD_SHADER(ps_post_final_v0_gpu, ps_post_final_v0_binary);
+    UPLOAD_SHADER(ps_post_final_v2_gpu, ps_post_final_v2_binary);
+    g_final_var_ps[0] = ps_post_final_v0_gpu;
+    g_final_var_rsrc1[0] = (4u << 6) | 5u;
+    g_final_var_ps[1] = ps_post_final_v0_gpu;
+    g_final_var_rsrc1[1] = PS_POST_FINAL_RSRC1;
+    g_final_var_ps[2] = ps_post_final_v2_gpu;
+    g_final_var_rsrc1[2] = (7u << 6) | 9u;
+    g_final_var_ps[3] = ps_post_final_gpu;
+    g_final_var_rsrc1[3] = PS_POST_FINAL_RSRC1;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];
@@ -3451,6 +3475,7 @@ int main(void) {
       trace_msg(L);
     }
 
+    g_final_variant = 3; /* after the loading frames: the main loop runs the current final pass */
     /* MEASURE the pre-loop submit count - never assume it. */
     { char L[96]; int p=0;
       const char *m = "submits before main loop: ";
