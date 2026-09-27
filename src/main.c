@@ -167,7 +167,7 @@
 #define MODEL_PATH_FROM_FRAME 120
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "diag-model-stage"
+#define BUILD_TAG "bc-tiled"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1121,6 +1121,7 @@ typedef struct {
     void* pixels;
     int w, h, levels;
     uint32_t dfmt, nfmt; /* SQ_IMG_RSRC_WORD1 DATA_FORMAT / NUM_FORMAT */
+    uint32_t tile;       /* SQ_IMG_RSRC_WORD3 TILING_INDEX (dds_loader.h) */
     int err;             /* dds_load result, 0 = loaded */
 } Tex;
 
@@ -1135,6 +1136,7 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
         t.levels = d.levels;
         t.dfmt = d.data_format;
         t.nfmt = d.num_format;
+        t.tile = d.tile_index;
     } else {
         unsigned char* q = (unsigned char*)gpu_alloc(4, 0x1000);
         q[0] = fallback[0];
@@ -1147,17 +1149,19 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
         t.levels = 1;
         t.dfmt = 0x0A; /* 8_8_8_8 */
         t.nfmt = fallback_nfmt;
+        t.tile = 8; /* LINEAR_ALIGNED */
     }
     printf("texture %s: %d (%dx%d, %d levels, format 0x%x/%u)\n", path, t.err, t.w, t.h, t.levels,
            t.dfmt, t.nfmt);
     return t;
 }
 
-/* T# for a Tex: build_tsharp_levels with the texture's DATA_FORMAT (word1 25:20)
-   and NUM_FORMAT (word1 29:26). */
+/* T# for a Tex: build_tsharp_levels with the texture's DATA_FORMAT (word1 25:20),
+   NUM_FORMAT (word1 29:26) and TILING_INDEX (word3 24:20). */
 static void build_tsharp_tex(uint32_t* t, const Tex* x) {
     build_tsharp_levels(t, x->pixels, x->w, x->h, x->levels);
     t[1] = (t[1] & ~((0x3Fu << 20) | (0xFu << 26))) | (x->dfmt << 20) | (x->nfmt << 26);
+    t[3] = (t[3] & ~(0x1Fu << 20)) | (x->tile << 20);
 }
 
 /* Height-map sampler: wrap, bilinear, linear mips (MIP_FILTER 2 @ word2[27:26]). */
@@ -2527,6 +2531,7 @@ int main(void) {
         my_memcpy(cube_alb.pixels, logo_rgba, LOGO_SIZE);
         cube_alb.w = LOGO_WIDTH;
         cube_alb.h = LOGO_HEIGHT;
+        cube_alb.tile = 8;
     }
     Tex cube_nrm = load_tex(ASSET_DIR "images/cube/normal.dds", k_flat, 0);
     Tex cube_hgt = load_tex(ASSET_DIR "images/cube/height.dds", k_white, 0);

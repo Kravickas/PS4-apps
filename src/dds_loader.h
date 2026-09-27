@@ -5,13 +5,24 @@
    BC5_UNORM (83) or R8G8B8A8_UNORM_SRGB (29); power-of-two sizes >= 32; mip levels
    only while both dimensions stay >= 32 px.
 
-   GPU layout LINEAR_ALIGNED (AMD addrlib SiLib, shadPS4 ImageSizeLinearAligned):
-   an element is a 4x4 block (8 or 16 bytes) or a texel (4 bytes); pitch aligned
-   to max(8, 64 / element bytes) elements, each level to max(64, 256 / element
-   bytes) elements, levels back to back. At >= 32 px a level is >= 8 blocks /
-   32 texels wide (a multiple of 8 / 16) with >= 64 elements, so no padding
-   applies: the DDS chain, tightly packed, is the GPU layout and is read in
-   place. Rows are stored bottom-up (row 0 = v 0, as the OBJ UVs expect). */
+   GPU layout. The GFX7 hardware (PS4) samples block-compressed formats only
+   from tiled surfaces: AMD PAL's GFX7 format table lists BC1 / BC4 / BC5 as
+   (linear: Copy, optimal: IrXsIfl) - linear BC cannot be read by a shader, and
+   the PS4 hung on the first floor draw that did. So:
+   - BC1 / BC4 / BC5 -> tile index 13 (Thin_1dThin: ARRAY_1D_TILED_THIN1, micro
+     tile mode THIN = addrlib ADDR_NON_DISPLAYABLE). addrlib (EgBasedLib::
+     ComputeSurfaceAddrFromCoordMicroTiled, Lib::ComputePixelIndexWithinMicroTile):
+     an element (4x4 block) at (x, y) of a level lives at
+       ((y / 8) * (pitch / 8) + x / 8) * 64 * B + index(x % 8, y % 8) * B,
+       index bits (low to high) = x0, y0, x1, y1, x2, y2,
+     B = 8 (BC1, BC4) or 16 (BC5). SiLib: pitch aligned to 8 elements, height to
+     8, level size padded to the 256-byte pipe interleave. Levels >= 32 px are
+     >= 8 blocks each way, so nothing pads: level sizes and offsets are those of
+     the packed DDS chain, only the element order inside a level changes.
+   - RGBA8 -> tile index 8 (LINEAR_ALIGNED, readable by shaders): pitch aligned
+     to 16 texels, levels to 64 texels (addrlib SiLib linear); no padding at
+     >= 32 px, so the DDS chain is read in place.
+   Rows are stored bottom-up (row 0 = v 0, as the OBJ UVs expect). */
 #include <stdint.h>
 #include "nid_resolve.h"
 
@@ -20,11 +31,48 @@ typedef struct {
     int width, height, levels;
     uint32_t data_format; /* SQ_IMG_RSRC_WORD1 DATA_FORMAT (gfx_7_2_enum.h) */
     uint32_t num_format;  /* SQ_IMG_RSRC_WORD1 NUM_FORMAT: 0 UNORM, 9 SRGB */
+    uint32_t tile_index;  /* SQ_IMG_RSRC_WORD3 TILING_INDEX: 13 (1D thin) for BC, 8 linear */
     unsigned long size;
 } DdsTexture;
 
 #define DDS_HEADER_BYTES 148 /* "DDS " + DDS_HEADER (124) + DDS_HEADER_DXT10 (20) */
 #define DDS_MIN_SIZE 32
+#define DDS_MAX_SIZE 16384
+
+/* One row of micro tiles (8 block rows) of the widest BC level: 4096 blocks x 8 x 16 B. */
+static unsigned char g_dds_rows[(DDS_MAX_SIZE / 4) * 8 * 16];
+
+/* Reads one level of bw x bh blocks (B bytes each) from fd and writes it tiled
+   (Thin_1dThin) to dst. Streams one row of micro tiles at a time; dst is written
+   sequentially (write-combined GPU memory, never read back). 0 on success. */
+static int dds_read_level_tiled(int fd, unsigned char* dst, uint32_t bw, uint32_t bh, uint32_t B) {
+    unsigned long row_bytes = (unsigned long)bw * 8 * B;
+    for (uint32_t ty = 0; ty < bh / 8; ty++) {
+        unsigned long got = 0;
+        while (got < row_bytes) {
+            long r = sceKernelRead(fd, g_dds_rows + got, row_bytes - got);
+            if (r <= 0)
+                return -1;
+            got += (unsigned long)r;
+        }
+        for (uint32_t tx = 0; tx < bw / 8; tx++) {
+            for (uint32_t e = 0; e < 64; e++) {
+                /* element e of a THIN micro tile: index bits (low to high) x0, y0,
+                   x1, y1, x2, y2 */
+                uint32_t x = (e & 1) | ((e >> 1) & 2) | ((e >> 2) & 4);
+                uint32_t y = ((e >> 1) & 1) | ((e >> 2) & 2) | ((e >> 3) & 4);
+                const uint64_t* src =
+                    (const uint64_t*)(g_dds_rows + ((unsigned long)y * bw + tx * 8 + x) * B);
+                uint64_t* d = (uint64_t*)dst;
+                d[0] = src[0];
+                if (B == 16)
+                    d[1] = src[1];
+                dst += B;
+            }
+        }
+    }
+    return 0;
+}
 
 static uint32_t dds_u32(const unsigned char* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -84,8 +132,8 @@ static int dds_load(const char* path, void* (*alloc_fn)(unsigned long, unsigned 
     uint32_t w = dds_u32(h + 16), hh = dds_u32(h + 12), levels = dds_u32(h + 28);
     if (levels == 0)
         levels = 1;
-    if (w < DDS_MIN_SIZE || hh < DDS_MIN_SIZE || (w & (w - 1)) || (hh & (hh - 1)) || w > 16384 ||
-        hh > 16384) {
+    if (w < DDS_MIN_SIZE || hh < DDS_MIN_SIZE || (w & (w - 1)) || (hh & (hh - 1)) ||
+        w > DDS_MAX_SIZE || hh > DDS_MAX_SIZE) {
         sceKernelClose(fd);
         return -4;
     }
@@ -107,19 +155,35 @@ static int dds_load(const char* path, void* (*alloc_fn)(unsigned long, unsigned 
         sceKernelClose(fd);
         return -7;
     }
-    unsigned long done = 0;
-    while (done < size) {
-        unsigned long chunk = size - done;
-        if (chunk > (8UL << 20))
-            chunk = 8UL << 20;
-        long r = sceKernelRead(fd, dst + done, chunk);
-        if (r <= 0)
-            break;
-        done += (unsigned long)r;
+    if (block == 4) {
+        unsigned char* p = dst;
+        for (uint32_t l = 0; l < levels; l++) {
+            uint32_t bw = (w >> l) / 4, bh = (hh >> l) / 4;
+            if (dds_read_level_tiled(fd, p, bw, bh, bytes_per) != 0) {
+                sceKernelClose(fd);
+                return -8;
+            }
+            p += (unsigned long)bw * bh * bytes_per;
+        }
+        out->tile_index = 13;
+    } else {
+        unsigned long done = 0;
+        while (done < size) {
+            unsigned long chunk = size - done;
+            if (chunk > (8UL << 20))
+                chunk = 8UL << 20;
+            long r = sceKernelRead(fd, dst + done, chunk);
+            if (r <= 0)
+                break;
+            done += (unsigned long)r;
+        }
+        if (done != size) {
+            sceKernelClose(fd);
+            return -8;
+        }
+        out->tile_index = 8;
     }
     sceKernelClose(fd);
-    if (done != size)
-        return -8;
     out->pixels = dst;
     out->width = (int)w;
     out->height = (int)hh;

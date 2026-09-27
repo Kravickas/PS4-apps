@@ -17,8 +17,9 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   make_icon.py       sce_sys/icon0.png: the ShadPS4 badge on a turned cube (transparent)
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
-/ R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px (the packed chain is then
-exactly the PS4 LINEAR_ALIGNED layout), rows bottom-up (row 0 = v 0). Normal maps
+/ R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
+v 0). Files stay standard (linear); the loader tiles BC levels for the PS4
+(Thin_1dThin) and reads RGBA8 in place (LINEAR_ALIGNED). Normal maps
 are stored in the engine convention (+u, +v), measured against the height map.
 
 The PKG also needs sce_sys/about/right.sprx (from the OpenOrbis samples; not in

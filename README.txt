@@ -1,4 +1,29 @@
 ============================================================
+BC TEXTURES TILED (PS4 HANG FIX)  (build=bc-tiled)
+============================================================
+diag-model-stage trace: hang in the first frame before the model path
+(f=120) ever switched on; rts=111000 (batch start, shadow, sky done; floor
+never), cpm=0x16. Cause: the floor sampled BC1 / BC5 / BC4 from LINEAR
+surfaces. AMD PAL's GFX7 format table (linear, optimal): Bc1_Srgb, Bc4_Unorm,
+Bc5_Unorm = (Copy, IrXsIfl) - no shader read from linear. RGBA8 is readable
+linear (why the BMP floor worked); shadPS4 re-lays images for Vulkan.
+Fix (src/dds_loader.h): BC levels are tiled while loading into tile index 13
+(Thin_1dThin = ARRAY_1D_TILED_THIN1, micro tile THIN = ADDR_NON_DISPLAYABLE):
+element (x, y) -> ((y/8)*(pitch/8) + x/8)*64*B + index*B, index bits x0 y0
+x1 y1 x2 y2 (addrlib ComputeSurfaceAddrFromCoordMicroTiled /
+ComputePixelIndexWithinMicroTile; CiLib: tile type = micro_tile_mode_new).
+SiLib 1D: pitch / height aligned to 8 elements, level size to 256 bytes - no
+padding at >= 32 px, so level sizes / offsets are unchanged. Streams 8 block
+rows at a time through a 512 KB static buffer; writes GPU memory sequentially.
+T# word3 TILING_INDEX = 13 for BC, 8 for RGBA8 (still linear).
+Checks: for all 5 BC textures and every level the loader's output equals
+addrlib's forward tiling, and shadPS4's detile formula (tiling.comp) gives the
+DDS data back; addrlib / shadPS4 ImageSizeMicroTiled / packed level sizes
+agree. The .dds files are unchanged (standard, linear).
+Still staged: model path from f=120 (MODEL_PATH_FROM_FRAME), so this run also
+tests vs_model / ps_model on PS4.
+
+============================================================
 PS4 HANG DIAGNOSTIC  (build=diag-model-stage)
 ============================================================
 PS4 trace of pkg-assets-bc: all six DDS textures load (err 0), the loading
