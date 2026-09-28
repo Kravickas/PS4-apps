@@ -121,15 +121,24 @@ static void clock_frame(float yaw, float pitch, const float L[3], int night, con
         lx /= ln;
         ly /= ln;
     }
-    float* e = g_clock_entries + (long)g_clock_entry_buf * CLOCK_RIM_MAX * 8;
-    int n = clock_entries(e, lx, ly);
-    uint32_t* lt = g_post_tab + CLOCK_LIGHT_BLOCK * 32;
-    uint64_t a = (uint64_t)(uintptr_t)e;
-    lt[0] = (uint32_t)a;
-    lt[1] = (uint32_t)(a >> 32);
-    lt[2] = (uint32_t)n * 32u;
-    lt[3] = 0;
-    g_clock_entry_buf = (g_clock_entry_buf + 1) % 3;
+    /* the light field depends only on (lx, ly): recomputed when it moved more than 0.02 degrees
+       (|d l2|^2 > (3.5e-4)^2), else the kept one serves */
+    float dx = lx - g_clock_light_l2[0], dy = ly - g_clock_light_l2[1];
+    g_clock_light_dirty = !g_clock_light_valid || dx * dx + dy * dy > 1.2e-7f;
+    if (g_clock_light_dirty) {
+        float* e = g_clock_entries + (long)g_clock_entry_buf * CLOCK_RIM_MAX * 8;
+        int n = clock_entries(e, lx, ly);
+        uint32_t* lt = g_post_tab + CLOCK_LIGHT_BLOCK * 32;
+        uint64_t a = (uint64_t)(uintptr_t)e;
+        lt[0] = (uint32_t)a;
+        lt[1] = (uint32_t)(a >> 32);
+        lt[2] = (uint32_t)n * 32u;
+        lt[3] = 0;
+        g_clock_entry_buf = (g_clock_entry_buf + 1) % 3;
+        g_clock_light_l2[0] = lx;
+        g_clock_light_l2[1] = ly;
+        g_clock_light_valid = 1;
+    }
     uint32_t* k = g_post_tab + CLOCK_BLOCK * 32;
     float* kc = (float*)(k + 40);
     float m = lc[0] > lc[1] ? lc[0] : lc[1];

@@ -72,3 +72,7 @@ Status (session 10):
 - DONE main.c (build glass-clock): frost + 6 passes to 60 x 34, ps_clock_light into g_bloom_b[0],
   ps_clock instead of ps_ui in clock mode, RG8 T#, src/clock_frame.h (C entries vs Python: positions
   1e-4 px, weights 3e-5 rel), light direction / colour / strength, Circle. Hardware test pending.
+- DONE (glass-clock-aa): text AA (central-difference gradient +-1.5 px, 4 clamped sub-samples; the
+  reference docs/clock_model/pc_ref_ss.py GRAD='central' SS=True CLAMP=True), exact skips in ps_clock
+  (> 100 px outside the slab, >= 15 px from the text) and ps_clock_light (> 40 px outside), the light
+  field in its own buffer recomputed only when its direction moves > 0.02 deg.

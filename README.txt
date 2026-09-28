@@ -1,3 +1,42 @@
+TIME ZONE FROM THE CONSOLE'S SETTINGS, CLOCK TEXT UPDATED PER GLYPH  (build=clock-tz)
+
+- Local time = UTC + the console's Time Zone setting + 60 min when its Daylight Saving switch is on
+  (sceSystemServiceParamGetInt 4 and 5). The previous build converted with
+  sceRtcConvertUtcToLocalTime, which gave +0 on hardware. The zone's raw value is decoded whatever
+  its unit: every real zone is 0 or a multiple of 15 min within +-14 h, so 1..14 can only be hours,
+  a multiple of 15 up to 840 minutes, a multiple of 900 seconds (+1 h in any of the three -> 120 min
+  with DST: host-tested). Re-read every minute. Fallbacks, in order: the kernel's
+  sceKernelConvertUtcToLocaltime, libSceRtc's local clock, the old conversion. A "tz" trace line
+  (every source's return code and offset, the raw settings) whenever the result changes.
+- Clock mode's text texture is no longer rebuilt every second: each of its three buffers remembers
+  its glyphs, and only those that differ are redrawn - the union of the old and new glyph's tile
+  cleared, then every glyph overlapping it re-blended inside it (the digits are tabular, so a
+  changed number keeps every glyph's origin; a new layout - the date, 9:59 -> 10:00 in 12 h -
+  redraws everything). Byte-identical to a full composition over 28 updates across minute, hour,
+  midnight and date changes; an ordinary second redraws ~16.6k texels, 2.2 % of the texture (was all
+  of it). The glass itself is drawn every frame by necessity - it refracts the live scene - and its
+  internal light is already recomputed only when the light's direction moves.
+
+CLOCK: ANTI-ALIASED TEXT, FASTER, STICK ICONS  (build=glass-clock-aa)
+
+- Controls list: the L3 / R3 rows use the pack's stick-press icons (T_P4_Left_Stick_Click,
+  T_P4_Right_Stick_Click; ui_atlas regenerated, every old glyph and icon byte-identical), "Press:"
+  gone from their names, Circle's row reads "Clock mode".
+- Text anti-aliasing (ps_clock CAFE0305). Measured on the float64 model against 16x supersampling:
+  the aliasing was the thin lit rim and the Fresnel ring at the letters' edges, made worse where the
+  text distance's forward-difference gradient flips at the glyphs' convex corners (its direction
+  swings within a pixel). Now the gradient is a central difference over +-1.5 px (the normal turns
+  smoothly around a corner, like rounded glass) and every letter term is evaluated at 4 rotated-grid
+  sub-samples (d_k = d + g . o_k: no extra fetches), each composited and clamped to 0..1, then
+  averaged. Pixels off by > 8/255 from the 16x truth: 1998 -> 455 of 88400; 99th percentile 0.041 ->
+  0.016. Shader vs its float64 reference: 4.8e-4 max (1/8 of an 8-bit step), 1.1e-5 at 99.9 %.
+- Faster: ps_clock skips every clock term for waves entirely > 100 px outside the slab (the frame
+  bitwise as before) and every text term for waves >= 15 px from the text (all of them are zero there:
+  checked against the full reference, 7e-7); ps_clock_light (CAFE0306) skips its 584-entry loop for
+  waves > 40 px outside the slab (~57 % of the pass); and the light field has its own buffer, recomputed
+  only when the light's screen direction moves more than 0.02 degrees - with the sun frozen or
+  following the real clock that is almost never.
+
 CLOCK STAGE 2: THE GLASS CLOCK (Circle)  (build=glass-clock)
 
 Circle shows the clock (and hides both panels); again returns. docs/clock_plan.txt has the design,

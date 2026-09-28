@@ -1,8 +1,8 @@
 /* Time sources for the clock: the scene's own time of day (in-game: sun_angle 0 = 06:00 sunrise,
    pi/2 = 12:00, pi = 18:00), the console clock (sceRtcGetCurrentTick, UTC) and internet time
    (SNTP, RFC 4330, on its own thread; until an answer arrives, or when every server fails, the
-   console clock stands in). Local time uses the console's time zone and summer time
-   (sceRtcConvertUtcToLocalTime); 12 / 24 h follows the console's setting.
+   console clock stands in). Local time: the console's time zone setting plus its daylight saving
+   switch (ts_tz_refresh); 12 / 24 h follows the console's setting.
    Network (libSceNet, the OpenOrbis sample's sequence): the NET sysmodule, sceNetInit, a memory
    pool for the resolver; constants of the PS4 socket layer as shadPS4 implements them (AF_INET 2,
    SOCK_DGRAM 2, SOL_SOCKET 0xFFFF, SO_RCVTIMEO 0x1106 in microseconds, sockaddr_in with sin_len
@@ -15,6 +15,18 @@ typedef struct {
 } TsRtcTick;
 extern int sceRtcGetCurrentTick(TsRtcTick* tick);
 extern int sceRtcConvertUtcToLocalTime(TsRtcTick* utc, TsRtcTick* local);
+typedef struct {
+    uint16_t year, month, day, hour, minute, second;
+    uint32_t microsecond;
+} TsRtcDateTime;
+typedef struct {
+    int64_t t;
+    uint32_t west_sec, dst_sec;
+} TsTimesec; /* OrbisTimesec */
+extern int sceRtcGetCurrentClockLocalTime(TsRtcDateTime* t);
+extern int sceRtcGetTick(const TsRtcDateTime* t, TsRtcTick* tick);
+extern int sceKernelConvertUtcToLocaltime(int64_t utc, int64_t* local, TsTimesec* st,
+                                          uint64_t* dst_sec);
 extern int sceSystemServiceParamGetInt(int32_t id, int32_t* value);
 extern int sceSysmoduleLoadModuleInternal(uint32_t id);
 extern int sceNetInit(void);
@@ -33,6 +45,10 @@ extern int sceNetSocketClose(int s);
 
 #define TS_SYSMODULE_INTERNAL_NET 0x8000001Cu
 #define TS_PARAM_TIME_FORMAT 3 /* 0: 12 h, 1: 24 h */
+#define TS_PARAM_TIME_ZONE 4
+#define TS_PARAM_SUMMERTIME 5    /* the daylight saving switch: 0 / 1 */
+#define TS_TZ_EVERY_US 60000000u /* re-read the time zone every minute */
+#define TS_TZ_BAD (-99999)
 #define TS_UNIX_EPOCH_TICK 62135596800000000ULL
 #define TS_NTP_EPOCH_TICK (TS_UNIX_EPOCH_TICK - 2208988800ULL * 1000000ULL) /* 1900-01-01 */
 #define TS_DAY_US 86400000000LL
@@ -53,13 +69,100 @@ typedef struct {
     int shown_ok;        /* shown_off is initialised */
     int64_t shown_off;   /* what the clock uses: slews toward net_off */
     uint64_t last_us;    /* process time of the previous ts_utc call */
+    int tz_min;          /* local time - UTC (minutes) */
+    int tz_src;          /* where it came from: 4 settings, 3 kernel, 2 RTC local clock, 1 RTC */
+    uint64_t tz_next_us; /* process time of the next re-read */
 } TimeSrc;
 static TimeSrc g_ts;
+
+/* The console's time zone setting in minutes from its raw value, whatever its unit: every real zone
+   is 0 or a multiple of 15 min within +-14 h, so 1..14 can only be hours, a multiple of 15 up to
+   840 minutes, a multiple of 900 up to 50400 seconds. TS_TZ_BAD: none of these. */
+static int ts_tz_decode(int v) {
+    int a = v < 0 ? -v : v;
+    if (a == 0)
+        return 0;
+    if (a <= 14)
+        return v * 60;
+    if (a <= 840 && a % 15 == 0)
+        return v;
+    if (a <= 50400 && a % 900 == 0)
+        return v / 60;
+    return TS_TZ_BAD;
+}
+static long long ts_round_min(long long us) {
+    return us >= 0 ? (us + 30000000LL) / 60000000LL : -((-us + 30000000LL) / 60000000LL);
+}
+/* Local time - UTC, from the console's own settings: its time zone plus one hour when its daylight
+   saving switch is on (the PS4's Date and Time settings; the previous build's libSceRtc conversion
+   gave +0 on hardware). The kernel's and libSceRtc's conversions are read too: fallbacks, and a
+   "tz" trace line (return codes, offsets, the raw settings) whenever the result changes. */
+static void ts_tz_refresh(void) {
+    TsRtcTick u, l, lb = {0}, u2;
+    sceRtcGetCurrentTick(&u);
+    l.tick = u.tick;
+    int ra = sceRtcConvertUtcToLocalTime(&u, &l);
+    long long oa = ts_round_min((long long)l.tick - (long long)u.tick);
+    TsRtcDateTime dt;
+    int rb = sceRtcGetCurrentClockLocalTime(&dt);
+    if (rb == 0)
+        rb = sceRtcGetTick(&dt, &lb);
+    sceRtcGetCurrentTick(&u2);
+    long long ob = rb == 0 ? ts_round_min((long long)lb.tick - (long long)u2.tick) : 0;
+    int64_t us = (int64_t)((u.tick - TS_UNIX_EPOCH_TICK) / 1000000ULL), loc = 0;
+    TsTimesec st = {0, 0, 0};
+    uint64_t dsts = 0;
+    int rc = sceKernelConvertUtcToLocaltime(us, &loc, &st, &dsts);
+    long long oc = (loc - us) / 60;
+    int32_t tz = 0, sm = 0;
+    int rd = sceSystemServiceParamGetInt(TS_PARAM_TIME_ZONE, &tz);
+    int rs = sceSystemServiceParamGetInt(TS_PARAM_SUMMERTIME, &sm);
+    int od = ts_tz_decode(tz), min = 0, src = 0;
+    if (rd == 0 && rs == 0 && od != TS_TZ_BAD) {
+        min = od + (sm ? 60 : 0);
+        src = 4;
+    } else if (rc == 0) {
+        min = (int)oc;
+        src = 3;
+    } else if (rb == 0) {
+        min = (int)ob;
+        src = 2;
+    } else if (ra == 0) {
+        min = (int)oa;
+        src = 1;
+    }
+    if (min != g_ts.tz_min || src != g_ts.tz_src || g_ts.tz_next_us == 0) {
+        static const char* const k[13] = {
+            "tz used=",   " src=",         " settings_ret=", " zone_raw=",       " dst_ret=",
+            " dst=",      " kernel_ret=",  " kernel=",       " kernel_dst_sec=", " rtclocal_ret=",
+            " rtclocal=", " rtcconv_ret=", " rtcconv="};
+        long long v[13] = {min, src, rd, tz, rs, sm, rc, oc, (long long)st.dst_sec, rb, ob, ra, oa};
+        char L[320];
+        int p = 0;
+        for (int i = 0; i < 13; i++) {
+            for (const char* q = k[i]; *q; q++)
+                L[p++] = *q;
+            p += lg_i64(L + p, v[i]);
+        }
+        L[p++] = '\n';
+        trace_line(L, (unsigned long)p);
+    }
+    g_ts.tz_min = min;
+    g_ts.tz_src = src;
+    g_ts.tz_next_us = sceKernelGetProcessTime() + TS_TZ_EVERY_US;
+}
 
 static void ts_init(void) {
     int32_t v = 1;
     g_ts.source = TS_INGAME;
     g_ts.h12 = (sceSystemServiceParamGetInt(TS_PARAM_TIME_FORMAT, &v) == 0 && v == 0);
+    ts_tz_refresh();
+}
+/* local tick = UTC tick + the time zone (re-read every minute) */
+static uint64_t ts_local_tick(uint64_t utc) {
+    if (sceKernelGetProcessTime() >= g_ts.tz_next_us)
+        ts_tz_refresh();
+    return (uint64_t)((int64_t)utc + (int64_t)g_ts.tz_min * 60000000LL);
 }
 
 /* NTP 32.32 fixed point (big-endian) <-> microseconds since 1900 */
@@ -186,23 +289,18 @@ static double ts_local_seconds(float sun_angle) {
         double s = 21600.0 + (double)sun_angle * (86400.0 / 6.283185307179586);
         return s >= 86400.0 ? s - 86400.0 : s;
     }
-    TsRtcTick u, l;
-    u.tick = ts_utc();
-    l.tick = u.tick;
-    sceRtcConvertUtcToLocalTime(&u, &l);
-    return (double)(int64_t)(l.tick % (uint64_t)TS_DAY_US) * 1e-6;
+    uint64_t l = ts_local_tick(ts_utc());
+    return (double)(int64_t)(l % (uint64_t)TS_DAY_US) * 1e-6;
 }
 
 /* Days since 0001-01-01 of the local date (the selected clock; in-game: the console's). */
 static long ts_local_days(void) {
-    TsRtcTick u, l;
+    TsRtcTick u;
     if (g_ts.source == TS_INGAME)
         sceRtcGetCurrentTick(&u);
     else
         u.tick = ts_utc();
-    l.tick = u.tick;
-    sceRtcConvertUtcToLocalTime(&u, &l);
-    return (long)(l.tick / (uint64_t)TS_DAY_US);
+    return (long)(ts_local_tick(u.tick) / (uint64_t)TS_DAY_US);
 }
 
 /* "hh:mm:ss" (24 h) or "h:mm:ss AM" (12 h) into p (>= 12 bytes). */

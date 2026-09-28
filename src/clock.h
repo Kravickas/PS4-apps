@@ -17,11 +17,21 @@
 #define CLOCK_LIGHT_S0 3.0f      /* a beam's width at the rim (px) */
 #define CLOCK_LIGHT_SPREAD 0.07f /* its widening per px travelled */
 
+#define CLOCK_MAX_GLYPHS 48
+typedef struct {
+    const ClockGlyph* g; /* 0: none */
+    short x, y;          /* the tile's top left in the texture */
+    short penx, base;    /* the glyph's origin: the layout's identity */
+    unsigned char gid;
+} ClockPlace;
 typedef struct {
     const unsigned char* atlas; /* R8, CLOCK_SDF_W x CLOCK_SDF_H */
     unsigned char* buf[CLOCK_BUFS];
     int cur, ok;
     char key[64]; /* the text of the current buffer */
+    /* what each buffer holds: its glyphs where they are (partial updates diff against it) */
+    ClockPlace held[CLOCK_BUFS][CLOCK_MAX_GLYPHS];
+    int nheld[CLOCK_BUFS], valid[CLOCK_BUFS];
 } Clock;
 static Clock g_clock;
 
@@ -72,30 +82,54 @@ static float clock_width(int px, const char* s) {
     }
     return w;
 }
-/* Glyphs of s at pen x (whole pixels per glyph), baseline y: min-blended into b, group gid. */
-static void clock_put(unsigned char* b, int px, float x, int y, const char* s, int gid) {
+/* The glyphs of s at pen x (whole pixels per glyph), baseline y, appended to P (count *n). */
+static void clock_layout(ClockPlace* P, int* n, int px, float x, int y, const char* s, int gid) {
     for (; *s; s++) {
         const ClockGlyph* g = clock_glyph_of(px, *s);
         if (!g)
             continue;
-        int X = (int)(x + 0.5f) + (int)g->xoff, Y = y + (int)g->yoff;
-        for (int r = 0; r < g->h; r++) {
-            int yy = Y + r;
-            if (yy < 0 || yy >= CLOCK_H)
-                continue;
-            const unsigned char* src =
-                g_clock.atlas + (unsigned long)(g->y + r) * CLOCK_SDF_W + g->x;
-            unsigned char* dst = b + ((unsigned long)yy * CLOCK_W) * 2;
-            for (int c = 0; c < g->w; c++) {
-                int xx = X + c;
-                if (xx < 0 || xx >= CLOCK_W || src[c] >= dst[xx * 2])
-                    continue;
-                dst[xx * 2] = src[c];
-                dst[xx * 2 + 1] = (unsigned char)gid;
-            }
+        if (g->w > 0 && *n < CLOCK_MAX_GLYPHS) {
+            P[*n].g = g;
+            P[*n].x = (short)((int)(x + 0.5f) + (int)g->xoff);
+            P[*n].y = (short)(y + (int)g->yoff);
+            P[*n].penx = (short)(int)(x + 0.5f);
+            P[*n].base = (short)y;
+            P[*n].gid = (unsigned char)gid;
+            (*n)++;
         }
         x += g->adv;
     }
+}
+/* One placed glyph min-blended into b, only inside the rect c (x0, y0, x1, y1). */
+static void clock_blit(unsigned char* b, const ClockPlace* p, const int c[4]) {
+    const ClockGlyph* g = p->g;
+    int x0 = p->x > c[0] ? p->x : c[0], y0 = p->y > c[1] ? p->y : c[1];
+    int x1 = p->x + g->w < c[2] ? p->x + g->w : c[2], y1 = p->y + g->h < c[3] ? p->y + g->h : c[3];
+    for (int yy = y0; yy < y1; yy++) {
+        const unsigned char* src =
+            g_clock.atlas + (unsigned long)(g->y + yy - p->y) * CLOCK_SDF_W + g->x - p->x;
+        unsigned char* dst = b + (unsigned long)yy * CLOCK_W * 2;
+        for (int xx = x0; xx < x1; xx++)
+            if (src[xx] < dst[xx * 2]) {
+                dst[xx * 2] = src[xx];
+                dst[xx * 2 + 1] = p->gid;
+            }
+    }
+}
+/* Rect c cleared (+16 px: nothing near), then every glyph overlapping it re-blended inside it -
+   the minimum over the tiles there, the same as composing the whole texture. */
+static void clock_redraw(unsigned char* b, const ClockPlace* P, int n, const int c[4]) {
+    for (int yy = c[1]; yy < c[3]; yy++) {
+        unsigned char* d = b + ((unsigned long)yy * CLOCK_W + c[0]) * 2;
+        for (int xx = c[0]; xx < c[2]; xx++, d += 2) {
+            d[0] = 255;
+            d[1] = 0;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        if (P[i].x < c[2] && P[i].x + P[i].g->w > c[0] && P[i].y < c[3] &&
+            P[i].y + P[i].g->h > c[1])
+            clock_blit(b, &P[i], c);
 }
 
 /* Civil date from days since 0001-01-01 (H. Hinnant's days_from_civil, inverted; 0001-01-01 was
@@ -182,15 +216,44 @@ static const unsigned char* clock_update(double sec, long days, int h12) {
             g_clock.key[i] = key[i];
         int nb = (g_clock.cur + 1) % CLOCK_BUFS;
         unsigned char* b = g_clock.buf[nb];
-        for (unsigned long i = 0; i < (unsigned long)CLOCK_W * CLOCK_H; i++) {
-            b[i * 2] = 255; /* +16 px: nothing near */
-            b[i * 2 + 1] = 0;
-        }
+        ClockPlace P[CLOCK_MAX_GLYPHS];
+        int n = 0;
         float wt = clock_width(300, hm), ws = clock_width(110, sc);
         float x0 = 0.5f * ((float)CLOCK_W - (wt + (float)CLOCK_SEC_GAP + ws));
-        clock_put(b, 300, x0, CLOCK_BASE_Y, hm, 1);
-        clock_put(b, 110, x0 + wt + (float)CLOCK_SEC_GAP, CLOCK_BASE_Y, sc, 2);
-        clock_put(b, 52, 0.5f * ((float)CLOCK_W - clock_width(52, dt)), CLOCK_DATE_Y, dt, 3);
+        clock_layout(P, &n, 300, x0, CLOCK_BASE_Y, hm, 1);
+        clock_layout(P, &n, 110, x0 + wt + (float)CLOCK_SEC_GAP, CLOCK_BASE_Y, sc, 2);
+        clock_layout(P, &n, 52, 0.5f * ((float)CLOCK_W - clock_width(52, dt)), CLOCK_DATE_Y, dt, 3);
+        /* Only the glyphs that differ from what this buffer holds are redrawn: the digits are
+           tabular, so a changed number keeps every glyph's origin; a new layout (the count or an
+           origin changed - the date, 9:59 -> 10:00 in 12 h) redraws everything. */
+        const ClockPlace* H = g_clock.held[nb];
+        int same_layout = g_clock.valid[nb] && g_clock.nheld[nb] == n;
+        for (int i = 0; same_layout && i < n; i++)
+            same_layout = H[i].penx == P[i].penx && H[i].base == P[i].base && H[i].gid == P[i].gid;
+        if (same_layout) {
+            for (int i = 0; i < n; i++)
+                if (H[i].g != P[i].g) {
+                    /* the old glyph's tile and the new one's: both fields are rewritten */
+                    int c[4] = {H[i].x < P[i].x ? H[i].x : P[i].x,
+                                H[i].y < P[i].y ? H[i].y : P[i].y,
+                                H[i].x + H[i].g->w > P[i].x + P[i].g->w ? H[i].x + H[i].g->w
+                                                                        : P[i].x + P[i].g->w,
+                                H[i].y + H[i].g->h > P[i].y + P[i].g->h ? H[i].y + H[i].g->h
+                                                                        : P[i].y + P[i].g->h};
+                    c[0] = c[0] < 0 ? 0 : c[0];
+                    c[1] = c[1] < 0 ? 0 : c[1];
+                    c[2] = c[2] > CLOCK_W ? CLOCK_W : c[2];
+                    c[3] = c[3] > CLOCK_H ? CLOCK_H : c[3];
+                    clock_redraw(b, P, n, c);
+                }
+        } else {
+            const int all[4] = {0, 0, CLOCK_W, CLOCK_H};
+            clock_redraw(b, P, n, all);
+        }
+        for (int i = 0; i < n; i++)
+            g_clock.held[nb][i] = P[i];
+        g_clock.nheld[nb] = n;
+        g_clock.valid[nb] = 1;
         g_clock.cur = nb;
     }
     return g_clock.buf[g_clock.cur];

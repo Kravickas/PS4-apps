@@ -15,7 +15,8 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 FONT_PX = 19   # cap height 14 px: the PS4 debug overlay's text size at 1080p
 ICON_PX = 30   # scaled with the font (44 x 19 / 28), fits the 38 px line pitch
 ICONS = ["Cross_Color", "Circle_Color", "Square_Color", "Triangle_Color", "L1", "R1", "L2", "R2",
-         "Dpad_UP", "Dpad_Down", "Dpad_Left", "Dpad_Right", "Options", "L_2D", "R_2D"]
+         "Dpad_UP", "Dpad_Down", "Dpad_Left", "Dpad_Right", "Options", "L_2D", "R_2D",
+         "Left_Stick_Click", "Right_Stick_Click"]
 W = 1024
 
 

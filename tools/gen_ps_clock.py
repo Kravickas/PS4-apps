@@ -118,6 +118,10 @@ s_ = R.get(); e("v_sub_f32 v%d, 0, v%d" % (s_, d), "v_max_f32 v%d, 0, v%d" % (s_
 nx, ny, nz, h = R.get(), R.get(), R.get(), R.get(); bevel(nx, ny, nz, h, s_, 40.0, gx, gy); R.put(s_)
 tab = R.get(3)
 e("s_waitcnt vmcnt(0)")
+res = R.get(3)
+for c in range(3): e("v_mov_b32 v%d, v%d" % (res[c], fr[c]))
+e("; waves entirely > 100 px outside the slab: the frame (the slab's shadow there is < 1e-7)",
+  "v_cmp_gt_f32 vcc, %s, v%d" % (hx(100.0), d), "s_or_b32 s65, vcc_lo, vcc_hi", "s_cbranch_scc0 clock_done")
 for c in range(3):
     (rx, ry), lp, tm = R.get(2), R.get(), R.get()
     refract_path(nx, ny, nz, h, c, rx, ry, lp, tm)
@@ -191,7 +195,6 @@ expneg_sq(sh, ds, 24.0, 14.0); e("v_cmp_lt_f32 vcc, %s, v%d" % (hx(-60.0), ds), 
 expneg_sq(ca, ds, 9.0, 36.0)
 om = R.get(); e("v_sub_f32 v%d, 1.0, v%d" % (om, m), "v_mul_f32 v%d, v%d, v%d" % (sh, sh, om), "v_mul_f32 v%d, %s, v%d" % (sh, hx(-0.55 * 0.55), sh),
   "v_add_f32 v%d, 1.0, v%d" % (sh, sh), "v_mul_f32 v%d, v%d, v%d" % (ca, ca, om), "v_mul_f32 v%d, %s, v%d" % (ca, hx(0.10 * 0.6), ca))
-res = R.get(3)
 for c, cc in enumerate((1.0, 0.93, 0.8)):
     e("v_mul_f32 v%d, v%d, v%d" % (res[c], fr[c], sh), "v_mac_f32 v%d, %s, v%d" % (res[c], hx(cc), ca),
       "v_sub_f32 v%d, v%d, v%d" % (t, tab[c], res[c]), "v_mac_f32 v%d, v%d, v%d" % (res[c], t, m))
@@ -219,6 +222,9 @@ def tex_at(dd, gg, dxs, dys, want_g=True):
         R.put(*ic); R.put(*g2)
     R.put(*c2)
 dt, gt = R.get(), R.get(); tex_at(dt, gt, 0.0, 0.0); R.put(gt)
+e("; waves with no lane within 15 px of the text: nothing of it reaches them (shadows need d < 5.6",
+  "; within 7 px, caustics d < 0 within 9.1 px, the contact line d < 2.4, the letters d < 0.5)",
+  "v_cmp_gt_f32 vcc, %s, v%d" % (hx(15.0), dt), "s_or_b32 s65, vcc_lo, vcc_hi", "s_cbranch_scc0 clock_text_done")
 shade, caus = R.get(), R.get(); e("v_mov_b32 v%d, 0" % shade, "v_mov_b32 v%d, 0" % caus)
 offx, offy = R.get(), R.get()
 for g, th in ((1, 1.0), (2, 0.55), (3, 0.33)):
@@ -240,53 +246,69 @@ for g, th in ((1, 1.0), (2, 0.55), (3, 0.33)):
               "v_cmp_eq_f32 vcc, %s, v%d" % (hx(float(g)), gg), "v_cndmask_b32 v%d, 0, v%d, vcc" % (v, v), "v_add_f32 v%d, v%d, v%d" % (caus, caus, v))
         R.put(dd, gg, v)
 R.put(offx, offy)
-mi, omi = R.get(), R.get()
-e("v_sub_f32 v%d, 0.5, v%d" % (mi, dt), "v_max_f32 v%d, 0, v%d" % (mi, mi), "v_min_f32 v%d, 1.0, v%d" % (mi, mi), "v_sub_f32 v%d, 1.0, v%d" % (omi, mi),
-  "v_mul_f32 v%d, v%d, v%d" % (shade, shade, omi), "v_mul_f32 v%d, %s, v%d" % (shade, hx(-0.40), shade), "v_add_f32 v%d, 1.0, v%d" % (shade, shade),
-  "v_mul_f32 v%d, v%d, v%d" % (caus, caus, omi), "v_mul_f32 v%d, %s, v%d" % (caus, hx(0.30), caus), "v_mul_f32 v%d, %s, v%d" % (caus, STR, caus))
-cn = R.get(); band(cn, dt, -1.2, 1.2)
-e("v_mul_f32 v%d, v%d, v%d" % (cn, cn, omi), "v_mul_f32 v%d, %s, v%d" % (cn, hx(-0.40), cn), "v_add_f32 v%d, 1.0, v%d" % (cn, cn))
-for c in range(3):
-    e("v_mul_f32 v%d, v%d, v%d" % (res[c], res[c], shade), "v_mac_f32 v%d, %s, v%d" % (res[c], COL[c], caus), "v_mul_f32 v%d, v%d, v%d" % (res[c], res[c], cn))
-R.put(shade, caus, cn, omi)
-# the letters: bevel 9 from the text distance's gradient (two more samples)
-dxp, dyp, junk = R.get(), R.get(), R.get()
-tex_at(dxp, junk, 1.0, 0.0, want_g=False); tex_at(dyp, junk, 0.0, 1.0, want_g=False); R.put(junk)
-lgx, lgy = dxp, dyp
-e("v_sub_f32 v%d, v%d, v%d" % (lgx, lgx, dt), "v_sub_f32 v%d, v%d, v%d" % (lgy, lgy, dt),
-  "v_mul_f32 v%d, v%d, v%d" % (t, lgx, lgx), "v_mac_f32 v%d, v%d, v%d" % (t, lgy, lgy), "v_sqrt_f32 v%d, v%d" % (t, t),
-  "v_add_f32 v%d, %s, v%d" % (t, hx(1e-6), t), "v_rcp_f32 v%d, v%d" % (t, t), "v_mul_f32 v%d, v%d, v%d" % (lgx, lgx, t), "v_mul_f32 v%d, v%d, v%d" % (lgy, lgy, t))
-ls_ = R.get(); e("v_sub_f32 v%d, 0, v%d" % (ls_, dt), "v_max_f32 v%d, 0, v%d" % (ls_, ls_))
-lnx, lny, lnz, lh = R.get(), R.get(), R.get(), R.get(); bevel(lnx, lny, lnz, lh, ls_, 9.0, lgx, lgy); R.put(ls_)
-let = R.get(3)
-for c in range(3):
-    rx, ry, lp, tm = R.get(), R.get(), R.get(), R.get()
-    refract_path(lnx, lny, lnz, lh, c, rx, ry, lp, tm)
-    q = R.get()
-    e("v_mul_f32 v%d, %s, v%d" % (q, hx(0.35), ng[c]), "v_cmp_lt_f32 vcc, 0, v%d" % tm, "v_cndmask_b32 v%d, v%d, v%d, vcc" % (let[c], ng[c], q),
-      "v_mul_f32 v%d, %s, v%d" % (q, hx(-ABS[c] * L2E), lp), "v_exp_f32 v%d, v%d" % (q, q), "v_mul_f32 v%d, v%d, v%d" % (let[c], let[c], q))
-    R.put(q, rx, ry, lp, tm)
-F, kr = R.get(), R.get()
-e("v_sub_f32 v%d, 1.0, v%d" % (F, lnz), "v_mul_f32 v%d, v%d, v%d" % (t, F, F), "v_mul_f32 v%d, v%d, v%d" % (t, t, t),
-  "v_mul_f32 v%d, v%d, v%d" % (F, F, t), "v_mul_f32 v%d, %s, v%d" % (F, hx(0.96), F), "v_add_f32 v%d, %s, v%d" % (F, hx(0.04), F),
-  "v_mul_f32 v%d, %s, v%d" % (kr, hx(0.45), lnx), "v_mac_f32 v%d, %s, v%d" % (kr, hx(0.89), lny), "v_max_f32 v%d, 0, v%d" % (kr, kr))
-powi(t, kr, 6); e("v_mul_f32 v%d, %s, v%d" % (t, hx(1.6), t), "v_add_f32 v%d, %s, v%d" % (t, hx(0.10), t), "v_mul_f32 v%d, v%d, v%d" % (t, t, F), "v_sub_f32 v%d, 1.0, v%d" % (F, F))
-for c in range(3): e("v_mul_f32 v%d, v%d, v%d" % (let[c], let[c], F), "v_add_f32 v%d, v%d, v%d" % (let[c], let[c], t))
-R.put(F, kr, lnx, lny, lnz, lh); R.put(*ng)
-# light escaping the table into them, and their lit rims
-ie = R.get(); e("v_max_f32 v%d, %s, v%d" % (ie, hx(0.35), I), "v_min_f32 v%d, %s, v%d" % (ie, hx(1.6), ie), "v_mul_f32 v%d, %s, v%d" % (ie, hx(0.55), ie), "v_mul_f32 v%d, %s, v%d" % (ie, STR, ie))
-lb, lgl, lge, gw = R.get(), R.get(), R.get(), R.get()
-band(lb, dt, 1.5, 1.5)
-e("v_mul_f32 v%d, s%s, v%d" % (lge, L2X[1:], lgx), "v_mac_f32 v%d, s%s, v%d" % (lge, L2Y[1:], lgy),
+e("v_mul_f32 v%d, %s, v%d" % (shade, hx(-0.40), shade), "v_mul_f32 v%d, %s, v%d" % (caus, hx(0.30), caus), "v_mul_f32 v%d, %s, v%d" % (caus, STR, caus))
+# the letters' normal: the text distance's gradient by central differences over +-1.5 px (smooth
+# around the glyphs' corners - rounded glass)
+a1, a2, b1, b2, junk = R.get(), R.get(), R.get(), R.get(), R.get()
+tex_at(a1, junk, 1.5, 0.0, want_g=False); tex_at(a2, junk, -1.5, 0.0, want_g=False)
+tex_at(b1, junk, 0.0, 1.5, want_g=False); tex_at(b2, junk, 0.0, -1.5, want_g=False); R.put(junk)
+grx, gry = a1, b1
+e("v_sub_f32 v%d, v%d, v%d" % (grx, a1, a2), "v_mul_f32 v%d, %s, v%d" % (grx, hx(1.0 / 3.0), grx),
+  "v_sub_f32 v%d, v%d, v%d" % (gry, b1, b2), "v_mul_f32 v%d, %s, v%d" % (gry, hx(1.0 / 3.0), gry))
+R.put(a2, b2)
+lgx, lgy = R.get(), R.get()
+e("v_mul_f32 v%d, v%d, v%d" % (t, grx, grx), "v_mac_f32 v%d, v%d, v%d" % (t, gry, gry), "v_sqrt_f32 v%d, v%d" % (t, t),
+  "v_add_f32 v%d, %s, v%d" % (t, hx(1e-6), t), "v_rcp_f32 v%d, v%d" % (t, t), "v_mul_f32 v%d, v%d, v%d" % (lgx, grx, t), "v_mul_f32 v%d, v%d, v%d" % (lgy, gry, t))
+# per pixel: the light escaping the table into the letters, and the rims' direction terms
+ie, lgl, lge = R.get(), R.get(), R.get()
+e("v_max_f32 v%d, %s, v%d" % (ie, hx(0.35), I), "v_min_f32 v%d, %s, v%d" % (ie, hx(1.6), ie), "v_mul_f32 v%d, %s, v%d" % (ie, hx(0.55), ie), "v_mul_f32 v%d, %s, v%d" % (ie, STR, ie),
+  "v_mul_f32 v%d, s%s, v%d" % (lge, L2X[1:], lgx), "v_mac_f32 v%d, s%s, v%d" % (lge, L2Y[1:], lgy),
   "v_sub_f32 v%d, 0, v%d" % (lgl, lge), "v_max_f32 v%d, 0, v%d" % (lgl, lgl), "v_max_f32 v%d, 0, v%d" % (lge, lge))
-powi(t, lgl, 6); expneg_sq(gw, dt, 3.0, 1.5)
-e("v_mul_f32 v%d, v%d, v%d" % (lgl, lb, t), "v_mul_f32 v%d, %s, v%d" % (lgl, hx(1.1), lgl),
-  "v_mul_f32 v%d, v%d, v%d" % (lge, lge, lb), "v_mac_f32 v%d, %s, v%d" % (lgl, hx(0.55), lge),
-  "v_mul_f32 v%d, v%d, v%d" % (gw, gw, t), "v_mac_f32 v%d, 0.5, v%d" % (lgl, gw), "v_mul_f32 v%d, %s, v%d" % (lgl, STR, lgl),
-  "v_add_f32 v%d, v%d, v%d" % (ie, ie, lgl))
-for c in range(3): e("v_mac_f32 v%d, %s, v%d" % (let[c], COL[c], ie))
-e("v_mul_f32 v%d, v%d, v%d" % (mi, mi, m))
-for c in range(3): e("v_sub_f32 v%d, v%d, v%d" % (t, let[c], res[c]), "v_mac_f32 v%d, v%d, v%d" % (res[c], t, mi))
+p6 = R.get(); powi(p6, lgl, 6)
+# 4 rotated-grid sub-samples: d_k = d + g . o_k; each composited (shadow, caustic, contact line,
+# the letter) and clamped to 0..1, then averaged (the display's view of the pixel)
+acc = R.get(3)
+for c in range(3): e("v_mov_b32 v%d, 0" % acc[c])
+for (ox, oy) in ((-0.125, -0.375), (0.375, -0.125), (0.125, 0.375), (-0.375, 0.125)):
+    dk, mi, omi = R.get(), R.get(), R.get()
+    e("v_mul_f32 v%d, %s, v%d" % (dk, hx(ox), grx), "v_mac_f32 v%d, %s, v%d" % (dk, hx(oy), gry), "v_add_f32 v%d, v%d, v%d" % (dk, dk, dt),
+      "v_sub_f32 v%d, 0.5, v%d" % (mi, dk), "v_max_f32 v%d, 0, v%d" % (mi, mi), "v_min_f32 v%d, 1.0, v%d" % (mi, mi), "v_sub_f32 v%d, 1.0, v%d" % (omi, mi))
+    sm, cm, cn = R.get(), R.get(), R.get()
+    e("v_mul_f32 v%d, v%d, v%d" % (sm, shade, omi), "v_add_f32 v%d, 1.0, v%d" % (sm, sm), "v_mul_f32 v%d, v%d, v%d" % (cm, caus, omi))
+    band(cn, dk, -1.2, 1.2)
+    e("v_mul_f32 v%d, v%d, v%d" % (cn, cn, omi), "v_mul_f32 v%d, %s, v%d" % (cn, hx(-0.40), cn), "v_add_f32 v%d, 1.0, v%d" % (cn, cn))
+    r = R.get(3)
+    for c in range(3):
+        e("v_mul_f32 v%d, v%d, v%d" % (r[c], res[c], sm), "v_mac_f32 v%d, %s, v%d" % (r[c], COL[c], cm), "v_mul_f32 v%d, v%d, v%d" % (r[c], r[c], cn))
+    R.put(sm, cm, cn)
+    ls_ = R.get(); e("v_sub_f32 v%d, 0, v%d" % (ls_, dk), "v_max_f32 v%d, 0, v%d" % (ls_, ls_))
+    lnx, lny, lnz, lh = R.get(), R.get(), R.get(), R.get(); bevel(lnx, lny, lnz, lh, ls_, 9.0, lgx, lgy); R.put(ls_)
+    let = R.get(3)
+    for c in range(3):
+        rx, ry, lp, tm = R.get(), R.get(), R.get(), R.get()
+        refract_path(lnx, lny, lnz, lh, c, rx, ry, lp, tm)   # entering glass from air: no total reflection
+        e("v_mul_f32 v%d, %s, v%d" % (lp, hx(-ABS[c] * L2E), lp), "v_exp_f32 v%d, v%d" % (lp, lp), "v_mul_f32 v%d, v%d, v%d" % (let[c], ng[c], lp))
+        R.put(rx, ry, lp, tm)
+    F, kr = R.get(), R.get()
+    e("v_sub_f32 v%d, 1.0, v%d" % (F, lnz), "v_mul_f32 v%d, v%d, v%d" % (t, F, F), "v_mul_f32 v%d, v%d, v%d" % (t, t, t),
+      "v_mul_f32 v%d, v%d, v%d" % (F, F, t), "v_mul_f32 v%d, %s, v%d" % (F, hx(0.96), F), "v_add_f32 v%d, %s, v%d" % (F, hx(0.04), F),
+      "v_mul_f32 v%d, %s, v%d" % (kr, hx(0.45), lnx), "v_mac_f32 v%d, %s, v%d" % (kr, hx(0.89), lny), "v_max_f32 v%d, 0, v%d" % (kr, kr))
+    powi(t, kr, 6); e("v_mul_f32 v%d, %s, v%d" % (t, hx(1.6), t), "v_add_f32 v%d, %s, v%d" % (t, hx(0.10), t), "v_mul_f32 v%d, v%d, v%d" % (t, t, F), "v_sub_f32 v%d, 1.0, v%d" % (F, F))
+    for c in range(3): e("v_mul_f32 v%d, v%d, v%d" % (let[c], let[c], F), "v_add_f32 v%d, v%d, v%d" % (let[c], let[c], t))
+    R.put(F, kr, lnx, lny, lnz, lh)
+    lb, gw, rm = R.get(), R.get(), R.get()
+    band(lb, dk, 1.5, 1.5); expneg_sq(gw, dk, 3.0, 1.5)
+    e("v_mul_f32 v%d, v%d, v%d" % (rm, lb, p6), "v_mul_f32 v%d, %s, v%d" % (rm, hx(1.1), rm),
+      "v_mul_f32 v%d, v%d, v%d" % (lb, lb, lge), "v_mac_f32 v%d, %s, v%d" % (rm, hx(0.55), lb),
+      "v_mul_f32 v%d, v%d, v%d" % (gw, gw, p6), "v_mac_f32 v%d, 0.5, v%d" % (rm, gw), "v_mul_f32 v%d, %s, v%d" % (rm, STR, rm),
+      "v_add_f32 v%d, v%d, v%d" % (rm, rm, ie), "v_mul_f32 v%d, v%d, v%d" % (mi, mi, m))
+    for c in range(3):
+        e("v_mac_f32 v%d, %s, v%d" % (let[c], COL[c], rm), "v_sub_f32 v%d, v%d, v%d" % (t, let[c], r[c]), "v_mac_f32 v%d, v%d, v%d" % (r[c], t, mi),
+          "v_max_f32 v%d, 0, v%d" % (r[c], r[c]), "v_min_f32 v%d, 1.0, v%d" % (r[c], r[c]), "v_add_f32 v%d, v%d, v%d" % (acc[c], acc[c], r[c]))
+    R.put(lb, gw, rm, dk, mi, omi); R.put(*let); R.put(*r)
+for c in range(3): e("v_mul_f32 v%d, %s, v%d" % (res[c], hx(0.25), acc[c]))
+e("clock_text_done:")
+e("clock_done:")
 # ---- ps_ui's end: clamp, sRGB, dither
 e("v_mov_b32 v8, v%d" % res[0], "v_mov_b32 v9, v%d" % res[1], "v_mov_b32 v10, v%d" % res[2],
   "v_mul_f32 v20, 0x3d897143, v2", "v_mac_f32 v20, 0x3bbf4590, v3", "v_fract_f32 v20, v20", "v_mul_f32 v20, 0x4253ee82, v20",

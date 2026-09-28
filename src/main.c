@@ -221,7 +221,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "glass-clock"
+#define BUILD_TAG "clock-tz"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -506,6 +506,11 @@ static void* g_ps_clock_light_gpu = 0; /* its internal light (ps_clock_light) */
 static int g_clock_mode = 0;           /* Circle: the glass clock instead of the panels */
 static float* g_clock_entries = 0;     /* ps_clock_light's rim entries, 3 x CLOCK_RIM_MAX x 8 */
 static int g_clock_entry_buf = 0;
+static void* g_clock_light_rt =
+    0; /* the internal light field (480 x 270 RGBA16F), kept between frames */
+static int g_clock_light_dirty = 0; /* this frame recomputes it (the light's direction moved) */
+static int g_clock_light_valid = 0; /* it holds the field for g_clock_light_l2 */
+static float g_clock_light_l2[2];
 static void* g_ps_resolve_gpu = 0;
 static void* g_msaa_color = 0; /* 4-sample scene colour (RGBA16F, tile 13), 0 = MSAA off */
 static void* g_msaa_depth = 0; /* 4-sample scene depth (Z_32_FLOAT, 1D tiled) */
@@ -1858,11 +1863,17 @@ static void build_post_tables(uint32_t* tab) {
     lt[6] = CLOCK_LIGHT_S0;
     lt[7] = CLOCK_LIGHT_SPREAD;
     lt[8] = 4.0f; /* px per texel of the 480 x 270 target */
+    lt[9] = 0.5f * DISPLAY_W; /* the slab, for the pass's early-out */
+    lt[10] = 0.5f * DISPLAY_H;
+    lt[11] = 0.5f * CLOCK_W;
+    lt[12] = 0.5f * CLOCK_H;
+    lt[13] = CLOCK_RC;
     uint32_t* k = tab + CLOCK_BLOCK * 32;
     build_tsharp_f16(k, g_frame, DISPLAY_W, DISPLAY_H, DISPLAY_W);
     build_ssharp_clamp(k + 8, 1);
     build_tsharp_f16(k + 12, g_bloom_a[3], g_bloom_w[3], g_bloom_h[3], g_bloom_pitch[3]);
-    build_tsharp_f16(k + 20, g_bloom_b[0], g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
+    if (g_clock_light_rt)
+        build_tsharp_f16(k + 20, g_clock_light_rt, g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
     build_ssharp_clamp(k + 36, 0);
     float* kc = (float*)(k + 40);
     kc[0] = 0.5f * DISPLAY_W;
@@ -1978,8 +1989,8 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
 #define PS_RESOLVE_RSRC1 ((9u << 6) | 23u)   /* v0-v95, s0-s75 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
-#define PS_CLOCK_RSRC1 ((8u << 6) | 13u)     /* v55, s64 + VCC (clock mode) */
-#define PS_CLOCK_LIGHT_RSRC1 ((3u << 6) | 4u) /* v16, s23 + VCC (its internal light) */
+#define PS_CLOCK_RSRC1 ((8u << 6) | 17u)     /* v71, s68 incl. VCC */
+#define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -2018,7 +2029,7 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     for (int k = 0; k < 4; k++, f += 32)
         post_pass(b, (k & 1) ? g_bloom_a[1] : g_bloom_b[1], g_bloom_pitch[1], g_bloom_w[1],
                   g_bloom_h[1], CB_INFO_RGBA16F, g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, f, bg_v);
-    if (g_clock_mode && g_clock.ok && g_ps_clock_gpu) {
+    if (g_clock_mode && g_clock.ok && g_ps_clock_gpu && g_clock_light_rt) {
         /* clock mode: the frost on to 60 x 34, the internal light, the glass clock (ps_clock) */
         const uint32_t* c = g_post_tab + CLOCK_FROST_BLOCK * 32;
         for (int i = 2; i <= 3; i++, c += 32)
@@ -2028,9 +2039,10 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
             post_pass(b, (k & 1) ? g_bloom_a[3] : g_bloom_b[3], g_bloom_pitch[3], g_bloom_w[3],
                       g_bloom_h[3], CB_INFO_RGBA16F, g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, c,
                       bg_v);
-        post_pass(b, g_bloom_b[0], g_bloom_pitch[0], g_bloom_w[0], g_bloom_h[0], CB_INFO_RGBA16F,
-                  g_ps_clock_light_gpu, PS_CLOCK_LIGHT_RSRC1, g_post_tab + CLOCK_LIGHT_BLOCK * 32,
-                  bg_v);
+        if (g_clock_light_dirty) /* only when the light's direction moved (clock_frame) */
+            post_pass(b, g_clock_light_rt, g_bloom_pitch[0], g_bloom_w[0], g_bloom_h[0],
+                      CB_INFO_RGBA16F, g_ps_clock_light_gpu, PS_CLOCK_LIGHT_RSRC1,
+                      g_post_tab + CLOCK_LIGHT_BLOCK * 32, bg_v);
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
                   g_ps_clock_gpu, PS_CLOCK_RSRC1, g_post_tab + CLOCK_BLOCK * 32, bg_v);
     } else
@@ -3579,6 +3591,7 @@ int main(void) {
         g_bloom_b[i] = gpu_alloc(sz, 0x10000);
         post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
     }
+    g_clock_light_rt = gpu_alloc((unsigned long)g_bloom_pitch[0] * g_bloom_h[0] * 8, 0x10000);
 #if MSAA_SAMPLES > 1
     if (post_ok) {
         g_msaa_color = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 8 * MSAA_SAMPLES, 0x10000);
@@ -4213,8 +4226,10 @@ int main(void) {
            L2 / R2   camera down / up                 D-pad up / down: camera speed
            D-pad left / right: move the sun           OPTIONS: show / hide controls
            sticks: move / look. */
-        if (pressed & PAD_CIRCLE)
+        if (pressed & PAD_CIRCLE) {
             g_clock_mode = !g_clock_mode;
+            g_clock_light_valid = 0; /* recompute its light on entering */
+        }
         if (pressed & PAD_CROSS)
             cube_rotation_enabled = !cube_rotation_enabled;
         if (pressed & PAD_SQUARE)

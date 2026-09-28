@@ -277,9 +277,9 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
             {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT}, "Move the sun (time of day)"},
             {{UI_ICON_L_2D, -1}, "Move"},
             {{UI_ICON_R_2D, -1}, "Look"},
-            {{UI_ICON_L_2D, -1}, "Press: clock source (in-game / console / internet)"},
-            {{UI_ICON_R_2D, -1}, "Press: the sun follows the clock"},
-            {{UI_ICON_CIRCLE, -1}, "Clock"},
+            {{UI_ICON_LEFT_STICK_CLICK, -1}, "Clock source (in-game / console / internet)"},
+            {{UI_ICON_RIGHT_STICK_CLICK, -1}, "The sun follows the clock"},
+            {{UI_ICON_CIRCLE, -1}, "Clock mode"},
         };
         y += UI_LH + UI_GAP;
         for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
