@@ -117,22 +117,22 @@ v_mac_f32 v28, 0x3df5c28f, v29
 v_mul_f32 v26, s37, v26
 v_mul_f32 v27, s37, v27
 v_mul_f32 v28, s37, v28
-; uneven rays: glare texture (tools/make_glare.py) at 0.5 + (e - d) / 1.2 image heights
+; uneven rays: glare texture (tools/make_glare.py) at 0.5 + (e - d) / 0.6 image heights (was 1.2)
 v_sub_f32 v29, v24, v22
 v_sub_f32 v30, v25, v23
-v_mul_f32 v31, 0x3f555555, v29
+v_mul_f32 v31, 0x3fd55555, v29
 v_add_f32 v31, 0.5, v31
-v_mul_f32 v32, 0x3f555555, v30
+v_mul_f32 v32, 0x3fd55555, v30
 v_add_f32 v32, 0.5, v32
 image_sample_lz v[33:35], v[31:32], s[44:51], s[52:55] dmask:0x7
-; glow + veil while the sample is in flight (v31..v35 untouched): g / (1 + rho^2 / 0.08^2) + v / (1 + rho^2 / 0.40^2)
+; glow + veil while the sample is in flight (v31..v35 untouched): g / (1 + rho^2 / 0.04^2) + v / (1 + rho^2 / 0.20^2) (widths were 0.08, 0.40)
 v_mul_f32 v29, v29, v29
 v_mac_f32 v29, v30, v30
-v_mul_f32 v30, 0x431c4000, v29
+v_mul_f32 v30, 0x441c4000, v29
 v_add_f32 v30, 1.0, v30
 v_rcp_f32 v30, v30
 v_mul_f32 v30, s39, v30
-v_mul_f32 v36, 0x40c80000, v29
+v_mul_f32 v36, 0x41c80000, v29
 v_add_f32 v36, 1.0, v36
 v_rcp_f32 v36, v36
 v_mac_f32 v30, s40, v36

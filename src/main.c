@@ -183,7 +183,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "pom-window-ui"
+#define BUILD_TAG "predraw"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -341,6 +341,13 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
    probe had been standing in for it by accident, which is why the problem only
    appeared once that was removed.) */
 #define PACE_ON_FENCE_ONLY 0
+/* PREDRAW 1: after queuing frame N's flip, wait only until at most ONE flip is pending (N's)
+   instead of until N is on screen. Flip N-1 has then retired, so its old display buffer - frame
+   N+1's target with NUM_FRAMES 3 - is free, and frame N+1 renders while N waits for vblank: a
+   frame may take up to two refresh periods as long as the average fits in one. The CPU still
+   writes frame N+1's constants only after frame N's fence (the GPU has read them), so nothing
+   needs duplicating; the flip queue holds at most 2 (the 16-deep overflow cannot recur). */
+#define PREDRAW 1
 
 /* Back to 1. The submit-count discriminator would confound this run with the
    pacing change - one variable at a time. Set to 2 for that test afterwards. */
@@ -674,6 +681,22 @@ static void trace_line(const char *buf, unsigned long n){
 }
 /* trace_msg: write a plain string + fsync. */
 static void trace_msg(const char *s){ trace_line(s, lg_len(s)); }
+
+/* One "stat" trace line over EVERY frame of a window (the per-frame lines are sampled). */
+static void trace_stat(long long frame, long long n, long long dtmax, long long slow,
+                       long long miss, long long flips, long long vbl) {
+    static const char* k[7] = {"stat f=", " n=", " dtmax=", " slow=", " miss=", " flips=", " vbl="};
+    long long v[7] = {frame, n, dtmax, slow, miss, flips, vbl};
+    char L[192];
+    int p = 0;
+    for (int i = 0; i < 7; i++) {
+        for (const char* q = k[i]; *q; q++)
+            L[p++] = *q;
+        p += lg_i64(L + p, v[i]);
+    }
+    L[p++] = '\n';
+    trace_line(L, p);
+}
 
 /* Allocate GPU-visible memory of an explicit PS4 direct-memory type.
      MEM_TYPE_ONION  (0) WB, CPU<->GPU coherent  - command buffers, fences,
@@ -4314,7 +4337,7 @@ int main(void) {
                     sd[1] = 99.0f;
                 }
                 sd[2] = body[k][3];
-                sd[3] = 0.0f;
+                sd[3] = k ? moon_r : sun_r; /* radius: ps_dark's crisp moon edge */
             }
             /* Sun disc: amber at the horizon -> SUN_DAY_* (pale warm) at orig_sun_y
                0.15, held amber while it sets. Moon: cool blue. At SUN_HDR the core
@@ -4749,7 +4772,27 @@ int main(void) {
                 (void)tmo; (void)ev; out = 0;
 #else
                 /* Block for the flip event that paces this frame... */
+#if PREDRAW
+                /* Re-checked after every event: a leftover event from an earlier flip must not
+                   release the wait early. If the status cannot be read, fall back to the one
+                   blocking wait per frame (never free-run). */
+                int wr = 0;
+                out = 1;
+                for (;;) {
+                    OrbisVideoOutFlipStatus pfs;
+                    if (sceVideoOutGetFlipStatus(video, &pfs) != 0) {
+                        wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
+                        break;
+                    }
+                    if (pfs.numFlipPending <= 1)
+                        break;
+                    wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
+                    if (wr != 0 || out <= 0)
+                        break;
+                }
+#else
                 int wr = sceKernelWaitEqueue(flip_eq, &ev, 1, &out, &tmo);
+#endif
                 if (wr != 0 || out <= 0) {
                     g_evt_timeouts++;
                     /* Under FORCE_NO_FLIP no flip is ever queued, so no flip
@@ -4876,6 +4919,32 @@ int main(void) {
         uint64_t now = sceKernelGetProcessTime();
         static uint64_t prev_t = 0;
         uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
+        /* Frame statistics over EVERY frame: per 60 frames the worst dt, frames longer than one
+           refresh (> 17.5 ms) and than 1.5 refreshes (> 25 ms), and flips completed vs vblanks
+           elapsed in the window (equal = a new image on every refresh). */
+        {
+            static long long st_n = 0, st_max = 0, st_slow = 0, st_miss = 0, st_fl0 = -1,
+                             st_vb0 = -1;
+            if (dt) {
+                st_n++;
+                st_max = (long long)dt > st_max ? (long long)dt : st_max;
+                st_slow += dt > 17500;
+                st_miss += dt > 25000;
+            }
+            if (st_n >= 60) {
+                OrbisVideoOutFlipStatus sfs;
+                OrbisVideoOutVblankStatus svb;
+                long long fl = sceVideoOutGetFlipStatus(video, &sfs) == 0 ? (long long)sfs.num : -1;
+                long long vb =
+                    sceVideoOutGetVblankStatus(video, &svb) == 0 ? (long long)svb.count : -1;
+                trace_stat((long long)frame, st_n, st_max, st_slow, st_miss,
+                           (st_fl0 >= 0 && fl >= 0) ? fl - st_fl0 : -1,
+                           (st_vb0 >= 0 && vb >= 0) ? vb - st_vb0 : -1);
+                st_fl0 = fl;
+                st_vb0 = vb;
+                st_n = st_max = st_slow = st_miss = 0;
+            }
+        }
         if (dt > 30000 || g_fence_timeouts > 0) g_slow_tail = 400;
         else if (g_slow_tail > 0) g_slow_tail--;
         if ((frame % 16) == 0 || g_slow_tail > 0) {

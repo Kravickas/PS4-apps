@@ -1,4 +1,35 @@
 ============================================================
+PRE-DRAW + COMPLETE FRAME STATISTICS  (build=predraw)
+============================================================
+- PREDRAW 1: after queuing frame N's flip the loop waits only until at most ONE
+  flip is pending (sceVideoOutGetFlipStatus numFlipPending <= 1, re-checked after
+  every flip event) instead of until N is on screen. Frame N+1 then renders while
+  N waits for vblank: a frame may take up to two refresh periods as long as the
+  average fits in one (+1 frame of latency). Frame N+1's target (buffer
+  (N+1) % 3) was freed by flip N-1; the CPU still writes N+1's constants only
+  after N's fence, so nothing is duplicated; the flip queue holds at most 2.
+  PREDRAW 0 restores the wait for N's own flip. If the flip status cannot be
+  read, it falls back to one blocking flip-event wait (never free-runs).
+- The per-frame "f=" lines are sampled (every 16th frame, or all 400 after a
+  frame over 30 ms), so they miss slow frames of 17.5-30 ms. New "stat" line
+  every 60 frames over ALL frames: n, dtmax (us), slow (> 17.5 ms), miss (> 25
+  ms), flips completed and vblanks elapsed in the window (flips = vbl: a new
+  image on every refresh - what the system FPS counter reflects).
+
+============================================================
+MOON DISC + SMALLER SUN GLOW  (build=moon-disc)
+============================================================
+- Moon (ps_dark CAFE00E5): a flat disc with a one-pixel anti-aliased edge
+  (the full moon shows almost no limb darkening) instead of the soft
+  clamp(1 - d^2/r^2)^2 profile that faded to nothing at the rim; averaged over
+  its disc it is 3x brighter (0.33 -> 1.00 of its colour). The radius is passed
+  in desc[23]. The sun and the sky are unchanged (bit-identical outside the moon).
+- Sun glow (ps_post_final CAFE021C): the lens flare's glow, veil and rays at
+  half the size - glow width 0.08 -> 0.04, veil 0.40 -> 0.20 image heights, rays
+  over 0.6 instead of 1.2 image heights; strengths unchanged. Flare light around
+  the sun at 100 / 200 / 300 px: 0.81 / 0.40 / 0.26 -> 0.40 / 0.18 / 0.10.
+
+============================================================
 PARALLAX WINDOW 10-50 + UI REDRAW COST  (build=pom-window-ui)
 ============================================================
 - Floor parallax (ps_floor CAFE0127): full up to POM_FADE_START 10, linear fade

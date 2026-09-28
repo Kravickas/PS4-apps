@@ -40,16 +40,19 @@ v_sub_f32 v10, s17, v6
 v_mac_f32 v6, v10, v8
 v_sub_f32 v10, s18, v7
 v_mac_f32 v7, v10, v8
+; moon: flat disc (the full moon shows almost no limb darkening) with a one-pixel anti-aliased
+; edge: cov = clamp((r - d) * 540 + 0.5, 0, 1), d and r in aspect-corrected NDC (1 px = 1/540);
+; r = desc[23] (s23)
 v_subrev_f32 v8, s20, v2
 v_subrev_f32 v9, s21, v3
 v_mul_f32 v8, v8, v8
 v_mac_f32 v8, v9, v9
-v_rcp_f32 v9, s22
-v_mul_f32 v8, v8, v9
-v_sub_f32 v8, 1.0, v8
+v_sqrt_f32 v8, v8
+v_sub_f32 v8, s23, v8
+v_mul_f32 v8, 0x44070000, v8
+v_add_f32 v8, 0.5, v8
 v_max_f32 v8, 0, v8
 v_min_f32 v8, 1.0, v8
-v_mul_f32 v8, v8, v8
 v_sub_f32 v10, s24, v5
 v_mac_f32 v5, v10, v8
 v_sub_f32 v10, s25, v6
