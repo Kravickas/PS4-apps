@@ -506,9 +506,9 @@ float atmo_tilted_y(const float L[3], const float tilt[3]) {
     return L[1] * c + hl * sn;
 }
 void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float R[3],
-                     const float U[3], float tan_half_fov, const float tilt[3], const float sun[3],
-                     float sun_scale, const float moon[3], float moon_sky_scale,
-                     const float moon_view[3]) {
+                     const float U[3], float tan_half_fov, const float tilt[3],
+                     const float ground[4], const float sun[3], float sun_scale,
+                     const float moon[3], float moon_sky_scale, const float moon_view[3]) {
     (void)s;
     for (int i = 0; i < 40; i++)
         d[i] = 0.0f;
@@ -531,8 +531,17 @@ void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float
         float* o = d + (k ? 28 : 16);
         o[0] = hl > 1e-6f ? L[k][0] / hl : 1.0f;
         o[1] = hl > 1e-6f ? L[k][2] / hl : 0.0f;
-        slice_of(atmo_tilted_y(L[k], tilt), &o[2], &o[3], k ? &d[32] : &d[20]);
     }
+    /* ps_dark picks each pixel's light slices from its view ray's lowest point: the camera over the
+       floor and the dip rule sqrt(2 / (R hc)) x height (the camera's own dip at hc, 0 at the
+       tangent) */
+    double hc = (double)ground[2] +
+                ((double)ground[0] * ground[0] + (double)ground[1] * ground[1]) * 0.5 * ground[3];
+    d[18] = hc > 0.0 ? (float)a_sqrt(2.0 * ground[3] / hc) : 0.0f;
+    d[21] = ground[0];
+    d[22] = ground[1];
+    d[23] = ground[2];
+    d[39] = ground[3];
     d[36] = ATMO_LIMB_R;
     d[37] = ATMO_LIMB_G;
     d[38] = ATMO_LIMB_B;
@@ -579,23 +588,25 @@ static uint16_t to_half(float f) {
         r++;
     return (uint16_t)(sg | r);
 }
-void atmo_horizon_table(const AtmoAsset* s, float sun_y, float sun_scale, float moon_y,
-                        float moon_scale, uint16_t* out) {
-    (void)s;
-    const float ys[2] = {sun_y, moon_y}, sc[2] = {sun_scale, moon_scale};
-    for (int k = 0; k < 2; k++) {
-        float r0, r1, f;
-        slice_of(ys[k], &r0, &r1, &f);
-        int k0 = (int)r0 / ATMO_SKY_H, k1 = (int)r1 / ATMO_SKY_H;
-        for (int t = 0; t < 3; t++)
+void atmo_horizon_texture(uint16_t* out) {
+    for (int t = 0; t < 3; t++)
+        for (int k = 0; k < ATMO_SLICES; k++)
             for (int i = 0; i < ATMO_SKY_W; i++) {
-                uint16_t* o = out + ((long)(k * 3 + t) * ATMO_SKY_W + i) * 4;
-                for (int c = 0; c < 3; c++) {
-                    float a = g_hz[t][k0][i][c], b = g_hz[t][k1][i][c];
-                    o[c] = to_half((a + (b - a) * f) * sc[k]);
-                }
+                uint16_t* o = out + ((long)(t * ATMO_SLICES + k) * ATMO_SKY_W + i) * 4;
+                for (int c = 0; c < 3; c++)
+                    o[c] = to_half(g_hz[t][k][i][c]);
                 o[3] = 0;
             }
+}
+void atmo_trans_table(const AtmoAsset* s, uint16_t* out) {
+    float t1[3];
+    atmo_light_ground(s, 1.0f, t1);
+    for (int i = 0; i < ATMO_TRANS_N; i++) {
+        float u = ((float)i + 0.5f) / ATMO_TRANS_N, t[3];
+        atmo_light_ground(s, u * u, t);
+        for (int c = 0; c < 3; c++)
+            out[i * 4 + c] = to_half(t[c] / t1[c]);
+        out[i * 4 + 3] = 0;
     }
 }
 

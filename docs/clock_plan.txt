@@ -1,0 +1,74 @@
+CLOCK MODE (Circle) - implementation plan (stage 2; stage 1 = build clock-time)
+
+Look (approved previews, /mnt/user-data/outputs/clock_final/clock_lit_text_{day,night}.png):
+an edge-lit frosted glass slab, centred, 1152 x 648 (60 % of the screen), corner radius 56,
+glass text lying ON it. In clock mode the options panel and the time panel are hidden.
+
+Slab (per pixel, linear, before the sRGB encode):
+- Height profile: bevel 40 px, quarter circle h(s) = 40 sqrt(1 - (1 - s/40)^2), s = distance
+  inside the rounded rect (SDF); flat inside. Normal from the profile's gradient.
+- View ray (0,0,-1) refracts into the top face (IOR per channel R 1.514, G 1.517, B 1.522),
+  crosses h to the flat back face, refracts out, meets the scene 300 px behind; total internal
+  reflection -> the frame x 0.35. Absorption exp(-(0.0010, 0.0005, 0.0008) x path).
+- Source: the heavy frost (sigma ~45 px): the frost chain extended 240 -> 120 -> 60 wide and
+  blurred H V H V at 60 x 34 (g_bloom_a[3]); the bevel samples it at the refracted offsets.
+- Grain: x (1 + 0.035 n), n unit noise (a small tiling noise texture or a hash).
+- Fresnel (Schlick F0 0.04): out = out (1 - F) + F env, env = 0.10 + 1.6 max(0, -n.key)^6,
+  key = (-0.45, -0.89) (top left).
+- Glass shadow outside: dark where the bevel bends light away (0.55, blurred, offset 16 down /
+  8 right) and a faint caustic (0.10) just inside it.
+
+Internal light (edge-lit): the light's screen direction l2 = normalize(slab centre - light's
+screen position) (off screen: its projected direction). Rim samples every 3 px facing the light
+(cos = -n.l2 > 0): refracted in (2D Snell, 1/1.5), weight cos (1 - F); beams: exp(-dist/170)
+x Gaussian across (sigma 3 + 0.07 x along) / (sigma sqrt(2 pi)). Field I and mean direction T at
+1/4 res: a GPU pass (ps_clock_light) over the lit rim entries the CPU lists per frame (px, py,
+tx w, ty w). I normalised so the 90th percentile over every point >= 30 px inside the rim = 1
+(src/clock_light_norm.h, per 2 degrees of the light's direction; the preview's rrect_sdf clamps
+at -56 inside, so its '-60 < d < -30' band was exactly this).
+- The table: + strength x fill x clamp(I, 0, 2) x colour (fill: day 0.18, night 0.14).
+- Exit glow on the rim band (|d + 3| < 3): band x I x max(0, n.T) (x 0.9, + blur 5 x 0.4).
+- Glint where the light strikes: band x max(0, -n.l2)^40 (x 2.2, + blur 12 x 1.8), colour
+  0.5 + 0.5 col.
+
+Light: the sun when up, else the moon (the scene's light); colour = the scene light colour
+(desc[32], normalised to max 1); strength day 1.35, night 0.85.
+
+Text on the table (glass pieces): "15:40" URW Gothic Demi 300 px, ":26" 110 px (grey), the date
+52 px; baselines CY + 85 and CY + 187 (the date centred). SDF per group, thickness 1.0 / 0.55 /
+0.33.
+- Shadow: max over groups of blur(mask shifted by l2 x 7 x th, 1.5 + 3 th) -> x (1 - 0.40 x).
+- Caustic: rim ring (|d + 3 th| < 3 th) shifted by l2 x 9.1 th, blur 1 + 2.5 th -> + 0.30 col.
+- Contact line: |d - 1.2| < 1.2 outside -> x (1 - 0.40).
+- Letters: the table under them refracted through a 9 px bevel (dbg 40), frost 6;
+  + 0.55 x clamp(I, 0.35, 1.6) x col (light escaping the table into them: frustrated TIR);
+  rims (|d + 1.5| < 1.5): facing the light ^6 x 1.1, the far side x 0.55, + blur 2 x 0.5.
+
+GPU pieces: ps_clock (replaces ps_ui in clock mode: the clock + the same sRGB / dither end),
+ps_clock_light (1/4 res internal light), frost chain + 6 passes, the text SDF texture (RG8:
+signed distance x 8 + 128, the group) composed by the CPU from a glyph SDF atlas
+(tools/make_clock_sdf.py -> assets/ui/clock_sdf.bin, src/clock_sdf.h) when the text changes.
+
+Status (session 10):
+- DONE tools/make_clock_sdf.py -> assets/ui/clock_sdf.bin (2048 x 588 R8) + src/clock_sdf.h: composed
+  text vs a direct render: identical coverage, |d| diff <= 0.25 px.
+- DONE src/clock.h (not yet included in main.c): atlas load, layout, date (civil-from-days, checked
+  vs Python over years 1..9999), RG8 composition when the text changes (triple buffer); texture vs
+  direct render identical coverage, 0.26 px.
+- DONE per-pixel GPU model docs/clock_model/gpumodel.py (clock_gpu): matches the approved preview
+  by day and night. The shader must reproduce clock_gpu (emulator check against it).
+- TODO ps_clock (generator like ps_resolve's; replaces ps_ui in clock mode, same sRGB / dither
+  end), ps_clock_light (1/4 res internal light over CPU-listed rim entries), frost chain + 240 ->
+  120 -> 60 and H V H V at 60 x 34, CPU constants (light screen direction / colour / strength),
+  Circle wiring (hide both panels), README, build.
+- DONE src/clock_light_norm.h (tools/make_clock_light_norm.py; exact preview normaliser per 2 deg).
+- DONE shaders/ps_clock_light.s: vs float64 (584-entry loop) 3e-6 of peak (emulator gcnemu4: scalar
+  loop + buffer loads). Entries: /tmp/clk/light_entries.py (to port to C).
+- DONE shaders/ps_clock.s (tools/gen_ps_clock.py): vs float64 reference (docs/clock_model, pc_ref)
+  1.55e-5 in sRGB over 3000 px (dither constants exact).
+- TODO main.c: frost chain + 240->120->60 & H V H V at 60 x 34, ps_clock_light pass into
+  g_bloom_b[0], ps_clock instead of ps_ui in clock mode, RG8 T# for the text, entries (C port),
+  light screen direction / colour / strength, Circle, headers (CAFE0303 ps_clock, CAFE0304 light).
+- DONE main.c (build glass-clock): frost + 6 passes to 60 x 34, ps_clock_light into g_bloom_b[0],
+  ps_clock instead of ps_ui in clock mode, RG8 T#, src/clock_frame.h (C entries vs Python: positions
+  1e-4 px, weights 3e-5 rel), light direction / colour / strength, Circle. Hardware test pending.

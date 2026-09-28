@@ -167,6 +167,15 @@
 #define CAM_FAR 2500.0f      /* the farthest visible floor: the horizon, <= 1673 away */
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
+/* D-pad left / right time-of-day scrub (sun_angle, rad/s): 1 deg/s at the press, doubling every
+   second held, capped at the previous fixed rate 0.2592 (14.85 deg/s, reached after 3.9 s). */
+#define DAY_SCRUB_START 0.017453293f
+#define SUN_GLIDE_S 2.0f /* R3 / L3: the sun glides to the clock's position over this */
+#define DAY_SCRUB_DOUBLE 1.0f
+#define DAY_SCRUB_MAX 0.2592f
+/* Moonlight colour (sRGB, desaturated cool blue) x its transmittance: the night light of the cube
+   (desc[32]) and of every floor point (ps_floor, desc[117..119] linear) */
+static const float k_moon_light_srgb[3] = {0.52f, 0.64f, 0.84f};
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
 /* Was 0.25: same glow shape at 0.4x the strength (sun: +0.20 at 60 px, +0.05 at 100 px). */
 #define BLOOM_INTENSITY 0.1f
@@ -212,7 +221,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "arena-sky"
+#define BUILD_TAG "glass-clock"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -465,13 +474,22 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
 #define FROST_PASSES 6
 #define UI_BLOCK (FROST_BLOCK + FROST_PASSES)
 #define RESOLVE_BLOCK (UI_BLOCK + 2)
-#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 3) /* the resolve uses three blocks */
+#define CLOCK_FROST_BLOCK                                                                          \
+    (RESOLVE_BLOCK + 3) /* the resolve uses three blocks; clock mode: frost                        \
+                         */
+#define CLOCK_LIGHT_BLOCK                                                                          \
+    (CLOCK_FROST_BLOCK + 6)                 /* 240 -> 120 -> 60, H V H V at 60 x 34; light         \
+                                             */
+#define CLOCK_BLOCK (CLOCK_LIGHT_BLOCK + 1) /* ps_clock: 64 dwords */
+#define POST_TABLE_BLOCKS (CLOCK_BLOCK + 2)
 static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
 static uint32_t* g_post_tab = 0;
-static uint16_t* g_hz_table =
-    0; /* ps_resolve: the sky's horizon, 64 x 6 RGBA16F (atmo_horizon_table) */
+static uint16_t* g_hz_table = 0; /* ps_resolve: the sky's horizon at every slice, 64 x 168 RGBA16F
+                                   (atmo_horizon_texture, static) */
+static uint16_t* g_trans_table =
+    0; /* ps_floor: sunlight through the atmosphere, 256 x 1 RGBA16F (atmo_trans_table) */
 /* Prop box for the lens flare occlusion test: model-space bounds and the world
    transform (3x4 rows) of the loaded model, or of the built-in cube (+-0.4). */
 static float g_prop_lo[3] = {-0.4f, -0.4f, -0.4f};
@@ -483,6 +501,11 @@ static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
 static void* g_ps_ui_gpu = 0;
+static void* g_ps_clock_gpu = 0;       /* clock mode's UI pass (ps_clock, docs/clock_plan.txt) */
+static void* g_ps_clock_light_gpu = 0; /* its internal light (ps_clock_light) */
+static int g_clock_mode = 0;           /* Circle: the glass clock instead of the panels */
+static float* g_clock_entries = 0;     /* ps_clock_light's rim entries, 3 x CLOCK_RIM_MAX x 8 */
+static int g_clock_entry_buf = 0;
 static void* g_ps_resolve_gpu = 0;
 static void* g_msaa_color = 0; /* 4-sample scene colour (RGBA16F, tile 13), 0 = MSAA off */
 static void* g_msaa_depth = 0; /* 4-sample scene depth (Z_32_FLOAT, 1D tiled) */
@@ -1542,7 +1565,8 @@ static void cam_basis(float yaw, float pitch, float* F, float* R, float* U) {
 }
 
 /* The camera above the curved floor: its height hc and the dipped horizon's tilt (sqrt(2 hc / R),
-   x / R, z / R) - ps_dark's sky rows and ps_resolve's horizon use the same. */
+   x / R, z / R) - ps_dark's sky rows, ps_resolve's horizon and the sun / moon disc colours use the
+   same. */
 static void cam_horizon(float cx, float cy, float cz, float* hc, float tilt[3]) {
     float h = cy + 0.5f + (cx * cx + cz * cz) / (2.0f * FLOOR_R);
     if (h < 0.0f)
@@ -1665,6 +1689,16 @@ static void build_tsharp_f16(uint32_t* t, void* tex, int w, int h, int pitch) {
     t[3] = 4u | (5u << 3) | (6u << 6) | (7u << 9) | (8u << 20) | (9u << 28);
     t[4] = (uint32_t)(pitch - 1) << 13;
 }
+/* RG8 UNORM, linear aligned (clock mode's text distance: R = 128 + 8 d, G = the group). */
+static void build_tsharp_rg8(uint32_t* t, const void* tex, int w, int h, int pitch) {
+    uint64_t a = (uint64_t)(uintptr_t)tex;
+    my_memset(t, 0, 32);
+    t[0] = (uint32_t)(a >> 8);
+    t[1] = (uint32_t)(a >> 40) | (3u << 20) | (0u << 26); /* 8_8 | UNORM */
+    t[2] = (uint32_t)(w - 1) | ((uint32_t)(h - 1) << 14);
+    t[3] = 4u | (5u << 3) | (4u << 6) | (5u << 9) | (8u << 20) | (9u << 28);
+    t[4] = (uint32_t)(pitch - 1) << 13;
+}
 
 /* The 4-sample scene depth as a texture (ps_resolve): Z_32_FLOAT written by the DB with
    DB_DEPTH_INFO ARRAY_1D_TILED_THIN1 (depth micro tiles) = PS4 tile index 5 Depth1DThin (shadPS4
@@ -1699,7 +1733,12 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
     f[2] = c;
     f[3] = d;
 }
+#include "timesrc.h"
 #include "ui.h"
+
+/* after timesrc.h / ui.h: the clock uses g_ts */
+#include "clock.h"
+#include "clock_frame.h"
 
 static void build_post_tables(uint32_t* tab) {
     my_memset(tab, 0, POST_TABLE_BLOCKS * 32 * 4);
@@ -1776,7 +1815,8 @@ static void build_post_tables(uint32_t* tab) {
         build_tsharp_f16(r, g_msaa_color, DISPLAY_W, DISPLAY_H, DISPLAY_W);
         build_tsharp_depth_msaa(r + 8, g_msaa_depth, DISPLAY_W, DISPLAY_H); /* sample depths */
         if (g_hz_table)
-            build_tsharp_f16(r + 16, g_hz_table, ATMO_SKY_W, 6, ATMO_SKY_W); /* the sky's horizon */
+            build_tsharp_f16(r + 16, g_hz_table, ATMO_SKY_W, 3 * ATMO_SLICES,
+                             ATMO_SKY_W); /* the sky's horizon, every slice */
         build_ssharp_clamp(r + 24, 1);                                       /* bilinear, clamp */
         r[3] = (r[3] & ~((0x1Fu << 20) | (0xFu << 28) | (0xFu << 16) | (0xFu << 12))) |
                ((uint32_t)MSAA_TILE_INDEX << 20) | (0xEu << 28) | (2u << 16);
@@ -1789,6 +1829,53 @@ static void build_post_tables(uint32_t* tab) {
     post_consts(u, 1.0f / DISPLAY_W, 1.0f / DISPLAY_H, 0.0f, 0.0f);
     build_tsharp_f16(u + 16, g_bloom_a[1], g_bloom_w[1], g_bloom_h[1], g_bloom_pitch[1]);
     build_ssharp_clamp(u + 24, 1);
+    /* Clock mode (docs/clock_plan.txt): the frost continued 240 -> 120 -> 60 wide and blurred
+       H V H V at 60 x 34 into g_bloom_a[3] (~45 px), ps_clock_light's constants, ps_clock's static
+       part (frame, frost, the light T# g_bloom_b[0], S#s, the slab). */
+    uint32_t* c = tab + CLOCK_FROST_BLOCK * 32;
+    for (int i = 2; i <= 3; i++, c += 32) {
+        build_tsharp_f16(c, g_bloom_a[i - 1], g_bloom_w[i - 1], g_bloom_h[i - 1],
+                         g_bloom_pitch[i - 1]);
+        build_ssharp_clamp(c + 8, 1);
+        post_consts(c, 1.0f / g_bloom_w[i], 1.0f / g_bloom_h[i], 1.0f / g_bloom_w[i - 1],
+                    1.0f / g_bloom_h[i - 1]);
+        ((float*)c)[28] = 0.0f;
+    }
+    for (int k = 0; k < 2; k++) {
+        float w = g_bloom_w[3], h = g_bloom_h[3];
+        build_tsharp_f16(c, g_bloom_a[3], (int)w, (int)h, g_bloom_pitch[3]);
+        build_ssharp_clamp(c + 8, 1);
+        post_consts(c, 1.0f / w, 1.0f / h, 1.0f / w, 0.0f);
+        c += 32;
+        build_tsharp_f16(c, g_bloom_b[3], (int)w, (int)h, g_bloom_pitch[3]);
+        build_ssharp_clamp(c + 8, 1);
+        post_consts(c, 1.0f / w, 1.0f / h, 0.0f, 1.0f / h);
+        c += 32;
+    }
+    float* lt = (float*)(tab + CLOCK_LIGHT_BLOCK * 32);
+    lt[4] = 1.44269504f / CLOCK_LIGHT_LS;
+    lt[5] = 0.5f * 1.44269504f;
+    lt[6] = CLOCK_LIGHT_S0;
+    lt[7] = CLOCK_LIGHT_SPREAD;
+    lt[8] = 4.0f; /* px per texel of the 480 x 270 target */
+    uint32_t* k = tab + CLOCK_BLOCK * 32;
+    build_tsharp_f16(k, g_frame, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+    build_ssharp_clamp(k + 8, 1);
+    build_tsharp_f16(k + 12, g_bloom_a[3], g_bloom_w[3], g_bloom_h[3], g_bloom_pitch[3]);
+    build_tsharp_f16(k + 20, g_bloom_b[0], g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
+    build_ssharp_clamp(k + 36, 0);
+    float* kc = (float*)(k + 40);
+    kc[0] = 0.5f * DISPLAY_W;
+    kc[1] = 0.5f * DISPLAY_H;
+    kc[2] = 0.5f * CLOCK_W;
+    kc[3] = 0.5f * CLOCK_H;
+    kc[4] = CLOCK_RC;
+    kc[5] = 1.0f / DISPLAY_W;
+    kc[6] = 1.0f / DISPLAY_H;
+    kc[14] = 0.5f * (DISPLAY_W - CLOCK_W);
+    kc[15] = 0.5f * (DISPLAY_H - CLOCK_H);
+    kc[16] = 1.0f / CLOCK_W;
+    kc[17] = 1.0f / CLOCK_H;
 }
 
 /* CB_COLOR0_INFO: FORMAT @2, LINEAR_GENERAL @7, NUMBER_TYPE @8, COMP_SWAP @11,
@@ -1889,8 +1976,10 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
-#define PS_RESOLVE_RSRC1 ((9u << 6) | 17u)   /* v0-v70, s0-s75 + VCC */
+#define PS_RESOLVE_RSRC1 ((9u << 6) | 23u)   /* v0-v95, s0-s75 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
+#define PS_CLOCK_RSRC1 ((8u << 6) | 13u)     /* v55, s64 + VCC (clock mode) */
+#define PS_CLOCK_LIGHT_RSRC1 ((3u << 6) | 4u) /* v16, s23 + VCC (its internal light) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -1929,8 +2018,24 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     for (int k = 0; k < 4; k++, f += 32)
         post_pass(b, (k & 1) ? g_bloom_a[1] : g_bloom_b[1], g_bloom_pitch[1], g_bloom_w[1],
                   g_bloom_h[1], CB_INFO_RGBA16F, g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, f, bg_v);
-    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
-              PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
+    if (g_clock_mode && g_clock.ok && g_ps_clock_gpu) {
+        /* clock mode: the frost on to 60 x 34, the internal light, the glass clock (ps_clock) */
+        const uint32_t* c = g_post_tab + CLOCK_FROST_BLOCK * 32;
+        for (int i = 2; i <= 3; i++, c += 32)
+            post_pass(b, g_bloom_a[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i],
+                      CB_INFO_RGBA16F, g_ps_post_down_gpu, PS_POST_DOWN_RSRC1, c, bg_v);
+        for (int k = 0; k < 4; k++, c += 32)
+            post_pass(b, (k & 1) ? g_bloom_a[3] : g_bloom_b[3], g_bloom_pitch[3], g_bloom_w[3],
+                      g_bloom_h[3], CB_INFO_RGBA16F, g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, c,
+                      bg_v);
+        post_pass(b, g_bloom_b[0], g_bloom_pitch[0], g_bloom_w[0], g_bloom_h[0], CB_INFO_RGBA16F,
+                  g_ps_clock_light_gpu, PS_CLOCK_LIGHT_RSRC1, g_post_tab + CLOCK_LIGHT_BLOCK * 32,
+                  bg_v);
+        post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
+                  g_ps_clock_gpu, PS_CLOCK_RSRC1, g_post_tab + CLOCK_BLOCK * 32, bg_v);
+    } else
+        post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
+                  PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
 }
 
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -2137,8 +2242,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Draw 1: BG quad with sky PS (sun disc)
     {
         uint64_t a = (uint64_t)(uintptr_t)ps_bg;
-        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (12u << 6) | 11u, (2u << 1)};
-        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4); /* ps_dark: v0-v44, s0-s101 + VCC -> 48 / 104 */
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (12u << 6) | 12u, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4); /* ps_dark: v0-v50, s0-s101 + VCC -> 52 / 104 */
         /* Sky PS needs desc ptr for sun position */
         uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
                           (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
@@ -3189,13 +3294,24 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
+    ts_init();
+    clock_rim_init();
+    int clock_err = clock_init();
     {
-        char L[48];
+        char L[80];
         int p = 0;
         const char* m = "ui_init: ";
         while (*m)
             L[p++] = *m++;
         p += lg_i64(L + p, (long long)ui_err);
+        m = " clock_init: ";
+        while (*m)
+            L[p++] = *m++;
+        p += lg_i64(L + p, (long long)clock_err);
+        m = " rim: ";
+        while (*m)
+            L[p++] = *m++;
+        p += lg_i64(L + p, (long long)g_clock_rim_n);
         L[p++] = '\n';
         trace_line(L, (unsigned long)p);
     }
@@ -3291,15 +3407,34 @@ int main(void) {
     build_ssharp_clamp(desc + 228, 1);
     build_tsharp_tex(desc + 232, &moon_alb);
     build_ssharp_height(desc + 240);
+    /* ps_floor's globe lighting: the transmittance table T# desc[244] (sampler desc[228]), the
+       moonlight colour (linear) and MOON_LIGHT desc[117..120], 1 / FLOOR_R desc[252]. Without the
+       asset the table is white (1.0 = 0x3C00): the floor keeps a neutral light. */
+    g_trans_table = (uint16_t*)gpu_alloc_typed(ATMO_TRANS_N * 8, 0x100, MEM_TYPE_ONION);
+    if (!g_trans_table)
+        FATAL_EXIT("transmittance table alloc failed");
+    if (g_atmo_ok)
+        atmo_trans_table(&g_atmo, g_trans_table);
+    else
+        for (int i = 0; i < ATMO_TRANS_N * 4; i++)
+            g_trans_table[i] = 0x3C00;
+    build_tsharp_f16(desc + 244, g_trans_table, ATMO_TRANS_N, 1, ATMO_TRANS_N);
+    {
+        float* ml = (float*)(desc + 117);
+        for (int c = 0; c < 3; c++)
+            ml[c] = srgb_to_linear(k_moon_light_srgb[c]);
+        ml[3] = MOON_LIGHT;
+        ((float*)desc)[252] = 1.0f / FLOOR_R;
+    }
     {
         const float F[3] = {0.0f, 0.0f, -1.0f}, R[3] = {1.0f, 0.0f, 0.0f},
                     U[3] = {0.0f, 1.0f, 0.0f};
         const float sun[3] = {0.0f, 0.70710678f, -0.70710678f},
                     moon[3] = {0.0f, -0.70710678f, 0.70710678f};
         const float mv[3] = {0.0f, 0.0f, 1.0f};
-        const float tilt[3] = {0.0f, 0.0f, 0.0f};
+        const float tilt[3] = {0.0f, 0.0f, 0.0f}, ground[4] = {0.0f, 0.0f, 0.0f, 1.0f / FLOOR_R};
         atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_sin(0.3054f) / my_cos(0.3054f),
-                        tilt, sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
+                        tilt, ground, sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
     }
     build_tsharp_tex(desc + 72, &floor_nrm);
     /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
@@ -3460,15 +3595,15 @@ int main(void) {
     trace_msg(g_msaa_color ? "msaa: 4x (colour 66355200 B, depth 33177600 B, tile 13)\n"
                            : "msaa: off\n");
     g_post_tab = (uint32_t*)gpu_alloc_typed(POST_TABLE_BLOCKS * 32 * 4, 0x100, MEM_TYPE_ONION);
-    g_hz_table = (uint16_t*)gpu_alloc_typed(ATMO_SKY_W * 6 * 8, 0x100, MEM_TYPE_ONION);
-    if (g_hz_table) { /* the default sky's until the frame loop writes it */
-        my_memset(g_hz_table, 0, ATMO_SKY_W * 6 * 8);
-        if (g_atmo_ok) {
-            const float* sk = (const float*)(desc + 164);
-            const float tilt0[3] = {0.0f, 0.0f, 0.0f};
-            atmo_horizon_table(&g_atmo, atmo_tilted_y(sk + 12, tilt0), SKY_SUN_SCALE,
-                               atmo_tilted_y(sk + 24, tilt0), MOON_SKY_SCALE, g_hz_table);
-        }
+    g_clock_entries = (float*)gpu_alloc_typed(3 * CLOCK_RIM_MAX * 32, 0x100, MEM_TYPE_ONION);
+    if (!g_clock_entries)
+        g_clock.ok = 0; /* no clock mode */
+    g_hz_table =
+        (uint16_t*)gpu_alloc_typed(ATMO_SKY_W * 3 * ATMO_SLICES * 8, 0x100, MEM_TYPE_ONION);
+    if (g_hz_table) { /* static: ps_resolve picks each pixel's slices (black without the asset) */
+        my_memset(g_hz_table, 0, ATMO_SKY_W * 3 * ATMO_SLICES * 8);
+        if (g_atmo_ok)
+            atmo_horizon_texture(g_hz_table);
     }
     if (post_ok && g_post_tab) {
         build_post_tables(g_post_tab);
@@ -3545,6 +3680,10 @@ int main(void) {
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
     g_ps_ui_gpu = ps_ui_gpu;
+    UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
+    g_ps_clock_gpu = ps_clock_gpu;
+    UPLOAD_SHADER(ps_clock_light_gpu, ps_clock_light_binary);
+    g_ps_clock_light_gpu = ps_clock_light_gpu;
     UPLOAD_SHADER(ps_resolve_gpu, ps_resolve_binary);
     g_ps_resolve_gpu = ps_resolve_gpu;
 #undef UPLOAD_SHADER
@@ -3806,6 +3945,10 @@ int main(void) {
        The default camera faces west, so the sun itself comes into view later,
        near sunset. */
     float sun_angle = 0.0f;
+    float day_scrub_held = 0.0f; /* seconds D-pad left / right has been held (DAY_SCRUB_*) */
+    int sun_follow = 0;          /* R3: the sun follows the clock (console / internet time) */
+    float sun_glide = 1.0f, sun_glide_from = 0.0f; /* 0 -> 1 over SUN_GLIDE_S after a change */
+    double frame_tod = 0.0;     /* this frame's clock: seconds since local midnight */
     float sun_speed = 0.0027f;  // 40% slower than 0.0045 (= 76% slower than original 0.01125)
     uint32_t prev_buttons = 0;
 
@@ -4070,6 +4213,8 @@ int main(void) {
            L2 / R2   camera down / up                 D-pad up / down: camera speed
            D-pad left / right: move the sun           OPTIONS: show / hide controls
            sticks: move / look. */
+        if (pressed & PAD_CIRCLE)
+            g_clock_mode = !g_clock_mode;
         if (pressed & PAD_CROSS)
             cube_rotation_enabled = !cube_rotation_enabled;
         if (pressed & PAD_SQUARE)
@@ -4152,16 +4297,76 @@ int main(void) {
             move_speed = 0.5f;
 
         /* Day and night: D-pad left / right held moves the sun; otherwise it runs at the
-           chosen multiple unless frozen. */
-        if (pad.buttons & PAD_LEFT)
-            sun_angle -= 0.2592f * dt_sec;
-        if (pad.buttons & PAD_RIGHT)
-            sun_angle += 0.2592f * dt_sec;
+           chosen multiple unless frozen. The rate starts at DAY_SCRUB_START and doubles every
+           DAY_SCRUB_DOUBLE seconds held, up to DAY_SCRUB_MAX (a tap moves a fraction of a degree,
+           holding still sweeps the day); it restarts when both are released. */
+        if (pad.buttons & (PAD_LEFT | PAD_RIGHT)) {
+            float rate =
+                DAY_SCRUB_START * atmo_expf(0.69314718f * day_scrub_held / DAY_SCRUB_DOUBLE);
+            if (rate > DAY_SCRUB_MAX)
+                rate = DAY_SCRUB_MAX;
+            if (pad.buttons & PAD_LEFT)
+                sun_angle -= rate * dt_sec;
+            if (pad.buttons & PAD_RIGHT)
+                sun_angle += rate * dt_sec;
+            if (day_scrub_held < 60.0f)
+                day_scrub_held += dt_sec;
+        } else
+            day_scrub_held = 0.0f;
         if (!day_frozen)
             sun_angle +=
                 sun_speed * (float)k_day_tenths[day_step] * 6.0f * dt_sec; /* x tenths / 10 x 60 */
         /* Wrap every accumulator once per frame, after all increments. */
+        /* Time (timesrc.h): L3 cycles the clock's source (in-game -> console -> internet; in-game
+           at every start), R3 makes the sun follow the clock - nonstop, from the microsecond
+           clock every frame, gliding SUN_GLIDE_S (smoothstep, the shorter way round) when it
+           starts or the source changes. While it follows, the speed / freeze / D-pad settings
+           wait (they apply again when R3 lets go). sun_angle 0 = 06:00, pi / 2 = 12:00. */
+        if (pressed & PAD_L3) {
+            ts_set_source((g_ts.source + 1) % 3);
+            sun_glide = 0.0f;
+            sun_glide_from = sun_angle;
+        }
+        if (pressed & PAD_R3) {
+            sun_follow = !sun_follow;
+            sun_glide = 0.0f;
+            sun_glide_from = sun_angle;
+        }
+        if (sun_follow && g_ts.source != TS_INGAME) {
+            frame_tod = ts_local_seconds(sun_angle);
+            float target = (float)((frame_tod - 21600.0) * (6.283185307179586 / 86400.0));
+            if (sun_glide < 1.0f) {
+                sun_glide += dt_sec / SUN_GLIDE_S;
+                sun_glide = sun_glide > 1.0f ? 1.0f : sun_glide;
+                float d = wrap_2pi(target - sun_glide_from);
+                d = d > 3.14159265f ? d - 6.28318531f : d;
+                sun_angle = sun_glide_from + d * sun_glide * sun_glide * (3.0f - 2.0f * sun_glide);
+            } else
+                sun_angle = target;
+        }
         sun_angle    = wrap_2pi(sun_angle);
+        if (!(sun_follow && g_ts.source != TS_INGAME))
+            frame_tod = ts_local_seconds(sun_angle); /* in-game: from the final sun_angle */
+        { /* trace: a "time" line whenever the source, the network state or following changes */
+            static int last_st = -1;
+            int st =
+                g_ts.source | (g_ts.net_started << 2) | (ts_net_valid() << 3) | (sun_follow << 4);
+            if (st != last_st) {
+                static const char* const kk[4] = {
+                    "time src=", " net_started=", " net_ok=", " follow="};
+                long long vv[4] = {g_ts.source, g_ts.net_started, ts_net_valid(), sun_follow};
+                char L[96];
+                int p = 0;
+                for (int i = 0; i < 4; i++) {
+                    for (const char* q = kk[i]; *q; q++)
+                        L[p++] = *q;
+                    p += lg_i64(L + p, vv[i]);
+                }
+                L[p++] = '\n';
+                trace_line(L, p);
+                last_st = st;
+            }
+        }
         cam_yaw      = wrap_2pi(cam_yaw);
 
         /* BG lighting handled by PS via light direction */
@@ -4482,12 +4687,27 @@ int main(void) {
 
            DAY (orig_sun_y > 0.15):   neutral white  (1.00, 1.00, 1.00)
            SUNSET/SUNRISE ramp:        white → warm amber (1.00, 0.64, 0.44)
-           NIGHT:                      desaturated cool blue (0.52, 0.64, 0.84) */
+           NIGHT:                      desaturated cool blue (0.52, 0.64, 0.84) x the moon's
+                                       transmittance (atmosphere asset)
+           This is the light at the arena centre (the cube); ps_floor evaluates the same model with
+           each floor point's own light height on the curved floor. */
         float light_r, light_g, light_b;
         int light_linear = 0; /* 1: light_* are already linear (the physical day colour) */
         if (is_night) {
-            /* Moon: desaturated cool blue */
-            light_r = 0.52f; light_g = 0.64f; light_b = 0.84f;
+            /* Moon: desaturated cool blue, through the same air as the sun (ps_floor does the same
+               at every floor point: continuous at the terminator) */
+            light_r = k_moon_light_srgb[0];
+            light_g = k_moon_light_srgb[1];
+            light_b = k_moon_light_srgb[2];
+            if (g_atmo_ok) {
+                float t[3], t1[3];
+                atmo_light_ground(&g_atmo, -orig_sun_y, t);
+                atmo_light_ground(&g_atmo, 1.0f, t1);
+                light_r = srgb_to_linear(light_r) * t[0] / t1[0];
+                light_g = srgb_to_linear(light_g) * t[1] / t1[1];
+                light_b = srgb_to_linear(light_b) * t[2] / t1[2];
+                light_linear = 1;
+            }
         } else if (g_atmo_ok) {
             /* Sunlight through the atmosphere (atmosphere.c), white-balanced to the sun at the
                zenith: white by day, amber-red at the horizon - the same air as the sky. */
@@ -4622,11 +4842,18 @@ int main(void) {
                still clips to white; the tint shows on the rim and in the bloom. */
             /* Sun and moon as seen through the atmosphere (atmosphere.c transmittance, terminator
                included): white at noon, amber-red at the horizon. The moon's colour comes from its
-               NASA albedo map in ps_dark; MOON_SCALE sets its brightness. */
+               NASA albedo map in ps_dark; MOON_SCALE sets its brightness. Each light's height is
+               taken above the horizon the camera sees (atmo_tilted_y with the camera's dip, the
+               same height ps_dark's sky uses around the disc): from up high the sun stays visible
+               until it sets behind the floor, not at the eye-level line of the arena centre. */
+            float F[3], R[3], U[3], mv[3], hc, tilt[3];
+            cam_basis(cam_yaw, cam_pitch, F, R, U);
+            cam_horizon(cam_x, cam_y, cam_z, &hc, tilt);
+            const float sun[3] = {sun_dx, sun_dy, sun_dz}, moon[3] = {-sun_dx, -sun_dy, -sun_dz};
             float ts[3] = {1.0f, 1.0f, 1.0f}, tm[3] = {1.0f, 1.0f, 1.0f};
             if (g_atmo_ok) {
-                atmo_light_ground(&g_atmo, sun_dy, ts);
-                atmo_light_ground(&g_atmo, -sun_dy, tm);
+                atmo_light_ground(&g_atmo, atmo_tilted_y(sun, tilt), ts);
+                atmo_light_ground(&g_atmo, atmo_tilted_y(moon, tilt), tm);
             }
             float* sc = (float*)(desc + 84);
             float* mc = (float*)(desc + 88);
@@ -4637,15 +4864,11 @@ int main(void) {
             sc[3] = 0.0f;
             mc[3] = 0.0f;
             {
-                float F[3], R[3], U[3], mv[3], hc, tilt[3];
-                cam_basis(cam_yaw, cam_pitch, F, R, U);
-                cam_horizon(cam_x, cam_y, cam_z, &hc, tilt);
-                const float sun[3] = {sun_dx, sun_dy, sun_dz},
-                            moon[3] = {-sun_dx, -sun_dy, -sun_dz};
+                const float ground[4] = {cam_x, cam_z, cam_y + 0.5f, 1.0f / FLOOR_R};
                 moon_frame_sun(moon, sun, R, mv);
                 atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U,
-                                my_sin(0.3054f) / my_cos(0.3054f), tilt, sun, SKY_SUN_SCALE, moon,
-                                MOON_SKY_SCALE, mv);
+                                my_sin(0.3054f) / my_cos(0.3054f), tilt, ground, sun, SKY_SUN_SCALE,
+                                moon, MOON_SKY_SCALE, mv);
             }
         }
         /* Lens flare (ps_post_final, final pass table dwords 28..39): sun position
@@ -4704,14 +4927,26 @@ int main(void) {
                 rt[59] = sk[29];
                 rt[60] = tilt[1];
                 rt[61] = tilt[2];
-                rt[62] = rt[63] = rt[67] = rt[71] = 0.0f;
-                if (g_hz_table && g_atmo_ok)
-                    atmo_horizon_table(&g_atmo, atmo_tilted_y(sk + 12, tilt), SKY_SUN_SCALE,
-                                       atmo_tilted_y(sk + 24, tilt), MOON_SKY_SCALE, g_hz_table);
+                rt[62] = sk[15]; /* the lights' scales (the horizon texture is unscaled) */
+                rt[63] = sk[27];
+                rt[67] = 1.0f / FLOOR_R;
+                rt[71] = sk[18]; /* sqrt(2 / (R hc)): the dip rule below the camera, as ps_dark */
             }
+            char tod_txt[16];
+            ts_format(tod_txt, frame_tod);
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
-                      day_frozen);
+                      day_frozen, tod_txt,
+                      g_ts.source == TS_INGAME    ? 1
+                      : g_ts.source == TS_CONSOLE ? 2
+                      : ts_net_valid()            ? 3
+                                                  : 2);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
+            if (g_clock_mode) {
+                const float lsun[3] = {sun_dx, sun_dy, sun_dz},
+                            lmoon[3] = {-sun_dx, -sun_dy, -sun_dz};
+                clock_frame(cam_yaw, cam_pitch, is_night ? lmoon : lsun, is_night,
+                            (const float*)(desc + 32), frame_tod, ts_local_days());
+            }
         }
 
         /* Build main DCB (samples shadow_depth but doesn't write it).

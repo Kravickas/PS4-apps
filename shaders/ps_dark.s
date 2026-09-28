@@ -5,8 +5,9 @@
 ; slices blended, the phases applied per pixel (sharp Mie aureole). The sun, the moon (and the
 ; stars, ps_stars) lie beyond the atmosphere: they are ADDED to the in-scattered sky light.
 ; desc[164..203] (atmo_sky_consts): F, tilt0 | R tan, tilt x | U tan, tilt z | sun L, E | shx, shz,
-; row0, row1 | f |
-;   moon L, E | mhx, mhz, row0, row1 | f, sun in the moon frame (x, y, z) | limb alpha RGB
+; sqrt(2 / (R hc)), 0 | 0, cam x, cam z, cam y + 0.5 |
+;   moon L, E | mhx, mhz, 0, 0 | 0, sun in the moon frame (x, y, z) | limb alpha RGB, 1/R
+;   (the shader picks each pixel's light slices itself)
 ; desc[204] / [212] / [220] atlas T#s, [228] their S#, [232] moon albedo T#, [240] its S#.
 s_mov_b32 m0, s2
 s_mov_b64 s[100:101], exec
@@ -75,6 +76,127 @@ v_cndmask_b32 v9, v13, v9, vcc
 v_mul_f32 v9, 0x42800000, v9
 v_max_f32 v9, 0.5, v9
 v_min_f32 v9, 0x427e0000, v9
+; ---- per-pixel light slices: the view ray's lowest point over the curved floor, q = c + t Vh,
+; t = clamp(-(Vy R + c.Vh) / |Vh|^2, 0, 4000), hq = (cam y + 0.5) + t Vy + |q|^2 / (2R) (0 .. hc); per
+; light y' = Ly cos + hl sin, tan = d[18] hq + q.h / R, d[18] = sqrt(2 / (R hc)): the camera's own dip
+; sqrt(2 hc / R) for rays rising from it, 0 at the tangent point (the floor's fog there: seamless;
+; sqrt(2 hq / R) would jump at the horizon); slice x = asin(y') 90/pi + 10 in [0, 55] (A&S 4.4.46),
+; rows 64 k0 and 64 k0 + 64, blend x - k0 (k0 <= 54): sun v45..v47, moon v48..v50
+v_rcp_f32 v11, s59
+v_mul_f32 v11, v11, v5
+v_mac_f32 v11, s41, v4
+v_mac_f32 v11, s42, v6
+v_mul_f32 v12, v10, v10
+v_mul_f32 v11, v11, v12
+v_sub_f32 v11, 0, v11
+v_max_f32 v11, 0, v11
+v_min_f32 v11, 0x457a0000, v11
+v_mov_b32 v12, s41
+v_mac_f32 v12, v11, v4
+v_mov_b32 v13, s42
+v_mac_f32 v13, v11, v6
+v_mul_f32 v14, v12, v12
+v_mac_f32 v14, v13, v13
+v_mul_f32 v14, s59, v14
+v_mul_f32 v14, 0.5, v14
+v_mac_f32 v14, v11, v5
+v_add_f32 v14, s43, v14
+v_max_f32 v14, 0, v14
+v_mul_f32 v14, s38, v14
+v_mul_f32 v15, s36, v12
+v_mac_f32 v15, s37, v13
+v_mul_f32 v15, s59, v15
+v_add_f32 v15, v14, v15
+v_mul_f32 v16, v15, v15
+v_add_f32 v16, 1.0, v16
+v_rsq_f32 v16, v16
+v_mul_f32 v15, v15, v16
+v_mov_b32 v17, s36
+v_mul_f32 v17, s32, v17
+v_mov_b32 v18, s37
+v_mac_f32 v17, s34, v18
+v_mul_f32 v17, v17, v15
+v_mac_f32 v17, s33, v16
+v_and_b32 v18, 0x7fffffff, v17
+v_min_f32 v18, 1.0, v18
+v_mov_b32 v19, 0xbaa57a2c
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3bda90c5, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbc8bfc66, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3cfd10f8, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbd4d8392, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3db63a9e, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbe5bbfca, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3fc90fda, v19
+v_sub_f32 v20, 1.0, v18
+v_sqrt_f32 v20, v20
+v_mul_f32 v19, v19, v20
+v_sub_f32 v19, 0x3fc90fdb, v19
+v_cmp_gt_f32 vcc, 0, v17
+v_sub_f32 v20, 0, v19
+v_cndmask_b32 v19, v19, v20, vcc
+v_mul_f32 v19, 0x41e52ee1, v19
+v_add_f32 v19, 0x41200000, v19
+v_max_f32 v19, 0, v19
+v_min_f32 v19, 0x425c0000, v19
+v_floor_f32 v20, v19
+v_min_f32 v20, 0x42580000, v20
+v_sub_f32 v47, v19, v20
+v_mul_f32 v45, 0x42800000, v20
+v_add_f32 v46, 0x42800000, v45
+v_mul_f32 v15, s48, v12
+v_mac_f32 v15, s49, v13
+v_mul_f32 v15, s59, v15
+v_add_f32 v15, v14, v15
+v_mul_f32 v16, v15, v15
+v_add_f32 v16, 1.0, v16
+v_rsq_f32 v16, v16
+v_mul_f32 v15, v15, v16
+v_mov_b32 v17, s48
+v_mul_f32 v17, s44, v17
+v_mov_b32 v18, s49
+v_mac_f32 v17, s46, v18
+v_mul_f32 v17, v17, v15
+v_mac_f32 v17, s45, v16
+v_and_b32 v18, 0x7fffffff, v17
+v_min_f32 v18, 1.0, v18
+v_mov_b32 v19, 0xbaa57a2c
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3bda90c5, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbc8bfc66, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3cfd10f8, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbd4d8392, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3db63a9e, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0xbe5bbfca, v19
+v_mul_f32 v19, v19, v18
+v_add_f32 v19, 0x3fc90fda, v19
+v_sub_f32 v20, 1.0, v18
+v_sqrt_f32 v20, v20
+v_mul_f32 v19, v19, v20
+v_sub_f32 v19, 0x3fc90fdb, v19
+v_cmp_gt_f32 vcc, 0, v17
+v_sub_f32 v20, 0, v19
+v_cndmask_b32 v19, v19, v20, vcc
+v_mul_f32 v19, 0x41e52ee1, v19
+v_add_f32 v19, 0x41200000, v19
+v_max_f32 v19, 0, v19
+v_min_f32 v19, 0x425c0000, v19
+v_floor_f32 v20, v19
+v_min_f32 v20, 0x42580000, v20
+v_sub_f32 v50, v19, v20
+v_mul_f32 v48, 0x42800000, v20
+v_add_f32 v49, 0x42800000, v48
 v_mov_b32 v41, 0
 v_mov_b32 v42, 0
 v_mov_b32 v43, 0
@@ -88,9 +210,9 @@ v_min_f32 v11, 1.0, v11
 v_mul_f32 v11, 0.5, v11
 v_sub_f32 v14, 0.5, v11
 v_mov_b32 v16, v14
-v_add_f32 v15, s38, v9
+v_add_f32 v15, v45, v9
 v_mul_f32 v15, 0x39924925, v15
-v_add_f32 v17, s39, v9
+v_add_f32 v17, v46, v9
 v_mul_f32 v17, 0x39924925, v17
 image_sample v[18:20], v[14:15], s[60:67], s[84:87] dmask:0x7
 image_sample v[21:23], v[16:17], s[60:67], s[84:87] dmask:0x7
@@ -115,31 +237,31 @@ v_mul_f32 v39, 0x3c8557c9, v37
 v_mul_f32 v39, v39, v40
 s_waitcnt vmcnt(0)
 v_sub_f32 v21, v21, v18
-v_mac_f32 v18, s40, v21
+v_mac_f32 v18, v47, v21
 v_sub_f32 v27, v27, v24
-v_mac_f32 v24, s40, v27
+v_mac_f32 v24, v47, v27
 v_sub_f32 v33, v33, v30
-v_mac_f32 v30, s40, v33
+v_mac_f32 v30, v47, v33
 v_mul_f32 v18, v18, v38
 v_mac_f32 v18, v24, v39
 v_add_f32 v18, v18, v30
 v_mac_f32 v41, s35, v18
 v_sub_f32 v22, v22, v19
-v_mac_f32 v19, s40, v22
+v_mac_f32 v19, v47, v22
 v_sub_f32 v28, v28, v25
-v_mac_f32 v25, s40, v28
+v_mac_f32 v25, v47, v28
 v_sub_f32 v34, v34, v31
-v_mac_f32 v31, s40, v34
+v_mac_f32 v31, v47, v34
 v_mul_f32 v19, v19, v38
 v_mac_f32 v19, v25, v39
 v_add_f32 v19, v19, v31
 v_mac_f32 v42, s35, v19
 v_sub_f32 v23, v23, v20
-v_mac_f32 v20, s40, v23
+v_mac_f32 v20, v47, v23
 v_sub_f32 v29, v29, v26
-v_mac_f32 v26, s40, v29
+v_mac_f32 v26, v47, v29
 v_sub_f32 v35, v35, v32
-v_mac_f32 v32, s40, v35
+v_mac_f32 v32, v47, v35
 v_mul_f32 v20, v20, v38
 v_mac_f32 v20, v26, v39
 v_add_f32 v20, v20, v32
@@ -154,9 +276,9 @@ v_min_f32 v11, 1.0, v11
 v_mul_f32 v11, 0.5, v11
 v_sub_f32 v14, 0.5, v11
 v_mov_b32 v16, v14
-v_add_f32 v15, s50, v9
+v_add_f32 v15, v48, v9
 v_mul_f32 v15, 0x39924925, v15
-v_add_f32 v17, s51, v9
+v_add_f32 v17, v49, v9
 v_mul_f32 v17, 0x39924925, v17
 image_sample v[18:20], v[14:15], s[60:67], s[84:87] dmask:0x7
 image_sample v[21:23], v[16:17], s[60:67], s[84:87] dmask:0x7
@@ -181,31 +303,31 @@ v_mul_f32 v39, 0x3c8557c9, v37
 v_mul_f32 v39, v39, v40
 s_waitcnt vmcnt(0)
 v_sub_f32 v21, v21, v18
-v_mac_f32 v18, s52, v21
+v_mac_f32 v18, v50, v21
 v_sub_f32 v27, v27, v24
-v_mac_f32 v24, s52, v27
+v_mac_f32 v24, v50, v27
 v_sub_f32 v33, v33, v30
-v_mac_f32 v30, s52, v33
+v_mac_f32 v30, v50, v33
 v_mul_f32 v18, v18, v38
 v_mac_f32 v18, v24, v39
 v_add_f32 v18, v18, v30
 v_mac_f32 v41, s47, v18
 v_sub_f32 v22, v22, v19
-v_mac_f32 v19, s52, v22
+v_mac_f32 v19, v50, v22
 v_sub_f32 v28, v28, v25
-v_mac_f32 v25, s52, v28
+v_mac_f32 v25, v50, v28
 v_sub_f32 v34, v34, v31
-v_mac_f32 v31, s52, v34
+v_mac_f32 v31, v50, v34
 v_mul_f32 v19, v19, v38
 v_mac_f32 v19, v25, v39
 v_add_f32 v19, v19, v31
 v_mac_f32 v42, s47, v19
 v_sub_f32 v23, v23, v20
-v_mac_f32 v20, s52, v23
+v_mac_f32 v20, v50, v23
 v_sub_f32 v29, v29, v26
-v_mac_f32 v26, s52, v29
+v_mac_f32 v26, v50, v29
 v_sub_f32 v35, v35, v32
-v_mac_f32 v32, s52, v35
+v_mac_f32 v32, v50, v35
 v_mul_f32 v20, v20, v38
 v_mac_f32 v20, v26, v39
 v_add_f32 v20, v20, v32

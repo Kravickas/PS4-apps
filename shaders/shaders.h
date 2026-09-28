@@ -10,6 +10,8 @@
 #include "ps_post_down.h"
 #include "ps_post_final.h"
 #include "ps_ui.h"
+#include "ps_clock.h"
+#include "ps_clock_light.h"
 #include "ps_resolve.h"
 #include "ps_shader.h"
 #include "ps_shadow.h"

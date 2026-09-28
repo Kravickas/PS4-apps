@@ -9,8 +9,7 @@ s_load_dwordx4 s[32:35], s[0:1], 0x64
 s_load_dwordx4 s[36:39], s[0:1], 0x68
 s_load_dwordx4 s[40:43], s[0:1], 0x6c
 s_load_dwordx4 s[44:47], s[0:1], 0x70
-s_load_dwordx4 s[48:51], s[0:1], 0xc
-s_load_dwordx4 s[52:55], s[0:1], 0x20
+s_load_dwordx8 s[48:55], s[0:1], 0xb0
 s_load_dwordx8 s[56:63], s[0:1], 0x28
 s_load_dwordx4 s[64:67], s[0:1], 0x50
 s_load_dwordx16 s[68:83], s[0:1], 0x30
@@ -421,6 +420,12 @@ image_sample v[60:63], v[44:45], s[16:23], s[4:7] dmask:0xf
 s_load_dwordx4 s[24:27], s[0:1], 0x18
 s_load_dwordx4 s[28:31], s[0:1], 0x1c
 s_waitcnt vmcnt(0) lgkmcnt(0)
+; the albedo / normal fetches are done: their T#s / S# (s[4:23]) now take the transmittance table T#
+; desc[244], the bilinear clamp S# desc[228], the moon colour + MOON_LIGHT desc[117..120], 1/R desc[252]
+s_load_dwordx8 s[8:15], s[0:1], 0xf4
+s_load_dwordx4 s[16:19], s[0:1], 0xe4
+s_load_dwordx4 s[4:7], s[0:1], 0x75
+s_load_dword s20, s[0:1], 0xfc
 v_mul_f32 v60, 2.0, v60
 v_add_f32 v60, -1.0, v60
 v_mul_f32 v61, 2.0, v61
@@ -448,9 +453,47 @@ v_rsq_f32 v3, v3
 v_mul_f32 v20, v20, v3
 v_mul_f32 v21, v21, v3
 v_mul_f32 v22, v22, v3
+; ---- globe lighting: the light's height above the floor's own horizon at p (world v12, v14), y' =
+; atmo_tilted_y(sun, (0, px / R, pz / R)) = Ly cos + hl sin, tan = (px hx + pz hz) / R (sun L, hx, hz
+; desc[176..181]). y' > 0: the sun, L = sun min(1.38, 0.98 + y' 0.40 / 0.15); else the moon (-sun),
+; L = -sun MOON_LIGHT - the CPU's model at every point instead of at the origin. Colour = T(|y'|) /
+; T(zenith) (table desc[244], u = sqrt(|y'|)) x (1 by day, the moon colour by night)
+s_waitcnt lgkmcnt(0)
+v_mul_f32 v24, s52, v12
+v_mac_f32 v24, s53, v14
+v_mul_f32 v24, s20, v24
+v_mul_f32 v25, v24, v24
+v_add_f32 v25, 1.0, v25
+v_rsq_f32 v25, v25
+v_mul_f32 v24, v24, v25
+v_mov_b32 v26, s52
+v_mul_f32 v26, s48, v26
+v_mov_b32 v27, s53
+v_mac_f32 v26, s50, v27
+v_mul_f32 v26, v26, v24
+v_mac_f32 v26, s49, v25
+v_and_b32 v27, 0x7fffffff, v26
+v_sqrt_f32 v28, v27
+v_mov_b32 v29, 0.5
+image_sample v[30:32], v[28:29], s[8:15], s[16:19] dmask:0x7
+v_mul_f32 v33, 0x402aaaab, v27
+v_add_f32 v33, 0x3f7ae148, v33
+v_min_f32 v33, 0x3fb0a3d7, v33
+v_mov_b32 v34, s7
+v_sub_f32 v34, 0, v34
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v33, v34, v33, vcc
+v_mov_b32 v38, 1.0
+v_mov_b32 v34, s4
+v_cndmask_b32 v34, v34, v38, vcc
+v_mov_b32 v35, s5
+v_cndmask_b32 v35, v35, v38, vcc
+v_mov_b32 v36, s6
+v_cndmask_b32 v36, v36, v38, vcc
 v_mul_f32 v23, s48, v20
 v_mac_f32 v23, s49, v21
 v_mac_f32 v23, s50, v22
+v_mul_f32 v23, v23, v33
 v_max_f32 v23, 0, v23
 v_mul_f32 v23, 0x3f6de3f7, v23
 v_add_f32 v23, 0x3d90e047, v23
@@ -529,9 +572,13 @@ v_mul_f32 v23, v73, v23
 v_mul_f32 v74, v23, v16
 v_mul_f32 v75, v23, v17
 v_mul_f32 v76, v23, v18
-v_mul_f32 v74, s52, v74
-v_mul_f32 v75, s53, v75
-v_mul_f32 v76, s54, v76
+; light colour: the table (arrived with the shadow fetches' vmcnt(0)) x the day / night multiplier
+v_mul_f32 v30, v30, v34
+v_mul_f32 v31, v31, v35
+v_mul_f32 v32, v32, v36
+v_mul_f32 v74, v30, v74
+v_mul_f32 v75, v31, v75
+v_mul_f32 v76, v32, v76
 v_mul_f32 v77, s47, v2
 v_mov_b32 v78, s28
 v_subrev_f32 v78, s24, v78

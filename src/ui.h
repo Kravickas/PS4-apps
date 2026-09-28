@@ -16,6 +16,13 @@
 #define UI_LH 38        /* line pitch */
 #define UI_GAP 14       /* extra gap before the controls list */
 #define UI_VALUE_GAP 16 /* between the widest label and the value column */
+/* The time panel, top centre: UI_Y0 from the top like the left panel, UI_PILL_H tall; the dot (time
+   source: grey in-game, yellow console, green internet) and the time. */
+#define UI_PILL_H 44
+#define UI_PILL_PADL 16
+#define UI_PILL_PADR 18
+#define UI_PILL_DOT 10
+#define UI_PILL_GAP 9
 #define UI_LABEL_DX (2 * (UI_ICON_PX + 2) + 10)
 /* Icons are centred on the text's cap height; lines reserve room for both. */
 #define UI_ICON_ABOVE (UI_FONT_CAP / 2 + UI_ICON_PX / 2)
@@ -30,6 +37,7 @@ typedef struct {
     int controls;
     char key[96];  /* content of the current buffer; recompose when it changes */
     float rect[4]; /* the panel: centre x, y, half w, h (px) */
+    float pill[4]; /* the time panel (hidden: half sizes -1e6) */
     /* Per buffer: the dirty box x0, y0, x1, y1 (empty: x1 <= x0) and the state it shows
        (valid = 0: never drawn). */
     int dirty[UI_BUFS][4];
@@ -73,7 +81,7 @@ static int ui_load_atlas(const char* path) {
 static int ui_init(void) {
     my_memset(&g_ui, 0, sizeof(g_ui));
     for (int i = 0; i < 4; i++)
-        g_ui.rect[i] = -1e6f;
+        g_ui.rect[i] = g_ui.pill[i] = -1e6f;
     if (ui_load_atlas(ASSET_DIR "ui/ui_atlas.bin") != 0)
         return -1;
     for (int b = 0; b < UI_BUFS; b++) {
@@ -269,6 +277,9 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
             {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT}, "Move the sun (time of day)"},
             {{UI_ICON_L_2D, -1}, "Move"},
             {{UI_ICON_R_2D, -1}, "Look"},
+            {{UI_ICON_L_2D, -1}, "Press: clock source (in-game / console / internet)"},
+            {{UI_ICON_R_2D, -1}, "Press: the sun follows the clock"},
+            {{UI_ICON_CIRCLE, -1}, "Clock"},
         };
         y += UI_LH + UI_GAP;
         for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
@@ -290,7 +301,49 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
 }
 
 /* Lays out the panel into the next buffer when the content key changes; sets the rect. */
-static void ui_update(int cam_pct, int day_mult, int day_frozen) {
+/* An antialiased disc (the time panel's dot), straight colour, premultiplied "over". */
+static void ui_disc(unsigned char* dst, float cx, float cy, float r, const unsigned char col[3],
+                    int alpha256) {
+    int x0 = (int)(cx - r) - 1, x1 = (int)(cx + r) + 2, y0 = (int)(cy - r) - 1,
+        y1 = (int)(cy + r) + 2;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < UI_H; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < UI_W; x++) {
+            float dx = (float)x + 0.5f - cx, dy = (float)y + 0.5f - cy;
+            float c = 0.5f - (my_sqrt(dx * dx + dy * dy) - r);
+            c = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c;
+            int a = ((int)(c * 255.0f + 0.5f) * alpha256) >> 8;
+            if (a == 0)
+                continue;
+            unsigned char* d = dst + ((unsigned long)y * UI_W + x) * 4;
+            for (int k = 0; k < 3; k++) {
+                int t = col[k] * a + d[k] * (255 - a) + 128;
+                d[k] = (unsigned char)((t + (t >> 8)) >> 8);
+            }
+            int t = d[3] * (255 - a) + 128;
+            d[3] = (unsigned char)(a + ((t + (t >> 8)) >> 8));
+        }
+}
+/* The time panel's width for this text: every digit as the widest one, A / P as the wider - the
+   same for every time of the format, so the glass never changes size. */
+static int ui_pill_width(const char* s) {
+    int dw = 0, apw = 0;
+    for (char c = '0'; c <= '9'; c++) {
+        int a = ui_glyph[ui_glyph_index(c)].adv;
+        dw = a > dw ? a : dw;
+    }
+    apw = ui_glyph[ui_glyph_index('A')].adv > ui_glyph[ui_glyph_index('P')].adv
+              ? ui_glyph[ui_glyph_index('A')].adv
+              : ui_glyph[ui_glyph_index('P')].adv;
+    int w = 0;
+    for (; *s; s++)
+        w += (*s >= '0' && *s <= '9')   ? dw
+             : (*s == 'A' || *s == 'P') ? apw
+                                        : ui_glyph[ui_glyph_index(*s)].adv;
+    return UI_PILL_PADL + UI_PILL_DOT + UI_PILL_GAP + w + UI_PILL_PADR;
+}
+
+/* dot: 0 = no time panel, 1 grey (in-game), 2 yellow (console), 3 green (internet) */
+static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* time_txt, int dot) {
     if (!g_ui.ok)
         return;
     char key[96], *k = key;
@@ -301,6 +354,12 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen) {
     k += ui_fmt_int(k, day_mult);
     *k++ = ',';
     k += ui_fmt_int(k, day_frozen);
+    *k++ = ',';
+    k += ui_fmt_int(k, dot);
+    *k++ = ',';
+    for (const char* t = time_txt; *t && k < key + sizeof(key) - 1; t++)
+        *k++ = *t;
+    *k = 0;
     int same = 1;
     for (int i = 0; key[i] || g_ui.key[i]; i++)
         if (key[i] != g_ui.key[i]) {
@@ -374,6 +433,30 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen) {
 
     g_ui.drawing = 0;
     g_ui.nclip = 0;
+    /* the time panel: its box cleared and redrawn in every new buffer (a dozen glyphs) */
+    {
+        static const unsigned char dots[4][3] = {
+            {0, 0, 0}, {150, 150, 158}, {240, 205, 70}, {110, 215, 130}};
+        static const unsigned char white[3] = {255, 255, 255}, black[3] = {0, 0, 0};
+        static int px0 = 0, pw = 0;
+        if (pw > 0)
+            ui_clear(b, px0 - 2, UI_Y0 - 2, pw + 8, UI_PILL_H + 8);
+        if (dot > 0) {
+            pw = ui_pill_width(time_txt);
+            px0 = UI_W / 2 - pw / 2;
+            float cy = (float)UI_Y0 + 0.5f * UI_PILL_H, r = 0.5f * UI_PILL_DOT;
+            float cx = (float)(px0 + UI_PILL_PADL) + r;
+            ui_disc(b, cx + 1.0f, cy + 1.0f, r, black, 115);
+            ui_disc(b, cx, cy, r, dots[dot], 256);
+            ui_text(b, px0 + UI_PILL_PADL + UI_PILL_DOT + UI_PILL_GAP,
+                    UI_Y0 + UI_PILL_H / 2 + UI_FONT_CAP / 2, time_txt, white);
+            g_ui.pill[0] = (float)px0 + 0.5f * (float)pw;
+            g_ui.pill[1] = (float)UI_Y0 + 0.5f * UI_PILL_H;
+            g_ui.pill[2] = 0.5f * (float)pw;
+            g_ui.pill[3] = 0.5f * UI_PILL_H;
+        } else
+            g_ui.pill[0] = g_ui.pill[1] = g_ui.pill[2] = g_ui.pill[3] = -1e6f;
+    }
     g_ui.st[nb].valid = 1;
     g_ui.st[nb].controls = g_ui.controls;
     g_ui.st[nb].cam = cam_pct;
@@ -382,12 +465,14 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen) {
     g_ui.cur = nb;
 }
 
-/* UI pass table (ps_ui): dwords 28..31 the panel's rect, 36..47 the current buffer's T# (RGBA8
-   UNORM, linear) and a point S#. */
+/* UI pass table (ps_ui): dwords 28..31 the panel's rect, 32..35 the time panel's, 36..47 the
+   current buffer's T# (RGBA8 UNORM, linear) and a point S#. */
 static void ui_write_table(uint32_t* blk) {
     float* r = (float*)(blk + 28);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         r[i] = g_ui.ok ? g_ui.rect[i] : -1e6f;
+        r[4 + i] = g_ui.ok ? g_ui.pill[i] : -1e6f;
+    }
     if (g_ui.ok) {
         build_tsharp(blk + 36, g_ui.buf[g_ui.cur], UI_W, UI_H);
         build_ssharp_clamp(blk + 44, 0);

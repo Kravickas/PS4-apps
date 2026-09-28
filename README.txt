@@ -1,3 +1,121 @@
+CLOCK STAGE 2: THE GLASS CLOCK (Circle)  (build=glass-clock)
+
+Circle shows the clock (and hides both panels); again returns. docs/clock_plan.txt has the design,
+docs/clock_model the per-pixel reference model (Python) the shaders were checked against.
+- The slab (ps_clock CAFE0303, replaces ps_ui in clock mode, same sRGB / dither end): 1152 x 648,
+  corners 56, a 40 px quarter-circle bevel; the view ray refracted per channel (BK7-like IORs 1.514
+  / 1.517 / 1.522) through the bevel to the scene 300 px behind (total internal reflection: 0.35),
+  absorption along the path, Schlick Fresnel of a top-left key light; the heavy frost (~45 px: the
+  frost chain continued 240 -> 120 -> 60 wide and blurred H V H V at 60 x 34, clock mode only);
+  grain (a per-pixel integer hash, +-3.5 %); a glass shadow outside with a faint caustic.
+- Internal light (ps_clock_light CAFE0304, 1/4 resolution into g_bloom_b[0]): the scene's light (the
+  sun by day, the moon by night) enters where the rim faces it - refracted in by Snell (1.5), Fresnel
+  transmission - and travels as beams that widen (3 px + 0.07 per px) and fade over 170 px; the
+  CPU lists the lit rim samples every 3 px (src/clock_frame.h) and the pass sums them per pixel.
+  Normalised by src/clock_light_norm.h (tools/make_clock_light_norm.py: the approved preview's
+  normaliser per 2 degrees of the light's screen direction). On the slab: the light the frost
+  scatters (fill 0.18 day / 0.14 night), the glow where it leaves the far edges, glints where it
+  strikes; its colour = the scene's light colour, strength 1.35 day / 0.85 night.
+- Text on the table: glass pieces - the hours and minutes (300 px), the seconds (110 px) and the
+  date (52 px), URW Gothic Demi. Their distance field is composed by the CPU from a glyph atlas
+  (tools/make_clock_sdf.py -> assets/ui/clock_sdf.bin, src/clock_sdf.h; src/clock.h) when the text
+  changes; each piece casts a shadow and a caustic on the table (offset by its thickness), a contact
+  line, refracts the table through its 9 px bevel, and glows with the table's light escaping into it
+  (frustrated total internal reflection), its rims lit.
+Verified: glyph composition vs a direct render (coverage identical, <= 0.26 px); dates vs Python over
+years 1-9999; ps_clock_light vs float64 3e-6 of the peak (584-entry loop); ps_clock vs the float64
+per-pixel model 1.55e-5 in the sRGB output (3000 px); the C rim entries vs Python (1e-4 px, 3e-5).
+PS4 check: Circle shows the clock by day and night; the sun / moon lights its rim from the right side
+as the camera turns; the seconds tick smoothly; Circle again returns the panels.
+
+CLOCK STAGE 1: TIME SOURCES, SUN FOLLOWS THE CLOCK, TIME PANEL  (build=clock-time)
+
+- Time sources (src/timesrc.h), L3 cycles them; in-game at every start (not saved):
+  in-game - the scene's own time of day from sun_angle (0 = 06:00 sunrise, pi/2 =
+  12:00, pi = 18:00); console - sceRtcGetCurrentTick (UTC, microseconds); internet -
+  SNTP (RFC 4330) on its own thread, started the first time it is selected: the NET
+  sysmodule, sceNetInit, a resolver pool (the OpenOrbis sample's sequence), UDP to
+  pool.ntp.org / time.google.com / time.cloudflare.com, 2 s timeout each; the reply
+  must be mode 4, stratum 1-15, not LI 3, and echo our transmit time (anti-spoof).
+  The offset (server time at arrival: transmit + half the round trip minus its hold
+  time) is kept against the process clock; re-sync every 30 min, after a failed
+  round 30 s. Until an answer arrives the console clock stands in. Local time: the
+  console's time zone and summer time (sceRtcConvertUtcToLocalTime); 12 / 24 h
+  from the console setting. PS4 socket constants as shadPS4 implements them
+  (SOL_SOCKET 0xFFFF, SO_RCVTIMEO 0x1106 in us, sockaddr_in with sin_len / vport).
+- R3: the sun follows the clock, nonstop - every frame from the microsecond clock
+  (never from the shown seconds), internet corrections slewed at 50 ms/s (steps only
+  above 2 s or at the first answer), a 2 s smoothstep glide (the shorter way round)
+  when it starts or the source changes. While it follows, the speed / freeze / D-pad
+  settings wait; they apply again when R3 lets go.
+- Time panel, top centre (ps_ui CAFE0302, a second glass rect at table dwords
+  32..35, bitwise identical to the old shader with it hidden): 10 px from the top
+  like the options panel, 44 px tall, constant width (every digit as the widest),
+  the dot for the source - grey in-game, yellow console (also internet before its
+  first answer), green internet - and the time.
+- Controls list: stick press rows for L3 / R3 (the stick icons; the pack has no
+  L3 / R3 icons).
+- Trace: a "time src= net_started= net_ok= follow=" line whenever that changes.
+Verified: NTP 32.32 round trip 1 us, the 1900 epoch tick equals Python's calendar,
+12 / 24 h formatting, the in-game mapping, slew / step (host tests); ps_ui emulated
+old vs new bitwise; imports resolve (libSceNet, libSceRtc, libSceSysmodule).
+Next: clock mode (Circle) - the edge-lit frosted glass slab with glass text.
+
+GLOBE LIGHTING, SUN DOWN TO THE REAL HORIZON, FINE D-PAD TIME  (build=globe-light)
+
+What was wrong: (1) D-pad left / right moved the sun at a fixed 14.85 deg/s from
+the first frame - a short tap was 1-2 deg; (2) the sun disc's colour was the
+transmittance for an observer on the ground at the arena centre, zero once the
+sun was 0.3 deg below eye level - from 100 up at the arena edge that is ~8 deg
+above the horizon actually visible, where the disc vanished; (3) one light (the
+arena centre's sun elevation) lit the whole floor and coloured all of its fog,
+while on this planet the sun's height changes by +-8 deg across the floor: dawn
+must light only the side of the globe facing the sun.
+- D-pad scrub: 1 deg/s at the press, doubling every second held, capped at the
+  old 14.85 deg/s (after 3.9 s); restarts on release (DAY_SCRUB_*). A one-frame
+  tap is 0.017 deg, one second held 1.4 deg.
+- Sun and moon discs: the transmittance at the light's height above the horizon
+  the camera sees (atmo_tilted_y with the camera's dip - the height the sky
+  around the disc uses). From (300, 100, 0) the sun now keeps its light down to
+  -8.46 deg: the visible horizon at -8.15 plus the disc's radius (was -0.3).
+- Floor (ps_floor CAFE0128): every point uses its own light height above the
+  floor's local horizon, y' = atmo_tilted_y(sun, (0, px/R, pz/R)): sun by day
+  (y' > 0: L = sun x min(1.38, 0.98 + y' 0.40/0.15), colour T(y') / T(zenith)
+  from a 256-texel transmittance table, u = sqrt(y'), atmo_trans_table), moon
+  by night (-sun x MOON_LIGHT). The same model the CPU used at the origin, now at
+  every point (identical there, 8.8e-4). With the sun 1 deg below eye level at
+  the centre, the sun-facing half of the floor is in daylight.
+- Moonlight through the same air: moon colour x T(moon height) / T(zenith), on
+  the floor and for the cube (desc[32]) - both sides of the day / night line go
+  to ~0 together instead of dim red meeting full moonlight. Only moonrise /
+  moonset change; the moon high is as before.
+- Fog colour (ps_resolve CAFE0403): the sky's horizon colour lit as the air over
+  the pixel's surface point is (the nearest sample): per light the height above
+  the horizon seen from that point picks the slice in a static 64 x 168 texture
+  of every slice's horizon (atmo_horizon_texture, uploaded once; the per-frame
+  CPU table is gone). The far side of the globe gets the planet's shadow.
+- Sky (ps_dark CAFE00E8): each pixel's light slices come from its view ray's
+  lowest point over the floor. Rays rising from the camera: the camera itself,
+  exactly as before (1.8e-6). The tangent ray: its floor point, the same as the
+  floor's fog there.
+- Horizon seam: the dip at a height h below the camera is sqrt(2 hc / R) x h / hc
+  (exact at the camera and at the tangent point, continuous). sqrt(2h/R) itself
+  (infinite slope at h = 0) left a 17-47 % step between the floor and the sky;
+  now the first sky pixel differs from the last floor pixel by 1.2-1.5 of the
+  floor's own per-pixel change (floor distance is compressed at the horizon).
+Verified (float32 emulation vs float64): ps_dark visible sky max rel 2.5e-5
+(17559 px, 5 views, heights 1-100, sun -4..25 deg); ps_resolve max rel 4.4e-5
+(12500 px, 5 cameras, points above and below the camera); ps_floor max rel
+1.5e-3 = the table's f16 precision (3000 points +-2000, sun -10..40 deg, both
+sides of the terminator); transmittance table vs exact 9.8e-4 abs.
+Constants: ps_dark d[18] = sqrt(2/(R hc)), d[21..23] = cam x, z, y + 0.5,
+d[39] = 1/R (the CPU's per-frame slice rows are gone); resolve [16] the static
+horizon T#, [62..63] the lights' scales, [67] 1/R, [71] sqrt(2/(R hc)); desc
+[117..120] moonlight (linear) + MOON_LIGHT, [244] transmittance T#, [252] 1/R.
+PS4 check: a D-pad tap barely moves the sun; from the high arena edge the sun
+stays until it sets behind the floor; at dawn only the sun-facing side of the
+floor is lit and the fog over the far side is dark; no line at the horizon.
+
 ARENA, SMALL PLANET, SKY-COLOURED AERIAL PERSPECTIVE  (build=arena-sky)
 
 What was wrong: (1) the sun looked huge at floor level and normal high up - the
