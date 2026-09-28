@@ -480,15 +480,15 @@ void atmo_sky_radiance(const AtmoAsset* s, const float L[3], const float V[3], f
     }
 }
 void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float R[3],
-                     const float U[3], float inv_fov, const float sun[3], float sun_scale,
+                     const float U[3], float tan_half_fov, const float sun[3], float sun_scale,
                      const float moon[3], float moon_sky_scale, const float moon_view[3]) {
     (void)s;
     for (int i = 0; i < 40; i++)
         d[i] = 0.0f;
     for (int c = 0; c < 3; c++) {
         d[0 + c] = F[c];
-        d[4 + c] = R[c] * inv_fov;
-        d[8 + c] = U[c] * inv_fov;
+        d[4 + c] = R[c] * tan_half_fov;
+        d[8 + c] = U[c] * tan_half_fov;
         d[12 + c] = sun[c];
         d[24 + c] = moon[c];
         d[33 + c] = moon_view[c];

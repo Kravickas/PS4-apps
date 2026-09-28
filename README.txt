@@ -1,4 +1,26 @@
 ============================================================
+SKY DIRECTION FIX  (build=sky-dir-fix)
+============================================================
+Bug (sky_sun_bug_1404): the sky's and the fog's view directions were built with
+R x cot(half fov) instead of R x tan(half fov), so every screen offset became a
+direction cot^2 = 10.06x too large: the sun's sky glow sat near the screen centre
+(predicted (873, 486) and (923, 553) for the two screenshots, where the glows
+are), the sky's horizon was squeezed toward the centre (the dark band above the
+floor), and a correctly placed sun disc could land on the sky's below-horizon
+part ("sun on the floor"). Fixed in atmo_sky_consts (parameter tan_half_fov) and
+in the fog constants.
+Also: the sun / moon discs are projected at infinity (camera rotation only; they
+were points 100 units from the origin, drifting from their own sky glow as the
+camera moved), the stars use a rotation-only matrix (a sphere around the origin
+that the camera could reach), and my_sin is range-reduced to [-pi/2, pi/2] with
+the series to x^11 (was off by up to 7e-3, skewing cam_basis / build_mvp).
+Verified end to end with the game's own build_mvp / cam_basis / my_sin and the
+disc code from main.c, camera at (100, 50, -300), 7036 random views: disc
+position = the camera matrix's projection (3.2e-6), sky and fog directions at
+the disc = the direction (1.9e-5 deg), stars = discs (3.2e-6); the old
+constants were up to 55 deg off.
+
+============================================================
 PHYSICALLY BASED FOG  (build=physical-fog)
 ============================================================
 Height fog applied per MSAA sample in the resolve (ps_resolve CAFE0401), so the

@@ -208,7 +208,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "physical-fog"
+#define BUILD_TAG "sky-dir-fix"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -830,12 +830,24 @@ static void *gpu_alloc(unsigned long size, unsigned long align) {
     return gpu_alloc_typed(size, align, MEM_TYPE_GARLIC);
 }
 
+/* sin: reduce to [-pi, pi], then fold into [-pi/2, pi/2] with sin(pi - x) = sin(x), where the
+   series to x^11 is within (pi/2)^13 / 13! = 5.7e-8 (the series to x^9 over [-pi, pi] was off by up
+   to 7e-3, which skewed cam_basis / build_mvp and the sky's view directions by up to 0.04 deg). */
 static float my_sin(float x) {
     const float PI = 3.14159265358979f, TWO_PI = 6.28318530717959f;
-    while (x > PI) x -= TWO_PI;
-    while (x < -PI) x += TWO_PI;
+    while (x > PI)
+        x -= TWO_PI;
+    while (x < -PI)
+        x += TWO_PI;
+    if (x > 0.5f * PI)
+        x = PI - x;
+    else if (x < -0.5f * PI)
+        x = -PI - x;
     float x2 = x * x;
-    return x*(1.0f-x2/6.0f*(1.0f-x2/20.0f*(1.0f-x2/42.0f*(1.0f-x2/72.0f))));
+    return x * (1.0f -
+                x2 / 6.0f *
+                    (1.0f - x2 / 20.0f *
+                                (1.0f - x2 / 42.0f * (1.0f - x2 / 72.0f * (1.0f - x2 / 110.0f)))));
 }
 static float my_cos(float x) { return my_sin(x + 1.57079632679490f); }
 
@@ -3265,7 +3277,7 @@ int main(void) {
         const float sun[3] = {0.0f, 0.70710678f, -0.70710678f},
                     moon[3] = {0.0f, -0.70710678f, 0.70710678f};
         const float mv[3] = {0.0f, 0.0f, 1.0f};
-        atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_cos(0.3054f) / my_sin(0.3054f),
+        atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_sin(0.3054f) / my_cos(0.3054f),
                         sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
     }
     build_tsharp_tex(desc + 72, &floor_nrm);
@@ -4257,8 +4269,10 @@ int main(void) {
            FLOOR_MVP_OFF after a model load put matrix floats into model vertices
            36-37 and left the floor with the camera from load time. */
         my_memcpy(vb_static + FLOOR_MVP_OFF, (char*)vb + MVP_OFF, 64);
-        if (stars_vb)
-            my_memcpy(stars_vb, (char*)vb + MVP_OFF, 64);
+        if (stars_vb) /* at infinity: the camera's rotation only (the stars sit on a sphere around
+                         the origin; with the translation they drifted as the camera moved, and
+                         the camera can now reach past STARS_RADIUS) */
+            build_mvp((float*)stars_vb, cam_yaw, cam_pitch, 0.0f, 0.0f, 0.0f);
 
         /* Build light-space MVP at LIGHT_MVP_OFF for shadow pass.
            Orthographic projection from sun looking at origin.
@@ -4541,37 +4555,32 @@ int main(void) {
            whichever is below the horizon, so a setting sun sinks out of view
            instead of vanishing when its centre crosses the horizon. Lighting
            and shadows stay with the body above the horizon (desc[12], light
-           MVP). Placement as before: sun = direction x the day magnitude ramp,
-           moon = anti-sun x 0.69, both x 100; radii SUN_DISC_RADIUS_PX and
+           MVP). Placement: at infinity - the camera rotation only, x = cot (R.d) / (F.d), y = cot
+           (U.d) / (F.d) (build_mvp's projection of a direction), the same directions ps_dark's
+           sky and ps_resolve's fog reconstruct (a point 100 units from the origin drifted from its
+           own sky glow as the camera moved away); radii SUN_DISC_RADIUS_PX and
            MOON_DISC_RADIUS_PX. ps_dark: f = clamp(1 - d^2 / radius^2, 0, 1)^2, d in
            aspect-corrected NDC (x * W/H, y). */
         {
-            float *mvp = (float*)((char*)vb + MVP_OFF);
             const float sun_r = SUN_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
             const float moon_r = MOON_DISC_RADIUS_PX / ((float)DISPLAY_H * 0.5f);
-            float mag = 0.98f + 0.40f * (orig_sun_y / 0.15f);
-            if (mag < 0.98f)
-                mag = 0.98f;
-            if (mag > 1.38f)
-                mag = 1.38f;
-            const float body[2][4] = {
-                {sun_dx * mag, sun_dy * mag, sun_dz * mag, sun_r * sun_r},
-                {-sun_dx * 0.69f, -sun_dy * 0.69f, -sun_dz * 0.69f, moon_r * moon_r}};
+            float cF[3], cR[3], cU[3];
+            cam_basis(cam_yaw, cam_pitch, cF, cR, cU);
+            const float cot = my_cos(0.3054f) / my_sin(0.3054f);
+            const float dirs[2][3] = {{sun_dx, sun_dy, sun_dz}, {-sun_dx, -sun_dy, -sun_dz}};
             for (int k = 0; k < 2; k++) {
-                float bx = body[k][0] * 100, by = body[k][1] * 100, bz = body[k][2] * 100;
-                float cx = mvp[0] * bx + mvp[1] * by + mvp[2] * bz + mvp[3];
-                float cy = mvp[4] * bx + mvp[5] * by + mvp[6] * bz + mvp[7];
-                float cw = mvp[12] * bx + mvp[13] * by + mvp[14] * bz + mvp[15];
+                const float* dv = dirs[k];
+                float fz = dv[0] * cF[0] + dv[1] * cF[1] + dv[2] * cF[2];
                 float* sd = (float*)(desc + 16 + 4 * k);
-                if (cw > 0.01f) {
-                    sd[0] = (cx / cw) * ((float)DISPLAY_W / (float)DISPLAY_H);
-                    sd[1] = cy / cw;
+                if (fz > 0.01f) {
+                    sd[0] = cot * (dv[0] * cR[0] + dv[1] * cR[1] + dv[2] * cR[2]) / fz;
+                    sd[1] = cot * (dv[0] * cU[0] + dv[1] * cU[1] + dv[2] * cU[2]) / fz;
                 } else { /* behind the camera */
                     sd[0] = 99.0f;
                     sd[1] = 99.0f;
                 }
-                sd[2] = body[k][3];
-                sd[3] = k ? moon_r : sun_r; /* radius: ps_dark's crisp moon edge */
+                sd[2] = k ? moon_r * moon_r : sun_r * sun_r;
+                sd[3] = k ? moon_r : sun_r; /* radius: ps_dark's crisp edges */
             }
             /* Sun disc: amber at the horizon -> SUN_DAY_* (pale warm) at orig_sun_y
                0.15, held amber while it sets. Moon: cool blue. At SUN_HDR the core
@@ -4599,7 +4608,7 @@ int main(void) {
                             moon[3] = {-sun_dx, -sun_dy, -sun_dz};
                 moon_frame_sun(moon, sun, R, mv);
                 atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U,
-                                my_cos(0.3054f) / my_sin(0.3054f), sun, SKY_SUN_SCALE, moon,
+                                my_sin(0.3054f) / my_cos(0.3054f), sun, SKY_SUN_SCALE, moon,
                                 MOON_SKY_SCALE, mv);
             }
         }
@@ -4628,7 +4637,9 @@ int main(void) {
                 float* rt = (float*)(g_post_tab + RESOLVE_BLOCK * 32);
                 float F[3], R[3], U[3], ups[3] = {0, 0, 0}, cms[3], upm[3] = {0, 0, 0}, cmm[3];
                 cam_basis(cam_yaw, cam_pitch, F, R, U);
-                const float inv_fov = my_cos(0.3054f) / my_sin(0.3054f);
+                /* the view direction of the aspect-scaled NDC point (x, y): F + x tan R + y tan U,
+                   tan = tan(half fov) - build_mvp's projection (scale cot) inverted */
+                const float tan_half = my_sin(0.3054f) / my_cos(0.3054f);
                 const float* ld = (const float*)(desc + 12); /* scene light direction x magnitude */
                 const float* lc = (const float*)(desc + 32); /* its colour */
                 const float* gr = (const float*)(desc + 160); /* the lit floor's radiance */
@@ -4640,8 +4651,8 @@ int main(void) {
                 }
                 for (int c = 0; c < 3; c++) {
                     rt[16 + c] = F[c];
-                    rt[20 + c] = R[c] * inv_fov;
-                    rt[24 + c] = U[c] * inv_fov;
+                    rt[20 + c] = R[c] * tan_half;
+                    rt[24 + c] = U[c] * tan_half;
                     rt[28 + c] = lm > 1e-6f ? ld[c] / lm : 0.0f;
                     /* FS: the scene light scattered by the haze, E = pi x (the radiance of a white
                        surface facing the light); FA: isotropic - half the mean sky, half the floor

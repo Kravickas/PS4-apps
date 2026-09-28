@@ -70,10 +70,11 @@ void atmo_sky_radiance(const AtmoAsset* s, const float L[3], const float V[3], f
 /* Light elevation in degrees (for the slice position). */
 float atmo_elev_deg(float y);
 /* ps_dark constants desc[164..203] (layout in ps_dark.s). F, R, U: camera basis (unit, world);
-   inv_fov: 1 / tan(half vertical fov); moon_view: the sun direction in the moon's own frame
-   (x right, y up, z toward the viewer). */
+   tan_half_fov: tan(half vertical fov) - the view direction of the aspect-scaled NDC point (x, y)
+   is normalize(F + x tan R + y tan U), build_mvp's projection inverted; moon_view: the sun
+   direction in the moon's own frame (x right, y up, z toward the viewer). */
 void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float R[3],
-                     const float U[3], float inv_fov, const float sun[3], float sun_scale,
+                     const float U[3], float tan_half_fov, const float sun[3], float sun_scale,
                      const float moon[3], float moon_sky_scale, const float moon_view[3]);
 /* Sun limb darkening I = mu^alpha (Hestroffer & Magnan 1998, eq. 5):
    alpha = -0.023 + 0.292 / lambda[um] at 680 / 550 / 440 nm. */
