@@ -178,7 +178,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "frost-glass"
+#define BUILD_TAG "msaa4x"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -410,10 +410,16 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64, 64, 64};
 /* Post table (32-dword blocks): the bloom chain + final pass (0..POST_PASSES-1), the final
    pass's flare dwords (next block), then the frost chain (down 1920 -> 480, down 480 -> 240,
    blur H V H V at 240 x 135) and the UI pass (2 blocks). */
+/* 4x MSAA on the scene (1 = off): 4-sample RGBA16F colour + 4-sample depth, resolved into g_hdr
+   before the post chain (ps_resolve). */
+#define MSAA_SAMPLES 4
+#define MSAA_TILE_INDEX                                                                            \
+    13 /* PS4 GB_TILE_MODE13 Thin1dThin: ARRAY_1D_TILED_THIN1, thin micro tiles */
 #define FROST_BLOCK (POST_PASSES + 2)
 #define FROST_PASSES 6
 #define UI_BLOCK (FROST_BLOCK + FROST_PASSES)
-#define POST_TABLE_BLOCKS (UI_BLOCK + 2)
+#define RESOLVE_BLOCK (UI_BLOCK + 2)
+#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 1)
 static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
@@ -429,6 +435,9 @@ static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
 static void* g_ps_ui_gpu = 0;
+static void* g_ps_resolve_gpu = 0;
+static void* g_msaa_color = 0; /* 4-sample scene colour (RGBA16F, tile 13), 0 = MSAA off */
+static void* g_msaa_depth = 0; /* 4-sample scene depth (Z_32_FLOAT, 1D tiled) */
 static void* g_frame = 0; /* the finished frame, linear RGBA16F (final pass -> frost chain, ps_ui) */
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
@@ -1540,6 +1549,14 @@ static void build_post_tables(uint32_t* tab) {
         post_consts(f, 1.0f / w, 1.0f / h, 0.0f, 1.0f / h);
         f += 32;
     }
+    /* MSAA resolve (ps_resolve): the 4-sample scene, PAL's MSAA SRD - TYPE 2D_MSAA (0xE),
+       BASE_LEVEL 0, LAST_LEVEL = log2(samples), TILING_INDEX as the colour target. */
+    if (g_msaa_color) {
+        uint32_t* r = tab + RESOLVE_BLOCK * 32;
+        build_tsharp_f16(r, g_msaa_color, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+        r[3] = (r[3] & ~((0x1Fu << 20) | (0xFu << 28) | (0xFu << 16) | (0xFu << 12))) |
+               ((uint32_t)MSAA_TILE_INDEX << 20) | (0xEu << 28) | (2u << 16);
+    }
     /* UI pass (ps_ui): frame + point S#, {1/w, 1/h}, frost (g_bloom_a[1]) + bilinear S#; the
        rects, UI T# and S# (28..47) come from ui_write_table. */
     uint32_t* u = tab + UI_BLOCK * 32;
@@ -1561,6 +1578,40 @@ static void build_post_tables(uint32_t* tab) {
 /* One full-screen pass into dst (w x h, pitch in pixels): the previous render
    target becomes a texture (same ACQUIRE_MEM as the shadow pass), then state
    for this size, the same way build_shadow_dcb sets up its target. */
+/* Rasterizer / DB MSAA state (PAL gfx6MsaaState.cpp; fields from AMD gfx_7_2_sh_mask.h).
+   4 samples: PA_SC_AA_CONFIG MSAA_NUM_SAMPLES 2 | MAX_SAMPLE_DIST 6 << 13 | MSAA_EXPOSED_SAMPLES 2
+   << 20; PA_SC_MODE_CNTL_0 MSAA_ENABLE | VPORT_SCISSOR_ENABLE; DB_EQAA MAX_ANCHOR_SAMPLES 2 |
+   MASK_EXPORT_NUM_SAMPLES 2 << 8 | ALPHA_TO_MASK_NUM_SAMPLES 2 << 12 | HIGH_QUALITY_INTERSECTIONS
+   | INCOHERENT_EQAA_READS | STATIC_ANCHOR_ASSOCIATIONS (PS_ITER_SAMPLES 0: one shade per pixel);
+   PAL's default 4x pattern (-2,-6) (6,-2) (-6,2) (2,6) in 1/16 px for all four quad pixels;
+   centroid priorities by distance (all equal: PAL's sort keeps 0,1,2,3); DB_RENDER_OVERRIDE2
+   DECOMPRESS_Z_ON_FLUSH (PAL: samples > 2). 1 sample: the PS4 driver's init values
+   (PA_SC_MODE_CNTL_0 0, PA_SC_AA_CONFIG 0), PAL's 1x DB_EQAA, zero locations and priorities. */
+static void emit_msaa_state(struct PM4Builder* b, int samples) {
+    static const int pat[4][2] = {{-2, -6}, {6, -2}, {-6, 2}, {2, 6}};
+    const int four = (samples == 4);
+    uint32_t locs[16] = {0}, cp[2] = {0u, 0u}, mask[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+    if (four) {
+        uint32_t v = 0;
+        for (int k = 0; k < 4; k++)
+            v |= (((uint32_t)pat[k][0] & 0xFu) << (8 * k)) |
+                 (((uint32_t)pat[k][1] & 0xFu) << (8 * k + 4));
+        locs[0] = locs[4] = locs[8] = locs[12] = v; /* S0..S3 of X0Y0, X1Y0, X0Y1, X1Y1 */
+        for (int i = 0; i < 8; i++)
+            cp[0] |= (uint32_t)(i & 3) << (4 * i);
+        cp[1] = cp[0];
+    }
+    pm4_set_context_reg(b, CTX_AA_CONFIG, four ? (2u | (6u << 13) | (2u << 20)) : 0u);
+    pm4_set_context_reg(b, CTX_MODE_CONTROL, four ? 3u : 0u);
+    pm4_set_context_reg(b, CTX_DB_EQAA,
+                        four ? (2u | (2u << 8) | (2u << 12) | (1u << 16) | (1u << 17) | (1u << 20))
+                             : ((1u << 16) | (1u << 17) | (1u << 20)));
+    pm4_set_context_regs(b, CTX_PA_SC_AA_MASK_X0Y0_X1Y0, mask, 2);
+    pm4_set_context_regs(b, CTX_PA_SC_CENTROID_PRIORITY_0, cp, 2);
+    pm4_set_context_regs(b, CTX_PA_SC_AA_SAMPLE_LOCS_X0Y0_0, locs, 16);
+    pm4_set_context_reg(b, CTX_DB_RENDER_OVERRIDE2, four ? (1u << 8) : 0u);
+}
+
 static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t w, uint32_t h,
                       uint32_t info, const void* ps, uint32_t rsrc1, const uint32_t* tab,
                       const uint32_t* bg_v) {
@@ -1614,12 +1665,17 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
+#define PS_RESOLVE_RSRC1 ((1u << 6) | 9u)    /* v38, s11 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
 static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v) {
     const uint32_t* t = g_post_tab;
+    emit_msaa_state(b, 1); /* every post pass is single-sample */
+    if (g_msaa_color)
+        post_pass(b, g_hdr, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_RGBA16F, g_ps_resolve_gpu,
+                  PS_RESOLVE_RSRC1, g_post_tab + RESOLVE_BLOCK * 32, bg_v);
     for (int i = 0; i < BLOOM_LEVELS; i++, t += 32)
         post_pass(b, g_bloom_a[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
                   g_ps_post_down_gpu, PS_POST_DOWN_RSRC1, t, bg_v);
@@ -1737,7 +1793,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_DEPTH_VIEW,0);
     pm4_set_context_reg(b,CTX_DEPTH_RENDER_OVERRIDE,0);
     pm4_set_context_reg(b,0x00B,0x3F800000u); // CTX_DEPTH_CLEAR = 1.0f
-    pm4_set_context_reg(b,CTX_DB_Z_INFO,3u);
+    /* Z_32_FLOAT; NUM_SAMPLES [3:2] = log2(samples) on the 4-sample buffer when MSAA is on. */
+    pm4_set_context_reg(b, CTX_DB_Z_INFO, g_msaa_color ? (3u | (2u << 2)) : 3u);
+    if (g_msaa_color)
+        depth = g_msaa_depth;
     /* CIK takes the depth layout from DB_DEPTH_INFO (radeonsi si_init_depth_surface,
        chip_class >= CIK: ARRAY_MODE/PIPE_CONFIG/bank fields from the tile-mode
        entry; DB_Z_INFO.TILE_MODE_INDEX is SI-only). Never written before, it was
@@ -1764,7 +1823,31 @@ static uint32_t build_dcb(struct PM4Builder *b,
     /* Colour: the RGBA16F HDR target (emit_post composites it into the display
        buffer); without it, straight into the sRGB display buffer. The old
        0x09A8 had NUMBER_TYPE 1 = SNORM: 1.0 was stored as 127 -> half bright. */
-    {
+    if (g_msaa_color) {
+        /* 4-sample RGBA16F (PAL gfx6ColorTargetView.cpp, no FMASK / CMASK): tiled (tile index 13,
+           LINEAR_GENERAL 0), ATTRIB NUM_SAMPLES = NUM_FRAGMENTS = 2; the hardware quirk without
+           FMASK: FMASK_TILE_MODE_INDEX = TILE_MODE_INDEX, PITCH.FMASK_TILE_MAX = TILE_MAX,
+           FMASK_SLICE = SLICE, FMASK base = colour base (CB doc); CMASK base / slice 0. */
+        uint32_t c = (uint32_t)((uint64_t)(uintptr_t)g_msaa_color >> 8);
+        uint32_t pt = (DISPLAY_W / 8) - 1, sl = (DISPLAY_W * DISPLAY_H / 64) - 1;
+        uint32_t r[14] = {c,
+                          pt | (pt << 20),
+                          sl,
+                          0,
+                          (0xCu << 2) | (7u << 8), /* 16_16_16_16, FLOAT */
+                          MSAA_TILE_INDEX | (MSAA_TILE_INDEX << 5) | (2u << 12) | (2u << 15),
+                          0,
+                          0,
+                          0,
+                          c,
+                          sl,
+                          0,
+                          0,
+                          0};
+        pm4_set_context_regs(b, CTX_CB_COLOR0_BASE, r, 14);
+        pm4_emit(b, 0xC0001000u);
+        pm4_emit(b, DISPLAY_W | (DISPLAY_H << 16));
+    } else {
         void* rt = g_hdr ? g_hdr : color;
         uint32_t c = (uint32_t)((uint64_t)(uintptr_t)rt >> 8);
         uint32_t r[14] = {c,
@@ -1813,12 +1896,11 @@ static uint32_t build_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_CLIPPER_CONTROL,1u<<19);
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
-    pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
     /* VGT_SHADER_STAGES_EN / VGT_DMA_SIZE are deliberately never written:
        neither gnm nor the game does (CLEAR_STATE default; the CP loads index
        sizes from the draw packets). Writing them every frame caused the
        512-submit stall and the frame-548 GPU wedge. */
-    pm4_set_context_reg(b,CTX_AA_CONFIG,0);
+    emit_msaa_state(b, g_msaa_color ? MSAA_SAMPLES : 1); /* scene: 4x when MSAA is on */
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
@@ -2123,12 +2205,11 @@ static uint32_t build_shadow_dcb(struct PM4Builder *b,
     pm4_set_context_reg(b,CTX_CLIPPER_CONTROL,1u<<19);
     pm4_set_context_reg(b,CTX_VIEWPORT_CONTROL,0x43F);
     pm4_set_context_reg(b,CTX_VS_OUTPUT_CONTROL,0);
-    pm4_set_context_reg(b,CTX_MODE_CONTROL,0);
     /* VGT_SHADER_STAGES_EN / VGT_DMA_SIZE are deliberately never written:
        neither gnm nor the game does (CLEAR_STATE default; the CP loads index
        sizes from the draw packets). Writing them every frame caused the
        512-submit stall and the frame-548 GPU wedge. */
-    pm4_set_context_reg(b,CTX_AA_CONFIG,0);
+    emit_msaa_state(b, 1); /* the shadow map is single-sample */
     pm4_set_context_reg(b,CTX_BLEND_CONTROL0,0);
     pm4_set_uconfig_reg(b,UCFG_PRIMITIVE_TYPE,4);
     pm4_set_uconfig_reg(b,UCFG_NUM_INSTANCES,1);
@@ -3096,6 +3177,16 @@ int main(void) {
         g_bloom_b[i] = gpu_alloc(sz, 0x10000);
         post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
     }
+#if MSAA_SAMPLES > 1
+    if (post_ok) {
+        g_msaa_color = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 8 * MSAA_SAMPLES, 0x10000);
+        g_msaa_depth = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 4 * MSAA_SAMPLES, 0x10000);
+        if (!g_msaa_color || !g_msaa_depth)
+            g_msaa_color = 0; /* single-sample fallback */
+    }
+#endif
+    trace_msg(g_msaa_color ? "msaa: 4x (colour 66355200 B, depth 33177600 B, tile 13)\n"
+                           : "msaa: off\n");
     g_post_tab = (uint32_t*)gpu_alloc_typed(POST_TABLE_BLOCKS * 32 * 4, 0x100, MEM_TYPE_ONION);
     if (post_ok && g_post_tab) {
         build_post_tables(g_post_tab);
@@ -3172,6 +3263,8 @@ int main(void) {
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
     g_ps_ui_gpu = ps_ui_gpu;
+    UPLOAD_SHADER(ps_resolve_gpu, ps_resolve_binary);
+    g_ps_resolve_gpu = ps_resolve_gpu;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];

@@ -183,6 +183,12 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define CTX_DB_DEPTH_INFO           0x00F  // AMD: DB_DEPTH_INFO
 #define CTX_STAGE_ENABLE            0x2D5  // AMD: VGT_SHADER_STAGES_EN
 #define CTX_AA_CONFIG               0x2F8
+/* MSAA state (AMD gfx_7_2_d.h offsets - 0xA000; used by emit_msaa_state in main.c). */
+#define CTX_DB_RENDER_OVERRIDE2 0x004
+#define CTX_DB_EQAA 0x201
+#define CTX_PA_SC_CENTROID_PRIORITY_0 0x2F5   /* _0, _1 */
+#define CTX_PA_SC_AA_SAMPLE_LOCS_X0Y0_0 0x2FE /* 16 regs: X0Y0_0..3, X1Y0, X0Y1, X1Y1 */
+#define CTX_PA_SC_AA_MASK_X0Y0_X1Y0 0x30E     /* and X0Y1_X1Y1 at 0x30F */
 #define CTX_CB_COLOR0_BASE          0x318
 #define CTX_CB_COLOR0_PITCH         0x319
 #define CTX_CB_COLOR0_SLICE         0x31A

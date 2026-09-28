@@ -1,4 +1,32 @@
 ============================================================
+4x MSAA  (build=msaa4x; MSAA_SAMPLES in main.c, 1 = off)
+============================================================
+The scene renders into a 4-sample RGBA16F colour target (66 MB) and a 4-sample
+Z_32_FLOAT depth buffer (33 MB), then ps_resolve (CAFE0400) averages the four
+samples of each pixel into g_hdr; bloom, flare, frost and UI are unchanged.
+Sources: AMD PAL gfx6 (commit 2de164b4: gfx6MsaaState.cpp, gfx6ColorTargetView.cpp,
+gfx6DepthStencilView.cpp, gfx6Device.cpp), register offsets / fields from the
+Linux kernel's gfx_7_2_d.h / gfx_7_2_sh_mask.h, layouts from addrlib (SiLib).
+- colour: PS4 tile index 13 Thin1dThin (1D tiled; pitch / height align 8,
+  size = pitch x height x bpp x samples), ATTRIB NUM_SAMPLES = NUM_FRAGMENTS =
+  2, no FMASK / CMASK; the hardware quirk without FMASK as PAL:
+  FMASK_TILE_MODE_INDEX = TILE_MODE_INDEX, PITCH.FMASK_TILE_MAX = TILE_MAX,
+  FMASK_SLICE = SLICE, FMASK base = colour base;
+- depth: DB_Z_INFO.NUM_SAMPLES 2, same 1D layout; DB_RENDER_OVERRIDE2
+  DECOMPRESS_Z_ON_FLUSH (PAL: samples > 2);
+- rasterizer (emit_msaa_state): PA_SC_AA_CONFIG 0x0020C002, PA_SC_MODE_CNTL_0
+  3, DB_EQAA 0x00132202, PAL's default 4x pattern (-2,-6) (6,-2) (-6,2) (2,6)
+  = PA_SC_AA_SAMPLE_LOCS 0x622AE6AE, centroid priorities 0x32103210, AA masks
+  0xFFFFFFFF; the shadow and post passes set the single-sample state (the PS4
+  driver's init values 0 / 0, PAL's 1x DB_EQAA 0x00130000, zero locations);
+- resolve: image_load (x, y, sample) from PAL's MSAA SRD (TYPE 2D_MSAA,
+  LAST_LEVEL = log2 samples, TILING_INDEX 13), box average in linear light.
+Checked: the emitted state packets decoded and compared (24 registers each for
+4x and 1x, no mismatch); ps_resolve in the emulator (loads samples 0..3 at the
+integer pixel, average vs float64 within 1.2e-7). The trace logs "msaa: 4x" or
+"msaa: off" (allocation failure falls back to single-sample).
+
+============================================================
 FROSTED GLASS REDONE + CENTRED LEADERBOARD  (build=frost-glass)
 ============================================================
 The glass blurred with 25 sparse taps (8 px apart): offset copies, a dotted
