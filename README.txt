@@ -1,3 +1,26 @@
+INTERNET TIME'S OWN TIME ZONE, A LOADING SCREEN THAT SHOWS  (build=loadscreen-iptz)
+
+- The last trace: every console source agreed on +60 min ("tz used=60 ... zone_raw=0 dst=1"): the
+  console's Time Zone setting is UTC+0 with summer time on, its clock set an hour ahead by hand
+  (typical when the jailbreak DNS blocks Sony's time sync) - so console time looked right and
+  internet time (true UTC + 60) was an hour behind.
+- Internet time now has its own zone: after each NTP sync the background thread asks ip-api.com
+  (http://ip-api.com/json/?fields=status,timezone,offset, plain HTTP/1.0 on port 80; offset is
+  "Timezone UTC DST offset in seconds" per its documentation) - accepted on HTTP 200,
+  "status":"success" and an offset that is a real zone. Until it answers, or if it cannot be
+  reached: the offset of the console's displayed clock from internet UTC, to the nearest 15 min.
+  Console time keeps the console's own zone. Trace: "tz_net used=<min> src=1 (ip-api) | 2 (display)
+  console_tz=<min> zone=<name>". Host-tested with this console's exact state: both routes 17:40:26
+  for 15:40:26 UTC; negative offsets, "fail", HTTP 429 and blocked DNS handled.
+- Loading screen: the old one drew through the main renderer only during the model load (6 frames),
+  underneath the system splash (hidden only after all loading), and its "solid blue" relied on the
+  old sky shader. Now src/loadscreen.h draws it with the CPU straight into the linear display
+  buffers from the moment video out is registered: the first frame goes up, then the splash is
+  hidden (once); the bar advances by each asset file's real size (63 MB: bgm, 8 textures, UI and
+  clock atlases, atmosphere, model; the model within its load too), redrawn at most every 20 ms.
+  Same look (blue, white bar, same place), plus a dim track. "load ms: ..." in the trace gives each
+  step's time, to weight the bar by time next.
+
 TIME ZONE FROM THE CONSOLE'S SETTINGS, CLOCK TEXT UPDATED PER GLYPH  (build=clock-tz)
 
 - Local time = UTC + the console's Time Zone setting + 60 min when its Daylight Saving switch is on

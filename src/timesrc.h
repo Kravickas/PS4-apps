@@ -42,6 +42,9 @@ extern int sceNetSendto(int s, const void* buf, unsigned long len, int flags, co
 extern int sceNetRecvfrom(int s, void* buf, unsigned long len, int flags, void* addr,
                           uint32_t* addrlen);
 extern int sceNetSocketClose(int s);
+extern int sceNetConnect(int s, const void* addr, uint32_t addrlen);
+extern int sceNetSend(int s, const void* buf, unsigned long len, int flags);
+extern int sceNetRecv(int s, void* buf, unsigned long len, int flags);
 
 #define TS_SYSMODULE_INTERNAL_NET 0x8000001Cu
 #define TS_PARAM_TIME_FORMAT 3 /* 0: 12 h, 1: 24 h */
@@ -61,17 +64,20 @@ extern int sceNetSocketClose(int s);
 enum { TS_INGAME = 0, TS_CONSOLE = 1, TS_NET = 2 };
 
 typedef struct {
-    int source;          /* TS_INGAME / TS_CONSOLE / TS_NET */
-    int h12;             /* the console shows 12-hour time */
-    int net_started;     /* the thread was started */
-    volatile int net_ok; /* an answer arrived: net_off is valid (release / acquire) */
-    int64_t net_off;     /* UTC tick - process time (us), written by the thread */
-    int shown_ok;        /* shown_off is initialised */
-    int64_t shown_off;   /* what the clock uses: slews toward net_off */
-    uint64_t last_us;    /* process time of the previous ts_utc call */
-    int tz_min;          /* local time - UTC (minutes) */
-    int tz_src;          /* where it came from: 4 settings, 3 kernel, 2 RTC local clock, 1 RTC */
-    uint64_t tz_next_us; /* process time of the next re-read */
+    int source;             /* TS_INGAME / TS_CONSOLE / TS_NET */
+    int h12;                /* the console shows 12-hour time */
+    int net_started;        /* the thread was started */
+    volatile int net_ok;    /* an answer arrived: net_off is valid (release / acquire) */
+    int64_t net_off;        /* UTC tick - process time (us), written by the thread */
+    int shown_ok;           /* shown_off is initialised */
+    int64_t shown_off;      /* what the clock uses: slews toward net_off */
+    uint64_t last_us;       /* process time of the previous ts_utc call */
+    int tz_min;             /* local time - UTC (minutes): the console's */
+    volatile int net_tz_ok; /* internet time's own zone: from ip-api.com (the thread) */
+    int net_tz_min;         /* its offset (minutes) */
+    char net_tz_name[48];   /* its IANA name, for the trace */
+    int tz_src;             /* where it came from: 4 settings, 3 kernel, 2 RTC local clock, 1 RTC */
+    uint64_t tz_next_us;    /* process time of the next re-read */
 } TimeSrc;
 static TimeSrc g_ts;
 
@@ -158,11 +164,55 @@ static void ts_init(void) {
     g_ts.h12 = (sceSystemServiceParamGetInt(TS_PARAM_TIME_FORMAT, &v) == 0 && v == 0);
     ts_tz_refresh();
 }
-/* local tick = UTC tick + the time zone (re-read every minute) */
+/* Internet time's zone when ip-api.com has not answered: the offset of the console's displayed
+   clock (its UTC + its zone) from internet UTC, to the nearest 15 min - the zone its owner reads.
+   TS_TZ_BAD when not a real zone. */
+static int ts_display_tz(uint64_t net_utc) {
+    TsRtcTick c;
+    sceRtcGetCurrentTick(&c);
+    long long d = (long long)c.tick + (long long)g_ts.tz_min * 60000000LL - (long long)net_utc;
+    long long q = d >= 0 ? (d + 450000000LL) / 900000000LL : -((-d + 450000000LL) / 900000000LL);
+    return (q >= -56 && q <= 56) ? (int)(q * 15) : TS_TZ_BAD;
+}
+/* local tick = UTC tick + the zone: internet time its own (ip-api.com, else the console's displayed
+   clock), the console its setting (re-read every minute) */
+static int ts_net_valid(void);
+static int g_ts_net_tz_used = TS_TZ_BAD, g_ts_net_tz_src = 0;
 static uint64_t ts_local_tick(uint64_t utc) {
     if (sceKernelGetProcessTime() >= g_ts.tz_next_us)
         ts_tz_refresh();
-    return (uint64_t)((int64_t)utc + (int64_t)g_ts.tz_min * 60000000LL);
+    int m = g_ts.tz_min;
+    if (g_ts.source == TS_NET && ts_net_valid()) {
+        int src = 3, dm = TS_TZ_BAD;
+        if (__atomic_load_n(&g_ts.net_tz_ok, __ATOMIC_ACQUIRE)) {
+            m = __atomic_load_n(&g_ts.net_tz_min, __ATOMIC_RELAXED);
+            src = 1;
+        } else if ((dm = ts_display_tz(utc)) != TS_TZ_BAD) {
+            m = dm;
+            src = 2;
+        }
+        if (m != g_ts_net_tz_used || src != g_ts_net_tz_src) { /* trace: "tz_net" */
+            static const char* const k[3] = {"tz_net used=", " src=", " console_tz="};
+            long long v[3] = {m, src, g_ts.tz_min};
+            char L[160];
+            int p = 0;
+            for (int i = 0; i < 3; i++) {
+                for (const char* q = k[i]; *q; q++)
+                    L[p++] = *q;
+                p += lg_i64(L + p, v[i]);
+            }
+            const char* z = src == 1 ? " zone=" : "";
+            for (; *z; z++)
+                L[p++] = *z;
+            for (int j = 0; src == 1 && g_ts.net_tz_name[j] && j < 47; j++)
+                L[p++] = g_ts.net_tz_name[j];
+            L[p++] = '\n';
+            trace_line(L, (unsigned long)p);
+            g_ts_net_tz_used = m;
+            g_ts_net_tz_src = src;
+        }
+    }
+    return (uint64_t)((int64_t)utc + (int64_t)m * 60000000LL);
 }
 
 /* NTP 32.32 fixed point (big-endian) <-> microseconds since 1900 */
@@ -225,6 +275,95 @@ static int ts_ntp_query(int rid, const char* host, int64_t* off) {
     return ret;
 }
 
+/* Internet time's own time zone (the console's setting may be wrong - e.g. UTC+0 with the clock
+   set an hour ahead by hand): ip-api.com's free JSON API by the caller's IP over plain HTTP/1.0
+   (http://ip-api.com/json/?fields=status,timezone,offset; offset = "Timezone UTC DST offset in
+   seconds"). Accepted: HTTP 200, "status":"success", an offset that is a real zone (a multiple of
+   15 min within +-14 h). 0 and *min on success. */
+static int ts_http_tz(int rid, int* min, char* name, int name_len) {
+    uint32_t addr = 0;
+    if (sceNetResolverStartNtoa(rid, "ip-api.com", &addr, 0, 0, 0) < 0 || addr == 0)
+        return -1;
+    int s = sceNetSocket("tz", 2, 1, 0); /* AF_INET, SOCK_STREAM */
+    if (s < 0)
+        return -2;
+    int tmo = 5000000;
+    sceNetSetsockopt(s, 0xFFFF, 0x1106, &tmo, sizeof(tmo));
+    sceNetSetsockopt(s, 0xFFFF, 0x1105, &tmo, sizeof(tmo));
+    unsigned char sa[16] = {16, 2, 0, 80}; /* sin_len, AF_INET, port 80 (big-endian) */
+    for (int i = 0; i < 4; i++)
+        sa[4 + i] = ((const unsigned char*)&addr)[i];
+    static const char req[] =
+        "GET /json/?fields=status,timezone,offset HTTP/1.0\r\n"
+        "Host: ip-api.com\r\nUser-Agent: ShadCube4\r\nConnection: close\r\n\r\n";
+    char r[1024];
+    int n = 0, ret = -3;
+    if (sceNetConnect(s, sa, sizeof(sa)) == 0 &&
+        sceNetSend(s, req, sizeof(req) - 1, 0) == (int)sizeof(req) - 1) {
+        for (;;) {
+            int k = sceNetRecv(s, r + n, sizeof(r) - 1 - (unsigned long)n, 0);
+            if (k <= 0)
+                break;
+            n += k;
+            if (n >= (int)sizeof(r) - 1)
+                break;
+        }
+        r[n] = 0;
+        ret = -4;
+        /* "HTTP/1.x 200", then the body after the blank line */
+        const char* b = 0;
+        for (int i = 0; i + 3 < n; i++)
+            if (r[i] == '\r' && r[i + 1] == '\n' && r[i + 2] == '\r' && r[i + 3] == '\n') {
+                b = r + i + 4;
+                break;
+            }
+        int http_ok = n > 12 && r[0] == 'H' && r[1] == 'T' && r[2] == 'T' && r[3] == 'P' &&
+                      r[9] == '2' && r[10] == '0' && r[11] == '0';
+        const char* st = 0;
+        const char* of = 0;
+        const char* tz = 0;
+        for (const char* q = b; http_ok && q && *q; q++) {
+            static const char k1[] = "\"status\":\"success\"",
+                              k2[] = "\"offset\":", k3[] = "\"timezone\":\"";
+            int m1 = 1, m2 = 1, m3 = 1;
+            for (int j = 0; k1[j]; j++)
+                m1 &= q[j] == k1[j];
+            for (int j = 0; k2[j]; j++)
+                m2 &= q[j] == k2[j];
+            for (int j = 0; k3[j]; j++)
+                m3 &= q[j] == k3[j];
+            if (m1)
+                st = q;
+            if (m2)
+                of = q + sizeof(k2) - 1;
+            if (m3)
+                tz = q + sizeof(k3) - 1;
+        }
+        if (st && of) {
+            int sign = 1, v = 0, digits = 0;
+            if (*of == '-') {
+                sign = -1;
+                of++;
+            }
+            for (; *of >= '0' && *of <= '9' && digits < 7; of++, digits++)
+                v = v * 10 + (*of - '0');
+            v *= sign;
+            int a = v < 0 ? -v : v;
+            if (digits > 0 && a <= 14 * 3600 && a % 900 == 0) {
+                *min = v / 60;
+                int j = 0;
+                for (; tz && tz[j] && tz[j] != '"' && j < name_len - 1; j++)
+                    name[j] = tz[j];
+                name[j] = 0;
+                ret = 0;
+            } else
+                ret = -5;
+        }
+    }
+    sceNetSocketClose(s);
+    return ret;
+}
+
 static void* ts_net_thread(void* arg) {
     (void)arg;
     static const char* const hosts[3] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
@@ -240,6 +379,16 @@ static void* ts_net_thread(void* arg) {
                 __atomic_store_n(&g_ts.net_off, off, __ATOMIC_RELAXED);
                 __atomic_store_n(&g_ts.net_ok, 1, __ATOMIC_RELEASE);
                 ok = 1;
+            }
+        }
+        if (ok) { /* internet time's own zone, with every sync (follows DST changes) */
+            int m;
+            char nm[48];
+            if (ts_http_tz(rid, &m, nm, sizeof(nm)) == 0) {
+                for (int j = 0; j < (int)sizeof(nm); j++)
+                    g_ts.net_tz_name[j] = nm[j];
+                __atomic_store_n(&g_ts.net_tz_min, m, __ATOMIC_RELAXED);
+                __atomic_store_n(&g_ts.net_tz_ok, 1, __ATOMIC_RELEASE);
             }
         }
         sceKernelUsleep(ok ? TS_NTP_EVERY_US : TS_NTP_RETRY_US);

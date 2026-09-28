@@ -221,7 +221,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "clock-tz"
+#define BUILD_TAG "loadscreen-iptz"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1482,6 +1482,8 @@ typedef struct {
     int err;             /* dds_load result, 0 = loaded */
 } Tex;
 
+#include "loadscreen.h"
+
 static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t fallback_nfmt) {
     Tex t;
     DdsTexture d;
@@ -1515,6 +1517,7 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
     }
     printf("texture %s: %d (%dx%d, %d levels, format 0x%x/%u)\n", path, t.err, t.w, t.h, t.levels,
            t.dfmt, t.nfmt);
+    ls_file(path);
     return t;
 }
 
@@ -3009,104 +3012,6 @@ static int parse_ply_inline(const uint8_t *data, unsigned long sz,
     return nout;
 }
 
-/* --- Loading screen --- */
-struct LoadCtx {
-    const void *vs; const void *ps;
-    uint32_t *vb_v; uint32_t *bg_v;
-    void *vb; uint32_t *desc;
-    void *fb0; void *fb1; void *depth;
-    volatile uint32_t *fence;
-    int video; uint32_t *pm4_buf;
-    int flip_idx;
-    const void *ps_blue;
-    const void *ps_dark;
-};
-
-static void loading_progress(float frac, const char* msg, void* ud) {
-    struct LoadCtx *c = (struct LoadCtx*)ud;
-    float progress = frac < 0.0f ? 0.0f : (frac > 1.0f ? 1.0f : frac); /* 0..1 */
-
-    /* Loading sky: SOLID blue (both zenith and horizon = blue) to cover behind rendering */
-    {
-        float *sz = (float*)(c->desc + 24); /* zenith */
-        sz[0] = srgb_to_linear(0.08f);
-        sz[1] = srgb_to_linear(0.20f);
-        sz[2] = srgb_to_linear(0.55f);
-        sz[3] = 0;
-        float *sh = (float*)(c->desc + 28); /* horizon */
-        sh[0] = srgb_to_linear(0.08f);
-        sh[1] = srgb_to_linear(0.20f);
-        sh[2] = srgb_to_linear(0.55f);
-        sh[3] = 0;
-        /* Sun and moon discs off-screen, radius^2 > 0 (no disc on the loading
-           screen), disc colours black. */
-        float *snd = (float*)(c->desc + 16);
-        snd[0]=10.0f; snd[1]=10.0f; snd[2]=0.0001f; snd[3]=0;
-        snd[4] = 10.0f;
-        snd[5] = 10.0f;
-        snd[6] = 0.0001f;
-        snd[7] = 0;
-        for (int q = 84; q < 92; q++)
-            c->desc[q] = 0;
-    }
-
-    /* BG quad: must cover full screen — keep normals any direction, shader just reads attr0 */
-    float *bg = (float*)((char*)c->vb + BG_DATA_OFF);
-    for (int i = 0; i < 6; i++) {
-        bg[i*12+4]=0; bg[i*12+5]=1; bg[i*12+6]=0; bg[i*12+7]=0;
-    }
-
-    /* Identity MVP so bar positions pass through as NDC directly (covers model) */
-    float *mvp = (float*)((char*)c->vb + MVP_OFF);
-    mvp[0]=1;mvp[1]=0;mvp[2]=0;mvp[3]=0;
-    mvp[4]=0;mvp[5]=1;mvp[6]=0;mvp[7]=0;
-    mvp[8]=0;mvp[9]=0;mvp[10]=1;mvp[11]=0;
-    mvp[12]=0;mvp[13]=0;mvp[14]=0;mvp[15]=1;
-
-    /* Progress bar: WHITE via ps_blue (which outputs solid color regardless of tex)
-       Position near bottom center. z=0 (in front of sky BG which is also z=0),
-       but bar drawn AFTER BG so it overlays */
-    float *bar = (float*)((char*)c->vb + CUBE_DATA_OFF);
-    float x0 = -0.7f, x1 = -0.7f + progress * 1.4f;
-    float y0 = -0.65f, y1 = -0.55f;
-    { float bv[6][12] = {
-        {x0,y0,0,1, 0,1,0,0, 0.5f,0.5f,0,0},
-        {x1,y0,0,1, 0,1,0,0, 0.5f,0.5f,0,0},
-        {x1,y1,0,1, 0,1,0,0, 0.5f,0.5f,0,0},
-        {x0,y0,0,1, 0,1,0,0, 0.5f,0.5f,0,0},
-        {x1,y1,0,1, 0,1,0,0, 0.5f,0.5f,0,0},
-        {x0,y1,0,1, 0,1,0,0, 0.5f,0.5f,0,0}
-      };
-      for(int vi=0;vi<6;vi++) for(int fi=0;fi<12;fi++) bar[vi*12+fi]=bv[vi][fi];
-    }
-
-    struct PM4Builder pm4;
-    pm4_init(&pm4, c->pm4_buf, 0x10000/4);
-    int bi = c->flip_idx & 1;
-    uint32_t fv = c->flip_idx + 100;
-    *c->fence = 0;
-    /* Model PS = ps_blue (white bar), Sky PS = ps_dark (dynamic — will render solid blue from desc) */
-    uint32_t sz = build_dcb(&pm4, c->vs, c->ps_blue, c->ps_dark, 0, 0,
-                            c->vb_v, c->bg_v, 0, 0,
-                            c->vb, c->desc, 6, VERT_BUF_SIZE, 0, 0, 0,
-                            bi ? c->fb1 : c->fb0, c->depth, 0, c->fence, fv,
-                            1 /* EOP fence: a plain submit never runs gnm's marker
-                                 patcher, so with the marker tail the fence was never
-                                 written and every update waited out its timeout */);
-    const uint32_t *a[1] = { c->pm4_buf };
-    uint32_t s2[1] = { sz };
-    sceGnmSubmitCommandBuffers(1, (void**)a, s2, 0, 0);
-    g_submit_count++;   /* loading submits count toward any kernel-side budget */
-    sceGnmSubmitDone();
-    /* Bounded wait (was infinite). If the GPU faults the fence never signals;
-       cap the wait so we still reach the main render loop instead of hanging
-       here forever. */
-    for (int w=0; w<10000 && *c->fence != fv; w++) sceKernelUsleep(100);
-    sceVideoOutSubmitFlip(c->video, bi, 1, 0);
-    sceKernelUsleep(16000);
-    c->flip_idx++;
-}
-
 int main(void) {
     printf("=== ShadCube4 ===\n");
 
@@ -3135,7 +3040,7 @@ int main(void) {
        Verified vs shadPS4 buffer.h: TilingMode::Tile=0, Linear=1. */
     sceVideoOutSetBufferAttribute(buf_attr,0x80000000,1,0,DISPLAY_W,DISPLAY_H,DISPLAY_W);
     sceVideoOutRegisterBuffers(video,0,fb,NUM_FRAMES,buf_attr);
-
+    ls_start(video, fb[0], fb[1]); /* the loading screen, then the splash goes */
 
     /* Enable WAIT-FREE SUBMIT as early as the driver allows.
        libSceGnmDriver.prx exports seven library namespaces; one of them is
@@ -3263,6 +3168,7 @@ int main(void) {
         p += lg_i64(L + p, r);
         L[p++] = '\n';
         trace_line(L, (unsigned long)p);
+        ls_file(ASSET_DIR "sound/bgm/bgm.wav");
     }
     mem_report("start");
 
@@ -3306,9 +3212,11 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
+    ls_file(ASSET_DIR "ui/ui_atlas.bin");
     ts_init();
     clock_rim_init();
     int clock_err = clock_init();
+    ls_file(ASSET_DIR "ui/clock_sdf.bin");
     {
         char L[80];
         int p = 0;
@@ -3332,6 +3240,7 @@ int main(void) {
     Tex moon_alb =
         load_tex(ASSET_DIR "images/moon/albedo.dds", k_grey, 9); /* NASA LROC, near side */
     g_atmo_ok = load_atmosphere();
+    ls_file(ASSET_DIR "sky/atmosphere.bin");
     trace_msg(g_atmo_ok ? "sky: atmosphere.bin loaded\n"
                         : "sky: atmosphere.bin MISSING - black sky\n");
     if (!g_atmo_atlas)
@@ -3670,6 +3579,7 @@ int main(void) {
     #define UPLOAD_SHADER(dst, src) \
         void *dst = gpu_alloc_typed(sizeof(src)+256, 0x1000, MEM_TYPE_ONION); /* shader code: coherent, GPU executes it */ \
         my_memcpy(dst, src, sizeof(src));
+    ls_mark("gpu_buffers");
     UPLOAD_SHADER(ps_dark_gpu,          ps_dark_binary);
     UPLOAD_SHADER(ps_floor_gpu,         ps_floor_binary);
     UPLOAD_SHADER(ps_model_gpu, ps_model_binary);
@@ -3775,16 +3685,6 @@ int main(void) {
         /* The prop shipped in the package (tools/gen_model.py); the loader is
            picked by extension (.obj / .stl / .ply). */
         static const char* obj_paths[] = {ASSET_DIR "models/cube/cube.obj", 0};
-        struct LoadCtx load_ctx;
-        load_ctx.vs = vs; load_ctx.ps = ps;
-        load_ctx.vb_v = vb_v; load_ctx.bg_v = bg_v;
-        load_ctx.vb = vb; load_ctx.desc = desc;
-        load_ctx.fb0 = fb[0]; load_ctx.fb1 = fb[1];
-        load_ctx.depth = depth; load_ctx.fence = fence;
-        load_ctx.video = video; load_ctx.pm4_buf = dcb_mem[0];
-        load_ctx.flip_idx = 0;
-        load_ctx.ps_blue = ps_blue_gpu;
-        load_ctx.ps_dark = ps_dark_gpu;
         ObjMesh mesh;
         int loaded = 0;
         for (int pi = 0; obj_paths[pi] && !loaded; pi++) {
@@ -3795,11 +3695,11 @@ int main(void) {
             const char *dot = ext;
             while (dot > obj_paths[pi] && *dot != '.') dot--;
             if (dot[1]=='o' && dot[2]=='b' && dot[3]=='j') {
-                err = obj_load_file(obj_paths[pi], gpu_alloc, &mesh, loading_progress, &load_ctx);
+                err = obj_load_file(obj_paths[pi], gpu_alloc, &mesh, ls_model_progress, 0);
             } else if (dot[1]=='s' && dot[2]=='t' && dot[3]=='l') {
-                err = stl_load_binary(obj_paths[pi], gpu_alloc, &mesh, loading_progress, &load_ctx);
+                err = stl_load_binary(obj_paths[pi], gpu_alloc, &mesh, ls_model_progress, 0);
             } else if (dot[1]=='p' && dot[2]=='l' && dot[3]=='y') {
-                err = ply_load_file(obj_paths[pi], gpu_alloc, &mesh, loading_progress, &load_ctx);
+                err = ply_load_file(obj_paths[pi], gpu_alloc, &mesh, ls_model_progress, 0);
             }
             {
                 char L[192];
@@ -3825,7 +3725,7 @@ int main(void) {
                        obj_paths[pi], mesh.num_verts, mesh.num_tris, mesh.indexed);
                 /* Copy BG quad data into mesh.vb_base */
                 my_memcpy(mesh.vb_base, vb, OBJ_DATA_OFF);
-                /* Reset BG normals to zero after loading (loading_progress sets z=0.25) */
+                /* BG normals to zero, the state the old GPU loading screen left (kept as is) */
                 { float *bgr = (float*)((char*)mesh.vb_base + BG_DATA_OFF);
                   for (int bi=0;bi<6;bi++) { bgr[bi*12+4]=0;bgr[bi*12+5]=0;bgr[bi*12+6]=0; } }
                 vb = mesh.vb_base;
@@ -3904,14 +3804,13 @@ int main(void) {
             }
         }
         if (!loaded) {
-            /* Restore cube verts and BG — loading_progress may have overwritten them
-               during failed OBJ attempts (progress-bar geometry written at CUBE_DATA_OFF
-               plus BG tweaks). Rebuild the static VB to recover the original cube. */
+            /* No model: rebuild the static VB, the built-in cube. */
             build_static_vb((float*)vb);
             printf("No model found, using built-in cube.\n");
         }
     }
 
+    ls_file(ASSET_DIR "models/cube/cube.obj");
     printf("VB ready: %d model verts. MVP on GPU. Running.\n", model_verts);
 
     // --- Gamepad init ---
@@ -4111,7 +4010,9 @@ int main(void) {
       trace_msg(L);
     }
 
-    int splash_ret = sceSystemServiceHideSplashScreen();
+    ls_mark("final_setup");
+    ls_finish(); /* the full bar; the splash went when the loading screen came up */
+    int splash_ret = g_ls.splash_ret;
     { char L[96]; int p=0;
       const char *m = "HideSplashScreen ret=";
       while (*m) L[p++] = *m++;
