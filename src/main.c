@@ -145,8 +145,9 @@
 
 /* Floor surface (ps_floor): parallax occlusion mapping from the height map
    and distance fog toward the sky gradient. */
-#define POM_DEPTH 0.05f      /* relief depth in world units (a texture tile is 4 units) */
-#define POM_FADE 90.0f       /* parallax fades to zero by this distance */
+#define POM_DEPTH 0.025f     /* relief depth in world units (a texture tile is 4 units; was 0.05) */
+#define POM_FADE_START 10.0f /* full parallax up to this distance */
+#define POM_FADE_END 50.0f   /* ... then a linear fade to zero at this distance */
 #define FOG_MIN 0.03f        /* fog at distance 0; grows as FOG_MIN * e^(d / L) */
 #define FOG_FULL 290.0f      /* distance where the fog reaches 100% (floor edge is FLOOR_HALF) */
 /* Midday sun disc colour (sRGB); amber at the horizon ramps to this. */
@@ -182,7 +183,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "bloom-0.1"
+#define BUILD_TAG "pom-window-ui"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -406,10 +407,11 @@ static int g_stars_draw = 0; /* 0 while fully faded out (or on the loading scree
    the coarse levels give the wide halo). Pitches are 64-texel multiples: the
    T# TILING_INDEX 8 is linear aligned. A = downsample / blurred level, B = blur
    temp, then the up-sampled sum. One 32-dword descriptor table per pass. */
-#define BLOOM_LEVELS 6
-static const uint16_t g_bloom_w[BLOOM_LEVELS] = {480, 240, 120, 60, 30, 15};
-static const uint16_t g_bloom_h[BLOOM_LEVELS] = {270, 135, 68, 34, 17, 9};
-static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64, 64, 64};
+/* 4 levels (was 6): the 30x17 and 15x9 levels spread the sun's glow 150-300 px out. */
+#define BLOOM_LEVELS 4
+static const uint16_t g_bloom_w[BLOOM_LEVELS] = {480, 240, 120, 60};
+static const uint16_t g_bloom_h[BLOOM_LEVELS] = {270, 135, 68, 34};
+static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
 #define POST_PASSES (BLOOM_LEVELS * 4) /* down, blur H, blur V, up-add (last: composite) */
 /* Post table (32-dword blocks): the bloom chain + final pass (0..POST_PASSES-1), the final
    pass's flare dwords (next block), then the frost chain (down 1920 -> 480, down 480 -> 240,
@@ -3050,7 +3052,9 @@ int main(void) {
     build_tsharp_tex(desc + 72, &floor_nrm);
     /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
        then (pom_scale, fog rate, h_scale, h_bias) desc[108] and (normal sign x,
-       sign y, 1/POM_FADE, 1/DISPLAY_H) desc[112]. Fog (ps_floor, ps_shader,
+       sign y, 1/(POM_FADE_END - POM_FADE_START), 1/DISPLAY_H) desc[112], and
+       POM_FADE_END / (POM_FADE_END - POM_FADE_START) desc[116] (ps_floor: the fade is
+       clamp(desc[116] - d * desc[114], 0, 1): 1 up to START, 0 from END). Fog (ps_floor, ps_shader,
        ps_model): weight = min(1, 2^(rate * d + log2(FOG_MIN))) = min(1, FOG_MIN *
        e^(d / L)), rate = log2(1 / FOG_MIN) / FOG_FULL. Heights arrive stretched
        to 0..1 and normals in the engine convention (tools/make_textures.py). */
@@ -3068,8 +3072,9 @@ int main(void) {
         fc[7] = floor_hgt.err ? 1.0f : 0.0f;
         fc[8] = 1.0f;
         fc[9] = 1.0f;
-        fc[10] = 1.0f / POM_FADE;
+        fc[10] = 1.0f / (POM_FADE_END - POM_FADE_START);
         fc[11] = 1.0f / (float)DISPLAY_H;
+        fc[12] = POM_FADE_END / (POM_FADE_END - POM_FADE_START); /* desc[116] */
     }
     /* Model maps: normal T# desc[128] (sampler desc[8]), height T# desc[136]
        (sampler desc[100]); constants desc[144] = (pom_scale, h_scale, h_bias,

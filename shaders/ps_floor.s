@@ -14,6 +14,7 @@ s_load_dwordx4 s[52:55], s[0:1], 0x20
 s_load_dwordx8 s[56:63], s[0:1], 0x28
 s_load_dwordx4 s[64:67], s[0:1], 0x50
 s_load_dwordx16 s[68:83], s[0:1], 0x30
+s_load_dword s88, s[0:1], 0x74
 v_interp_p1_f32 v10, v0, attr0.x
 v_interp_p2_f32 v10, v1, attr0.x
 v_interp_p1_f32 v11, v0, attr0.y
@@ -81,18 +82,12 @@ v_mac_f32 v5, v35, v32
 v_mul_f32 v6, v33, v24
 v_mac_f32 v6, v34, v25
 v_mac_f32 v6, v35, v26
+; parallax distance window: fade = clamp(desc[116] - d * desc[114], 0, 1) = clamp((END - d) / (END - START))
 v_mul_f32 v7, s46, v37
-v_sub_f32 v7, 1.0, v7
+v_sub_f32 v7, s88, v7
 v_max_f32 v7, 0, v7
+v_min_f32 v7, 1.0, v7
 v_mul_f32 v7, s40, v7
-; POM LOD fade (Tatarchuk, DX SDK ParallaxOcclusionMapping): height-map mip at the base UV (isotropic sampler)
-image_get_lod v8, v[10:11], s[24:31], s[32:35] dmask:0x1
-s_waitcnt vmcnt(0)
-v_max_f32 v8, 0, v8
-v_sub_f32 v8, 0x40400000, v8
-v_max_f32 v8, 0, v8
-v_min_f32 v8, 1.0, v8
-v_mul_f32 v7, v7, v8
 v_max_f32 v8, 0x3dcccccd, v6
 v_rcp_f32 v8, v8
 v_mul_f32 v8, v8, v7

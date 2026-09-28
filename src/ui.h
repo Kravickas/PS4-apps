@@ -23,8 +23,6 @@
 #define UI_ICON_BELOW (UI_ICON_PX - UI_ICON_ABOVE)
 #define UI_LINE_ABOVE (UI_ICON_ABOVE > UI_FONT_ASCENT ? UI_ICON_ABOVE : UI_FONT_ASCENT)
 #define UI_LINE_BELOW (UI_ICON_BELOW > UI_FONT_DESCENT ? UI_ICON_BELOW : UI_FONT_DESCENT)
-#define UI_CLEAR_W 760 /* areas cleared before each redraw (left panel / leaderboard) */
-#define UI_CLEAR_H 640
 #define UI_LB_GAP 20 /* leaderboard: gap to the opened controls panel */
 
 typedef struct {
@@ -35,6 +33,18 @@ typedef struct {
     char key[96];  /* content of the current buffer; recompose when it changes */
     float rect[8]; /* panels: centre x, y, half w, h (px) for the left panel and the leaderboard */
     int lb[4];     /* leaderboard rect x0, y0, x1, y1 (px), fixed at init */
+    /* Per buffer: dirty boxes x0, y0, x1, y1 (empty: x1 <= x0) of the left panel [0] and the
+       leaderboard [1], and the state it shows (valid = 0: never drawn). */
+    int dirty[UI_BUFS][2][4];
+    struct {
+        int valid, controls, leaderboard, cam, day, frozen;
+        unsigned long play;
+    } st[UI_BUFS];
+    int* drawing;   /* dirty box being grown by ui_blit, or 0 */
+    int nclip;      /* > 0: ui_blit draws only inside clip[0 .. nclip - 1] (partial redraw) */
+    int clip[3][4]; /* x0, y0, x1, y1 */
+    int ycam, yday, ytime; /* baselines of the value lines (fixed by the layout) */
+    int gtop, gbot;        /* glyph box extent around a baseline, shadow included */
 } Ui;
 static Ui g_ui;
 
@@ -87,29 +97,66 @@ static int ui_init(void) {
     g_ui.lb[1] = UI_H / 10;
     g_ui.lb[2] = UI_W - g_ui.lb[0];
     g_ui.lb[3] = UI_H - UI_H / 10;
+    /* band of a text line around its baseline: every glyph box, plus the 2 px shadow offset */
+    g_ui.gtop = 1 << 20, g_ui.gbot = -(1 << 20);
+    for (int i = 0; i < 96; i++) {
+        int t = ui_glyph[i].yoff, e = ui_glyph[i].yoff + ui_glyph[i].h + 2;
+        g_ui.gtop = t < g_ui.gtop ? t : g_ui.gtop;
+        g_ui.gbot = e > g_ui.gbot ? e : g_ui.gbot;
+    }
     g_ui.ok = 1;
     return 0;
 }
 
 /* Premultiplied "over": dst = src * a + dst * (1 - a); tint replaces the atlas colour. */
-static void ui_blit(unsigned char* dst, int sx, int sy, int w, int h, int dx, int dy,
-                    const unsigned char* tint, int alpha256) {
-    for (int j = 0; j < h; j++) {
-        int y = dy + j;
-        if (y < 0 || y >= UI_H)
-            continue;
-        const unsigned char* s = g_ui.atlas + ((unsigned long)(sy + j) * UI_ATLAS_W + sx) * 4;
-        unsigned char* d = dst + ((unsigned long)y * UI_W + dx) * 4;
-        for (int i = 0; i < w; i++, s += 4, d += 4) {
-            int x = dx + i;
+static void ui_blend(unsigned char* dst, int sx, int sy, int dx, int dy, int x0, int y0, int x1,
+                     int y1, const unsigned char* tint, int alpha256) {
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    if (g_ui.drawing) { /* grow the dirty box by the drawn rect */
+        int* r = g_ui.drawing;
+        if (r[2] <= r[0]) {
+            r[0] = x0, r[1] = y0, r[2] = x1, r[3] = y1;
+        } else {
+            r[0] = x0 < r[0] ? x0 : r[0], r[1] = y0 < r[1] ? y0 : r[1];
+            r[2] = x1 > r[2] ? x1 : r[2], r[3] = y1 > r[3] ? y1 : r[3];
+        }
+    }
+    for (int y = y0; y < y1; y++) {
+        const unsigned char* s =
+            g_ui.atlas + ((unsigned long)(sy + y - dy) * UI_ATLAS_W + sx + (x0 - dx)) * 4;
+        unsigned char* d = dst + ((unsigned long)y * UI_W + x0) * 4;
+        for (int x = x0; x < x1; x++, s += 4, d += 4) {
             int a = (s[3] * alpha256) >> 8;
-            if (a == 0 || x < 0 || x >= UI_W)
+            if (a == 0)
                 continue;
             const unsigned char* c = tint ? tint : s;
-            for (int k = 0; k < 3; k++)
-                d[k] = (unsigned char)((c[k] * a + d[k] * (255 - a) + 127) / 255);
-            d[3] = (unsigned char)(a + (d[3] * (255 - a) + 127) / 255);
+            /* (x + 127) / 255 without a division: t = x + 128, (t + (t >> 8)) >> 8 - equal for
+               every x in 0 .. 255 * 255 (checked exhaustively) */
+            for (int k = 0; k < 3; k++) {
+                int t = c[k] * a + d[k] * (255 - a) + 128;
+                d[k] = (unsigned char)((t + (t >> 8)) >> 8);
+            }
+            int t = d[3] * (255 - a) + 128;
+            d[3] = (unsigned char)(a + ((t + (t >> 8)) >> 8));
         }
+    }
+}
+
+/* Atlas rect (sx, sy, w, h) blended at (dx, dy), clipped to the buffer and, during a partial
+   redraw, to each clip rect (the clip rects never overlap). */
+static void ui_blit(unsigned char* dst, int sx, int sy, int w, int h, int dx, int dy,
+                    const unsigned char* tint, int alpha256) {
+    int x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
+    int x1 = dx + w > UI_W ? UI_W : dx + w, y1 = dy + h > UI_H ? UI_H : dy + h;
+    if (!g_ui.nclip) {
+        ui_blend(dst, sx, sy, dx, dy, x0, y0, x1, y1, tint, alpha256);
+        return;
+    }
+    for (int i = 0; i < g_ui.nclip; i++) {
+        const int* c = g_ui.clip[i];
+        ui_blend(dst, sx, sy, dx, dy, x0 > c[0] ? x0 : c[0], y0 > c[1] ? y0 : c[1],
+                 x1 < c[2] ? x1 : c[2], y1 < c[3] ? y1 : c[3], tint, alpha256);
     }
 }
 
@@ -169,8 +216,11 @@ static int ui_fmt_int(char* p, long v) {
 }
 
 static void ui_clear(unsigned char* b, int x0, int y0, int w, int h) {
-    for (int y = y0; y < y0 + h && y < UI_H; y++)
-        my_memset(b + ((unsigned long)y * UI_W + x0) * 4, 0, (unsigned long)w * 4);
+    for (int y = y0; y < y0 + h && y < UI_H; y++) {
+        uint32_t* p = (uint32_t*)(b + ((unsigned long)y * UI_W + x0) * 4); /* 4-byte aligned */
+        for (int x = 0; x < w; x++)
+            p[x] = 0;
+    }
 }
 
 /* Text or, when b is NULL, only its extent: returns the pen position after it. */
@@ -193,6 +243,7 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
     xr = cx > xr ? cx : xr;
     char v[32];
     y += UI_LH;
+    g_ui.ycam = y;
     ui_put(b, x, y, "Camera speed", white);
     ui_fmt_int(v, cam_pct);
     int n = 0;
@@ -203,6 +254,7 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
     cx = ui_put(b, x + value_dx, y, v, white);
     xr = cx > xr ? cx : xr;
     y += UI_LH;
+    g_ui.yday = y;
     ui_put(b, x, y, "Time of day speed", white);
     v[0] = (char)UI_CHAR_TIMES; /* day_mult in tenths: x0.1 .. x0.9, then whole multiples */
     {
@@ -279,14 +331,69 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
     for (int i = 0; i < (int)sizeof(key); i++)
         g_ui.key[i] = key[i];
 
-    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210};
     int nb = (g_ui.cur + 1) % UI_BUFS;
     unsigned char* b = g_ui.buf[nb];
-    ui_clear(b, 0, 0, UI_CLEAR_W, UI_CLEAR_H);
-    ui_clear(b, g_ui.lb[0], g_ui.lb[1], g_ui.lb[2] - g_ui.lb[0], g_ui.lb[3] - g_ui.lb[1]);
+    const int lbv = g_ui.leaderboard ? 1 : 0;
+    const unsigned long play = lbv ? play_s : 0;
+    int* dp = g_ui.dirty[nb][0];
+    int* dl = g_ui.dirty[nb][1];
 
+    /* Partial redraw when this buffer shows the same layout and only values differ: clear the
+       bands of the changed value lines and redraw everything clipped to them - identical to a
+       full redraw (same draw order inside the bands, nothing differs outside). */
+    int partial = g_ui.st[nb].valid && g_ui.st[nb].controls == g_ui.controls &&
+                  g_ui.st[nb].leaderboard == lbv && g_ui.st[nb].frozen == day_frozen;
+    g_ui.nclip = 0;
+    if (partial) {
+        int ys[3], m = 0;
+        if (g_ui.st[nb].cam != cam_pct)
+            ys[m++] = g_ui.ycam;
+        if (g_ui.st[nb].day != day_mult)
+            ys[m++] = g_ui.yday;
+        if (lbv && g_ui.st[nb].play != play)
+            ys[m++] = g_ui.ytime;
+        for (int i = 0; i < m; i++) { /* bands in y order (insertion sort), overlaps merged */
+            int y0 = ys[i] + g_ui.gtop, y1 = ys[i] + g_ui.gbot;
+            y0 = y0 < 0 ? 0 : y0;
+            y1 = y1 > UI_H ? UI_H : y1;
+            int j = g_ui.nclip;
+            while (j > 0 && g_ui.clip[j - 1][1] > y0) {
+                for (int k = 0; k < 4; k++)
+                    g_ui.clip[j][k] = g_ui.clip[j - 1][k];
+                j--;
+            }
+            g_ui.clip[j][0] = 0, g_ui.clip[j][1] = y0, g_ui.clip[j][2] = UI_W, g_ui.clip[j][3] = y1;
+            g_ui.nclip++;
+        }
+        int n = 0;
+        for (int i = 0; i < g_ui.nclip; i++) {
+            if (n > 0 && g_ui.clip[i][1] <= g_ui.clip[n - 1][3]) {
+                if (g_ui.clip[i][3] > g_ui.clip[n - 1][3])
+                    g_ui.clip[n - 1][3] = g_ui.clip[i][3];
+            } else {
+                for (int k = 0; k < 4; k++)
+                    g_ui.clip[n][k] = g_ui.clip[i][k];
+                n++;
+            }
+        }
+        g_ui.nclip = n;
+        for (int i = 0; i < n; i++)
+            ui_clear(b, 0, g_ui.clip[i][1], UI_W, g_ui.clip[i][3] - g_ui.clip[i][1]);
+    } else { /* full redraw: clear only what was drawn into this buffer last time */
+        for (int k = 0; k < 2; k++) {
+            int* dr = g_ui.dirty[nb][k];
+            if (dr[2] > dr[0])
+                ui_clear(b, dr[0], dr[1], dr[2] - dr[0], dr[3] - dr[1]);
+            dr[0] = dr[1] = dr[2] = dr[3] = 0;
+        }
+    }
+    unsigned char* db = (partial && g_ui.nclip == 0) ? 0 : b; /* 0: already current, measure */
+
+    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210};
     /* left panel: rect = the bounding box of what was laid out */
-    int bottom = 0, right = ui_left_panel(b, g_ui.controls, cam_pct, day_mult, day_frozen, &bottom);
+    g_ui.drawing = dp;
+    int bottom = 0,
+        right = ui_left_panel(db, g_ui.controls, cam_pct, day_mult, day_frozen, &bottom);
     float x0 = (float)UI_X0, y0 = (float)UI_Y0, x1 = (float)right, y1 = (float)bottom;
     g_ui.rect[0] = 0.5f * (x0 + x1);
     g_ui.rect[1] = 0.5f * (y0 + y1);
@@ -295,7 +402,7 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
 
     /* leaderboard (fixed rect, centred; set by ui_init): this session's play time until
        multiplayer scores exist */
-    if (g_ui.leaderboard) {
+    if (lbv) {
         char t[24], *q = t;
         q += ui_fmt_int(q, (long)(play_s / 3600));
         *q++ = ':';
@@ -306,12 +413,18 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         *q++ = (char)('0' + play_s % 10);
         *q = 0;
         int lx0 = g_ui.lb[0], lx1 = g_ui.lb[2], ly = g_ui.lb[1] + UI_PAD + UI_LINE_ABOVE;
-        ui_text(b, lx0 + UI_PAD, ly, "Leaderboard", white);
+        g_ui.drawing = dl;
+        if (db)
+            ui_text(db, lx0 + UI_PAD, ly, "Leaderboard", white);
         ly += UI_LH;
-        ui_text(b, lx0 + UI_PAD, ly, "You", white);
-        ui_text(b, lx1 - UI_PAD - ui_text_width(t), ly, t, white);
+        g_ui.ytime = ly;
+        if (db) {
+            ui_text(db, lx0 + UI_PAD, ly, "You", white);
+            ui_text(db, lx1 - UI_PAD - ui_text_width(t), ly, t, white);
+        }
         ly += UI_LH;
-        ui_text(b, lx0 + UI_PAD, ly, "Multiplayer scores soon", grey);
+        if (db)
+            ui_text(db, lx0 + UI_PAD, ly, "Multiplayer scores soon", grey);
         g_ui.rect[4] = 0.5f * (float)(g_ui.lb[0] + g_ui.lb[2]);
         g_ui.rect[5] = 0.5f * (float)(g_ui.lb[1] + g_ui.lb[3]);
         g_ui.rect[6] = 0.5f * (float)(g_ui.lb[2] - g_ui.lb[0]);
@@ -320,6 +433,15 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         for (int i = 4; i < 8; i++)
             g_ui.rect[i] = -1e6f;
     }
+    g_ui.drawing = 0;
+    g_ui.nclip = 0;
+    g_ui.st[nb].valid = 1;
+    g_ui.st[nb].controls = g_ui.controls;
+    g_ui.st[nb].leaderboard = lbv;
+    g_ui.st[nb].cam = cam_pct;
+    g_ui.st[nb].day = day_mult;
+    g_ui.st[nb].frozen = day_frozen;
+    g_ui.st[nb].play = play;
     g_ui.cur = nb;
 }
 

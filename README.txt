@@ -1,4 +1,36 @@
 ============================================================
+PARALLAX WINDOW 10-50 + UI REDRAW COST  (build=pom-window-ui)
+============================================================
+- Floor parallax (ps_floor CAFE0127): full up to POM_FADE_START 10, linear fade
+  to zero at POM_FADE_END 50 (desc[114] = 1/(END - START), desc[116] = END/(END -
+  START); fade = clamp(desc[116] - d * desc[114], 0, 1)). START 0 is
+  bit-identical to the previous shader.
+- FPS drop while changing the camera speed: D-pad up / down changes the value
+  every frame, and each change recomposed the whole UI texture on the CPU (5.5 MB
+  byte-wise clears + every glyph blended with divisions, main.o is -O0) right
+  before the submit. ui.h now clears only what was drawn into each buffer (panel
+  and leaderboard boxes), redraws only the bands of changed value lines (clipped,
+  same draw order), and blends without a division ((t + (t >> 8)) >> 8, t = x +
+  128: equal to (x + 127) / 255 for every x in 0..65025). Output byte-identical to
+  the old code over 3600 checked updates (1411 distinct buffers); a held-D-pad
+  update: 0.54 .. 1.21 ms -> 0.08 .. 0.09 ms (host, -O0).
+
+============================================================
+BLOOM 4 LEVELS + FLOOR PARALLAX RANGE  (build=bloom4-pom50)
+============================================================
+- Bloom: BLOOM_LEVELS 6 -> 4 (480x270 .. 60x34; the 30x17 and 15x9 levels
+  spread the glow 150-300 px out), BLOOM_INTENSITY 0.1. The sun's glow added on
+  a 0.5 sky at 60 / 100 / 150 / 200 px: 0.165 / 0.026 / 0.003 / 0 (6 levels at
+  0.1: 0.196 / 0.051 / 0.020 / 0.010). Several levels exist because a real glow
+  has a bright narrow core and a dim wide tail: each level blurs at half the
+  previous resolution, so the tail costs the same 9 taps as the core; fewer
+  levels = shorter tail.
+- Floor parallax: POM_DEPTH 0.05 -> 0.025 (half the relief depth), POM_FADE
+  90 -> 50 (linear fade to zero at 50 units), and the mip-level fade removed from
+  ps_floor (CAFE0126) - it ended the parallax 2-3 units in front of the camera.
+  The cube (ps_model) keeps its mip-level fade.
+
+============================================================
 BLOOM 0.1 + DAY SPEED IN TENTHS  (build=bloom-0.1)
 ============================================================
 - BLOOM_INTENSITY 0.25 -> 0.1: the chain (6 levels 480x270 .. 15x9, summed
