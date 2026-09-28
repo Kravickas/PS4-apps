@@ -50,6 +50,9 @@ CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
 # The renderer (main.o) keeps its hardware-verified default codegen.
 # -fno-builtin: no implicit memset/memcpy calls from loop idioms (no libc dependency).
 $(INTDIR)/loaders.o: CFLAGS += -O2 -fno-strict-aliasing -fno-builtin
+# The atmosphere model (src/atmosphere.c): table lookups at run time; -fno-math-errno lets
+# __builtin_sqrt become sqrtsd (it must not call libm - the object has no undefined symbols).
+$(INTDIR)/atmosphere.o: CFLAGS += -O2 -fno-builtin -fno-math-errno
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
                $(TOOLCHAIN)/lib/crt1.o

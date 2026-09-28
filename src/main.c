@@ -114,6 +114,7 @@
 
 #define SET_AFFINITY 1
 
+#include "atmosphere.h"
 #include "bgm.h"
 #include "dds_loader.h"
 #include "loaders.h"
@@ -130,12 +131,24 @@
 /* Sun and moon disc edge radii in pixels (1080p). The sun is half the moon's size
    (was 93.5, the same as the moon): with SUN_HDR and bloom it reads much larger. */
 #define SUN_DISC_RADIUS_PX 46.75f
-#define MOON_DISC_RADIUS_PX 93.5f
+#define MOON_DISC_RADIUS_PX 46.75f /* the sun's size: both span ~0.5 degrees (was 93.5) */
 
 /* Linear HDR pipeline: the scene renders to RGBA16F, bloom runs at quarter
    resolution, the composite writes the sRGB display buffer (videoout format
    A8R8G8B8Srgb). Values are linear light; 1.0 = display white. */
-#define SUN_HDR 4.0f         /* sun disc colour x this (desc[84]) */
+/* Sun disc colour (through the atmosphere) x this (desc[84]). 2.19 (was 4.0): the limb-darkened
+   disc (Hestroffer & Magnan power law) puts exactly the previous soft disc's light
+   (4.0 x (1 - rho^2)^2) into the bloom bright pass at a 60 degree sun. */
+#define SUN_HDR 2.19f
+/* Physically based sky (atmosphere.c, assets/sky/atmosphere.bin, ps_dark): sky radiance x
+   SKY_SUN_SCALE = pi (a white surface facing the sun shows radiance 1 = the light colour,
+   physically E / pi, so the sky keeps its physical ratio to sunlit surfaces). Night: the
+   moon's sky light x MOON_SKY_SCALE, which gives a moon 45 degrees up exactly the previous night
+   zenith (sRGB 0.01 0.02 0.06). Moon disc: NASA LROC albedo x Lommel-Seeliger x MOON_SCALE, which
+   gives the full moon the previous flat disc's mean luminance (0.722). */
+#define SKY_SUN_SCALE 3.14159265f
+#define MOON_SKY_SCALE 0.1481f
+#define MOON_SCALE 3.6375f
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
@@ -180,10 +193,10 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_GLOW 1.4f       /* glow around the sun: FLARE_GLOW / (1 + (rho / 0.08)^2) */
 #define FLARE_VEIL 0.22f      /* wide warm haze: FLARE_VEIL / (1 + (rho / 0.40)^2) */
 #define GLARE_STORE_MAX 4.0f  /* glare.dds stores value / this (STORE_MAX in make_glare.py) */
-#define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
+#define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "predraw"
+#define BUILD_TAG "physical-sky"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1006,7 +1019,7 @@ static int flare_ray_blocked(const float* o, const float* d) {
 
 /* Visible fraction of the sun disc: 29 rays from the camera through a 7 x 7 grid
    inside the disc (SUN_DISC_RADIUS_PX around NDC (nx, ny)), weighted by ps_dark's
-   disc profile (1 - d^2 / r^2)^2. Rays from build_mvp's basis: d = f + r nx aspect /
+   limb-darkened disc profile mu^alpha. Rays from build_mvp's basis: d = f + r nx aspect /
    fov + u ny / fov. */
 static float flare_visibility(float yaw, float pitch, const float* cam, float nx, float ny) {
     float sy = my_sin(yaw), cy = my_cos(yaw), sp = my_sin(pitch), cp = my_cos(pitch);
@@ -1021,8 +1034,10 @@ static float flare_visibility(float yaw, float pitch, const float* cam, float nx
             int q = i * i + j * j;
             if (q >= 9)
                 continue;
-            float w = 1.0f - (float)q / 9.0f;
-            w *= w;
+            /* ps_dark's disc profile mu^alpha (green, ATMO_LIMB_G), mu^2 = 1 - q / 9 */
+            static const float kw[9] = {1.0000000f, 0.9705313f, 0.9381715f, 0.0f,      0.8613353f,
+                                        0.8138821f, 0.0f,       0.0f,       0.5723548f};
+            float w = kw[q];
             float px = nx + (float)i / 3.0f * rn / aspect, py = ny + (float)j / 3.0f * rn;
             float d[3];
             for (int k = 0; k < 3; k++)
@@ -1032,6 +1047,51 @@ static float flare_visibility(float yaw, float pitch, const float* cam, float nx
                 vis += w;
         }
     return vis / wsum;
+}
+
+/* Lens flare table (ps_post_final dwords 28..39) from the sun disc desc[16..19], its colour x
+   SUN_HDR desc[84..86] and its visible fraction. The glow, veil and rays are the lens's response
+   to the sun wherever it is in front of the camera, on or off screen (their profiles fall off on
+   their own and glare.dds has a zero border): strength = visible fraction. Only the ghosts
+   (reflections along the lens axis) fade out over FLARE_EDGE at the screen edges (0 off screen).
+   The tint follows the sun colour at the daytime sun's luminance (Rec. 709 weights of the linear
+   sRGB primaries), so the glow turns amber at sunset instead of losing half its brightness. */
+static float srgb_to_linear(float c); /* defined with the texture loaders */
+static void flare_consts(float* ft, const float* sd, const float* scl, float vis) {
+    float nx = sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), ny = sd[1];
+    float fu = 0.5f + 0.5f * nx, fv = 0.5f - 0.5f * ny;
+    float e = fu < 1.0f - fu ? fu : 1.0f - fu; /* distance to the nearest edge, < 0 off screen */
+    if (fv < e)
+        e = fv;
+    if (1.0f - fv < e)
+        e = 1.0f - fv;
+    float ghost = 0.0f;
+    if (e > 0.0f) {
+        float t = e / FLARE_EDGE;
+        if (t > 1.0f)
+            t = 1.0f;
+        ghost = t * t * (3.0f - 2.0f * t);
+    }
+    float k = 0.0f;
+    if (sd[0] < 90.0f) { /* 99: behind the camera */
+        float ld = 0.2126f * srgb_to_linear(SUN_DAY_R) + 0.7152f * srgb_to_linear(SUN_DAY_G) +
+                   0.0722f * srgb_to_linear(SUN_DAY_B);
+        float ls = (0.2126f * scl[0] + 0.7152f * scl[1] + 0.0722f * scl[2]) / SUN_HDR;
+        if (ls > 0.0f)
+            k = FLARE_STRENGTH * vis * ld / (ls * SUN_HDR);
+    }
+    ft[0] = fu;
+    ft[1] = fv;
+    ft[2] = k * scl[0];
+    ft[3] = k * scl[1];
+    ft[4] = k * scl[2];
+    ft[5] = FLARE_GHOSTS * ghost; /* dwords 33..36: gains; 37..39 spare; 40..51 glare T# / S# */
+    ft[6] = FLARE_RAYS * GLARE_STORE_MAX;
+    ft[7] = FLARE_GLOW;
+    ft[8] = FLARE_VEIL;
+    ft[9] = 0.0f;
+    ft[10] = 0.0f;
+    ft[11] = 0.0f;
 }
 
 /* FPS free-fly camera: position + yaw/pitch → view-projection matrix */
@@ -1391,6 +1451,67 @@ static Tex load_tex(const char* path, const unsigned char fallback[4], uint32_t 
     printf("texture %s: %d (%dx%d, %d levels, format 0x%x/%u)\n", path, t.err, t.w, t.h, t.levels,
            t.dfmt, t.nfmt);
     return t;
+}
+
+/* Sky tables (assets/sky/atmosphere.bin, tools/make_atmosphere.c): the 32-byte header and the
+   transmittance stay in CPU memory (colours through the air), the three RGBA16F images go to GPU
+   memory for ps_dark. Missing file: three zeroed 64 x 64 images - a black sky, never an invalid
+   T#. */
+static AtmoAsset g_atmo;
+static int g_atmo_ok = 0;
+static void* g_atmo_atlas = 0;
+static int g_atmo_atlas_h = 0; /* texel rows of each image */
+static int read_all(int fd, void* dst, unsigned long n) {
+    unsigned long got = 0;
+    while (got < n) {
+        long r = sceKernelRead(fd, (char*)dst + got, n - got);
+        if (r <= 0)
+            return -1;
+        got += (unsigned long)r;
+    }
+    return 0;
+}
+static int load_atmosphere(void) {
+    const unsigned long head_n = 32ul + (unsigned long)ATMO_T_W * ATMO_T_H * 12;
+    const unsigned long img_n = 3ul * ATMO_SKY_W * ATMO_SLICES * ATMO_SKY_H * 8;
+    int fd = sceKernelOpen(ASSET_DIR "sky/atmosphere.bin", 0, 0);
+    if (fd >= 0) {
+        void* head = cpu_alloc(head_n, 0x1000);
+        void* atlas = gpu_alloc(img_n, 0x10000);
+        int ok = head && atlas && read_all(fd, head, head_n) == 0 &&
+                 read_all(fd, atlas, img_n) == 0 && atmo_asset_bind(&g_atmo, head, atlas) == 0;
+        sceKernelClose(fd);
+        if (ok) {
+            g_atmo_atlas = atlas;
+            g_atmo_atlas_h = ATMO_SLICES * ATMO_SKY_H;
+            return 1;
+        }
+    }
+    g_atmo_atlas = gpu_alloc(3ul * 64 * 64 * 8, 0x10000);
+    if (g_atmo_atlas)
+        my_memset(g_atmo_atlas, 0, 3ul * 64 * 64 * 8);
+    g_atmo_atlas_h = 64;
+    return 0;
+}
+/* Camera basis (build_mvp's): forward, right, up. */
+static void cam_basis(float yaw, float pitch, float* F, float* R, float* U) {
+    float sy = my_sin(yaw), cy = my_cos(yaw), sp = my_sin(pitch), cp = my_cos(pitch);
+    F[0] = sy * cp, F[1] = -sp, F[2] = -cy * cp;
+    R[0] = cy, R[1] = 0.0f, R[2] = sy;
+    U[0] = sy * sp, U[1] = cp, U[2] = -cy * sp;
+}
+/* The sun direction in the moon's own frame (x right, y up, z toward the viewer = -moon), for
+   ps_dark's Lommel-Seeliger lighting of the moon disc. */
+static void moon_frame_sun(const float* moon, const float* sun, const float* R, float* out) {
+    float z[3] = {-moon[0], -moon[1], -moon[2]}, rz = R[0] * z[0] + R[1] * z[1] + R[2] * z[2];
+    float x[3] = {R[0] - rz * z[0], R[1] - rz * z[1], R[2] - rz * z[2]};
+    float xl = my_sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    for (int c = 0; c < 3; c++)
+        x[c] = xl > 1e-6f ? x[c] / xl : (c == 0 ? 1.0f : 0.0f);
+    float y[3] = {z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]};
+    out[0] = sun[0] * x[0] + sun[1] * x[1] + sun[2] * x[2];
+    out[1] = sun[0] * y[0] + sun[1] * y[1] + sun[2] * y[2];
+    out[2] = sun[0] * z[0] + sun[1] * z[1] + sun[2] * z[2];
 }
 
 /* Linear average of the floor albedo (set at load): the floor colour in ps_model's ground
@@ -1941,8 +2062,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Draw 1: BG quad with sky PS (sun disc)
     {
         uint64_t a = (uint64_t)(uintptr_t)ps_bg;
-        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (3u << 6) | 2u, (2u << 1)};
-        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4); /* ps_dark: v0-v11, s0-s27 + VCC -> 12 / 32 */
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (12u << 6) | 11u, (2u << 1)};
+        pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4); /* ps_dark: v0-v44, s0-s101 + VCC -> 48 / 104 */
         /* Sky PS needs desc ptr for sun position */
         uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
                           (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
@@ -1968,7 +2089,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
     if (g_stars_n > 0 && g_stars_draw && g_ps_stars_gpu) {
         {
             uint64_t a = (uint64_t)(uintptr_t)g_ps_stars_gpu;
-            uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (1u << 6) | 2u, (2u << 1)};
+            /* ps_stars: v0-v13, s0-s11 + VCC -> 16 VGPRs, 16 SGPRs */
+            uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (1u << 6) | 3u, (2u << 1)};
             pm4_set_sh_regs(b, SH_PS_PGM_LO, r, 4);
             uint32_t ud[2] = {(uint32_t)((uint64_t)(uintptr_t)desc),
                               (uint32_t)((uint64_t)(uintptr_t)desc >> 32)};
@@ -1979,9 +2101,14 @@ static uint32_t build_dcb(struct PM4Builder *b,
         pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0); /* no culling */
         pm4_set_context_reg(b, CTX_BLEND_CONTROL0, (1u << 0) | (1u << 8) | (1u << 30));
         pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 4); /* SPI_SHADER_FP16_ABGR */
+        /* PERSP_CENTER | POS_X_FLOAT | POS_Y_FLOAT: v2, v3 = pixel centre (the moon hides stars) */
+        pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x302);
+        pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x302);
         pm4_set_sh_regs(b, SH_VS_USER_DATA_0, g_stars_v, 4);
         pm4_draw_index_auto(b, (uint32_t)g_stars_n * 6u);
         CPMARK(b, 0x14); /* stars drawn */
+        pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);
+        pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
         pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
         pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 9); /* SPI_SHADER_32_ABGR */
     }
@@ -2999,6 +3126,13 @@ int main(void) {
     }
     Tex floor_nrm = load_tex(ASSET_DIR "images/floor/normal.dds", k_flat, 0);
     Tex floor_hgt = load_tex(ASSET_DIR "images/floor/height.dds", k_white, 0);
+    Tex moon_alb =
+        load_tex(ASSET_DIR "images/moon/albedo.dds", k_grey, 9); /* NASA LROC, near side */
+    g_atmo_ok = load_atmosphere();
+    trace_msg(g_atmo_ok ? "sky: atmosphere.bin loaded\n"
+                        : "sky: atmosphere.bin MISSING - black sky\n");
+    if (!g_atmo_atlas)
+        FATAL_EXIT("sky atlas alloc failed");
 
     /* desc buffer layout:
          desc[0..7]    texture T#              (byte 0..31)
@@ -3072,6 +3206,25 @@ int main(void) {
 
     /* Floor T#s: albedo desc[64], normal desc[72], height desc[92] (sampler desc[100]). */
     build_tsharp_tex(desc + 64, &floor_alb);
+    /* ps_dark: the sky atlases desc[204..227] + their bilinear clamp S# [228], the moon albedo
+       [232] + a trilinear S# [240]; sky constants [164..203] for a default camera until the frame
+       loop sets them (the loading frames draw the sky too). */
+    for (int t = 0; t < 3; t++)
+        build_tsharp_f16(desc + 204 + 8 * t,
+                         (char*)g_atmo_atlas + (unsigned long)t * ATMO_SKY_W * g_atmo_atlas_h * 8,
+                         ATMO_SKY_W, g_atmo_atlas_h, ATMO_SKY_W);
+    build_ssharp_clamp(desc + 228, 1);
+    build_tsharp_tex(desc + 232, &moon_alb);
+    build_ssharp_height(desc + 240);
+    {
+        const float F[3] = {0.0f, 0.0f, -1.0f}, R[3] = {1.0f, 0.0f, 0.0f},
+                    U[3] = {0.0f, 1.0f, 0.0f};
+        const float sun[3] = {0.0f, 0.70710678f, -0.70710678f},
+                    moon[3] = {0.0f, -0.70710678f, 0.70710678f};
+        const float mv[3] = {0.0f, 0.0f, 1.0f};
+        atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_cos(0.3054f) / my_sin(0.3054f),
+                        sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
+    }
     build_tsharp_tex(desc + 72, &floor_nrm);
     /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
        then (pom_scale, fog rate, h_scale, h_bias) desc[108] and (normal sign x,
@@ -4233,9 +4386,20 @@ int main(void) {
            SUNSET/SUNRISE ramp:        white → warm amber (1.00, 0.64, 0.44)
            NIGHT:                      desaturated cool blue (0.52, 0.64, 0.84) */
         float light_r, light_g, light_b;
+        int light_linear = 0; /* 1: light_* are already linear (the physical day colour) */
         if (is_night) {
             /* Moon: desaturated cool blue */
             light_r = 0.52f; light_g = 0.64f; light_b = 0.84f;
+        } else if (g_atmo_ok) {
+            /* Sunlight through the atmosphere (atmosphere.c), white-balanced to the sun at the
+               zenith: white by day, amber-red at the horizon - the same air as the sky. */
+            float t[3], t1[3];
+            atmo_light_ground(&g_atmo, orig_sun_y, t);
+            atmo_light_ground(&g_atmo, 1.0f, t1);
+            light_r = t[0] / t1[0];
+            light_g = t[1] / t1[1];
+            light_b = t[2] / t1[2];
+            light_linear = 1;
         } else if (orig_sun_y > 0.15f) {
             /* Full daylight: neutral white */
             light_r = 1.00f; light_g = 1.00f; light_b = 1.00f;
@@ -4251,9 +4415,9 @@ int main(void) {
         }
         {
             float *lc = (float*)(desc + 32);
-            lc[0] = srgb_to_linear(light_r);
-            lc[1] = srgb_to_linear(light_g);
-            lc[2] = srgb_to_linear(light_b);
+            lc[0] = light_linear ? light_r : srgb_to_linear(light_r);
+            lc[1] = light_linear ? light_g : srgb_to_linear(light_g);
+            lc[2] = light_linear ? light_b : srgb_to_linear(light_b);
             lc[3] = 1.0f;
             /* desc[160..162]: the floor as ps_model's downward reflections see it - ps_floor's
                lighting for an unshadowed flat floor, (0.070740275 + 0.929259717 max(0, L.y)) x
@@ -4284,6 +4448,27 @@ int main(void) {
             sh[1] = srgb_to_linear(hg);
             sh[2] = srgb_to_linear(hb);
             sh[3] = 0;
+            if (g_atmo_ok) {
+                /* The fog (ps_floor / ps_model) blends toward these: the physical sky at the zenith
+                   and at the horizon in the camera's direction (sun + moon light, ps_dark's
+                   scales). */
+                float F[3], R[3], U[3], hz[3], a[3], m[3];
+                cam_basis(cam_yaw, cam_pitch, F, R, U);
+                const float sun[3] = {sun_dx, sun_dy, sun_dz},
+                            moon[3] = {-sun_dx, -sun_dy, -sun_dz};
+                const float up[3] = {0.0f, 1.0f, 0.0f};
+                float hl = my_sqrt(F[0] * F[0] + F[2] * F[2]);
+                hz[0] = hl > 1e-6f ? F[0] / hl : 1.0f, hz[1] = 0.0f,
+                hz[2] = hl > 1e-6f ? F[2] / hl : 0.0f;
+                const float* vv[2] = {up, hz};
+                float* dst[2] = {sz, sh};
+                for (int k = 0; k < 2; k++) {
+                    atmo_sky_radiance(&g_atmo, sun, vv[k], a);
+                    atmo_sky_radiance(&g_atmo, moon, vv[k], m);
+                    for (int c = 0; c < 3; c++)
+                        dst[k][c] = SKY_SUN_SCALE * a[c] + MOON_SKY_SCALE * m[c];
+                }
+            }
         }
         { /* Star fade (smoothstep over the STARS_FADE band) -> desc[36..39].
              Alpha 0: additive blend leaves the destination alpha alone. */
@@ -4342,21 +4527,32 @@ int main(void) {
             /* Sun disc: amber at the horizon -> SUN_DAY_* (pale warm) at orig_sun_y
                0.15, held amber while it sets. Moon: cool blue. At SUN_HDR the core
                still clips to white; the tint shows on the rim and in the bloom. */
-            float kc = orig_sun_y / 0.15f;
-            if (kc < 0.0f)
-                kc = 0.0f;
-            if (kc > 1.0f)
-                kc = 1.0f;
+            /* Sun and moon as seen through the atmosphere (atmosphere.c transmittance, terminator
+               included): white at noon, amber-red at the horizon. The moon's colour comes from its
+               NASA albedo map in ps_dark; MOON_SCALE sets its brightness. */
+            float ts[3] = {1.0f, 1.0f, 1.0f}, tm[3] = {1.0f, 1.0f, 1.0f};
+            if (g_atmo_ok) {
+                atmo_light_ground(&g_atmo, sun_dy, ts);
+                atmo_light_ground(&g_atmo, -sun_dy, tm);
+            }
             float* sc = (float*)(desc + 84);
-            sc[0] = srgb_to_linear(1.00f + (SUN_DAY_R - 1.00f) * kc) * SUN_HDR;
-            sc[1] = srgb_to_linear(0.64f + (SUN_DAY_G - 0.64f) * kc) * SUN_HDR;
-            sc[2] = srgb_to_linear(0.44f + (SUN_DAY_B - 0.44f) * kc) * SUN_HDR;
-            sc[3] = 0.0f;
             float* mc = (float*)(desc + 88);
-            mc[0] = srgb_to_linear(0.52f) * MOON_HDR;
-            mc[1] = srgb_to_linear(0.64f) * MOON_HDR;
-            mc[2] = srgb_to_linear(0.84f) * MOON_HDR;
+            for (int c = 0; c < 3; c++) {
+                sc[c] = ts[c] * SUN_HDR;
+                mc[c] = tm[c] * MOON_SCALE;
+            }
+            sc[3] = 0.0f;
             mc[3] = 0.0f;
+            {
+                float F[3], R[3], U[3], mv[3];
+                cam_basis(cam_yaw, cam_pitch, F, R, U);
+                const float sun[3] = {sun_dx, sun_dy, sun_dz},
+                            moon[3] = {-sun_dx, -sun_dy, -sun_dz};
+                moon_frame_sun(moon, sun, R, mv);
+                atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U,
+                                my_cos(0.3054f) / my_sin(0.3054f), sun, SKY_SUN_SCALE, moon,
+                                MOON_SKY_SCALE, mv);
+            }
         }
         /* Lens flare (ps_post_final, final pass table dwords 28..39): sun position
            (u, v: pixel / size, v down), strength = sun colour x FLARE_STRENGTH x visible
@@ -4367,33 +4563,13 @@ int main(void) {
             float* ft = (float*)(g_post_tab + (POST_PASSES - 1) * 32 + 28);
             const float* sd = (const float*)(desc + 16);
             const float* scl = (const float*)(desc + 84);
-            float nx = sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), ny = sd[1];
-            float fu = 0.5f + 0.5f * nx, fv = 0.5f - 0.5f * ny, k = 0.0f;
-            float e = fu < 1.0f - fu ? fu : 1.0f - fu;
-            if (fv < e)
-                e = fv;
-            if (1.0f - fv < e)
-                e = 1.0f - fv;
-            if (sd[0] < 90.0f && e > 0.0f) {
-                float fade = e / FLARE_EDGE;
-                if (fade > 1.0f)
-                    fade = 1.0f;
+            float vis = 0.0f;
+            if (sd[0] < 90.0f) { /* in front of the camera, on or off screen */
                 const float cam[3] = {cam_x, cam_y, cam_z};
-                k = FLARE_STRENGTH * fade * fade * (3.0f - 2.0f * fade) *
-                    flare_visibility(cam_yaw, cam_pitch, cam, nx, ny) / SUN_HDR;
+                vis = flare_visibility(cam_yaw, cam_pitch, cam,
+                                       sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), sd[1]);
             }
-            ft[0] = fu;
-            ft[1] = fv;
-            ft[2] = k * scl[0];
-            ft[3] = k * scl[1];
-            ft[4] = k * scl[2];
-            ft[5] = FLARE_GHOSTS; /* dwords 33..36: gains; 37..39 spare; 40..51 glare T# / S# */
-            ft[6] = FLARE_RAYS * GLARE_STORE_MAX;
-            ft[7] = FLARE_GLOW;
-            ft[8] = FLARE_VEIL;
-            ft[9] = 0.0f;
-            ft[10] = 0.0f;
-            ft[11] = 0.0f;
+            flare_consts(ft, sd, scl, vis);
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
                       day_frozen, (unsigned long)play_time_s);
             ui_write_table(g_post_tab + UI_BLOCK * 32);

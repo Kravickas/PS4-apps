@@ -1,4 +1,48 @@
 ============================================================
+PHYSICALLY BASED SKY, SUN AND MOON  (build=physical-sky)
+============================================================
+Sky: Eric Bruneton's Precomputed Atmospheric Scattering (2017 reference, BSD)
+for transmittance and single scattering, Sebastien Hillaire's 2020 multiple
+scattering; Earth parameters of Bruneton's demo (Rayleigh, Mie g 0.8, ozone
+300 DU) at 680 / 550 / 440 nm (src/atmosphere.c). Checked against Bruneton's
+own C++ reference built here: transmittance table 6e-8, single scattering 8e-8
+over 20,000 random cases. The tables are precomputed at build time
+(tools/make_atmosphere.c -> assets/sky/atmosphere.bin, 5.7 MB: ~10 s on the PS4
+otherwise): 56 light-elevation slices of 64 x 64 Rayleigh / Mie / multiple
+integrals without the phase; ps_dark (CAFE00E6) blends two slices per light and
+applies the Rayleigh and Cornette-Shanks phases per pixel (sharp aureole). The
+sun, moon and stars are added to the scattered light (they are beyond the air).
+Verified: ps_dark vs a float64 reference 7.6e-5 over 7,700 pixels.
+Scales (derived, main.c): SKY_SUN_SCALE pi (physical sky / sunlit surface
+ratio), MOON_SKY_SCALE 0.1481 (night zenith = the previous one with the moon 45
+degrees up), SUN_HDR 2.19 (same bloom energy as before at a 60 degree sun),
+MOON_SCALE 3.6375 (full moon = the previous disc's mean luminance).
+Sun: limb darkening I = mu^alpha, Hestroffer & Magnan 1998 eq. 5 at 680 / 550 /
+440 nm (0.406 / 0.508 / 0.641); colour and daylight colour from the transmittance
+(white at noon, amber-red at the horizon).
+Moon: NASA CGI Moon Kit LROC colour map (NASA's Scientific Visualization Studio,
+https://svs.gsfc.nasa.gov/4720) warped to the near side (tools/make_moon.py ->
+assets/images/moon/albedo.dds), Lommel-Seeliger lighting from the sun (phases
+follow the geometry; the moon is still the anti-sun, so full - its own orbit
+comes with the fog / ambient build). Fog colours come from the model at the
+zenith and horizon.
+
+============================================================
+MOON SIZE + STARS BEHIND IT + FLARE AT EDGES / SUNSET  (build=moon-flare2)
+============================================================
+- Moon radius 93.5 -> 46.75 px, the sun's size (both span ~0.5 degrees).
+- Stars no longer show through the moon: ps_stars (CAFE0202) multiplies each
+  star by (1 - the moon disc's own coverage) from the pixel centre (PS inputs
+  0x302 for the star draw only). Away from the moon bit-identical to before.
+- Lens flare (flare_consts): only the ghosts fade at the screen edges
+  (FLARE_EDGE); the glow, veil and rays follow the sun's visibility on or off
+  screen, and their tint keeps the daytime sun's luminance (Rec. 709), so at
+  sunset the glow turns amber instead of dropping to half (0.49 -> 0.93).
+- Trace of the predraw build: 13,440 flips for 13,440 vblanks over 225 s - a
+  new image on every refresh; frames end with their own flip pending in both the
+  old and the predraw build (the old event wait was already one frame ahead).
+
+============================================================
 PRE-DRAW + COMPLETE FRAME STATISTICS  (build=predraw)
 ============================================================
 - PREDRAW 1: after queuing frame N's flip the loop waits only until at most ONE
