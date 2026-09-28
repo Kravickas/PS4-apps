@@ -171,11 +171,16 @@
    second held, capped at the previous fixed rate 0.2592 (14.85 deg/s, reached after 3.9 s). */
 #define DAY_SCRUB_START 0.017453293f
 #define SUN_GLIDE_S 2.0f /* R3 / L3: the sun glides to the clock's position over this */
-#define DAY_SCRUB_DOUBLE 1.0f
-#define DAY_SCRUB_MAX 0.2592f
+#define DAY_SCRUB_FAST_AFTER 2.0f /* s held: taps and shorter holds stay at DAY_SCRUB_START */
+#define DAY_SCRUB_FAST 5.0f       /* then this many times faster */
 /* Moonlight colour (sRGB, desaturated cool blue) x its transmittance: the night light of the cube
    (desc[32]) and of every floor point (ps_floor, desc[117..119] linear) */
 static const float k_moon_light_srgb[3] = {0.52f, 0.64f, 0.84f};
+/* The same colour for the moonlit sky: linear moonlight / its luminance (Rec. 709), times
+   MOON_SKY_SCALE per channel (ps_dark d[30..32], ps_resolve [72..74]) - the night sky keeps its
+   brightness and takes the night light's colour (the moon's own sky light, like the sun's, is
+   neutral: its horizon read orange-brown next to the blue-lit floor) */
+static float g_moon_tint[3] = {1.0f, 1.0f, 1.0f};
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
 /* Was 0.25: same glow shape at 0.4x the strength (sun: +0.20 at 60 px, +0.05 at 100 px). */
 #define BLOOM_INTENSITY 0.1f
@@ -221,7 +226,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "loadscreen-iptz"
+#define BUILD_TAG "night-tint-dot"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1990,9 +1995,9 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
-#define PS_RESOLVE_RSRC1 ((9u << 6) | 23u)   /* v0-v95, s0-s75 + VCC */
+#define PS_RESOLVE_RSRC1 ((10u << 6) | 23u)  /* v0-v95, s0-s79 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
-#define PS_CLOCK_RSRC1 ((8u << 6) | 17u)     /* v71, s68 incl. VCC */
+#define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
@@ -3345,6 +3350,9 @@ int main(void) {
         for (int c = 0; c < 3; c++)
             ml[c] = srgb_to_linear(k_moon_light_srgb[c]);
         ml[3] = MOON_LIGHT;
+        float y = 0.2126f * ml[0] + 0.7152f * ml[1] + 0.0722f * ml[2];
+        for (int c = 0; c < 3; c++)
+            g_moon_tint[c] = ml[c] / y;
         ((float*)desc)[252] = 1.0f / FLOOR_R;
     }
     {
@@ -3356,6 +3364,8 @@ int main(void) {
         const float tilt[3] = {0.0f, 0.0f, 0.0f}, ground[4] = {0.0f, 0.0f, 0.0f, 1.0f / FLOOR_R};
         atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_sin(0.3054f) / my_cos(0.3054f),
                         tilt, ground, sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
+        for (int c = 0; c < 3; c++)
+            ((float*)(desc + 164))[30 + c] = MOON_SKY_SCALE * g_moon_tint[c];
     }
     build_tsharp_tex(desc + 72, &floor_nrm);
     /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
@@ -4213,14 +4223,12 @@ int main(void) {
             move_speed = 0.5f;
 
         /* Day and night: D-pad left / right held moves the sun; otherwise it runs at the
-           chosen multiple unless frozen. The rate starts at DAY_SCRUB_START and doubles every
-           DAY_SCRUB_DOUBLE seconds held, up to DAY_SCRUB_MAX (a tap moves a fraction of a degree,
-           holding still sweeps the day); it restarts when both are released. */
+           chosen multiple unless frozen. Taps and holds up to DAY_SCRUB_FAST_AFTER seconds move
+           it at DAY_SCRUB_START, longer holds DAY_SCRUB_FAST times faster; the count restarts
+           when both are released. */
         if (pad.buttons & (PAD_LEFT | PAD_RIGHT)) {
-            float rate =
-                DAY_SCRUB_START * atmo_expf(0.69314718f * day_scrub_held / DAY_SCRUB_DOUBLE);
-            if (rate > DAY_SCRUB_MAX)
-                rate = DAY_SCRUB_MAX;
+            float rate = day_scrub_held < DAY_SCRUB_FAST_AFTER ? DAY_SCRUB_START
+                                                               : DAY_SCRUB_START * DAY_SCRUB_FAST;
             if (pad.buttons & PAD_LEFT)
                 sun_angle -= rate * dt_sec;
             if (pad.buttons & PAD_RIGHT)
@@ -4700,7 +4708,7 @@ int main(void) {
                     atmo_sky_radiance(&g_atmo, sun, vv[k], a);
                     atmo_sky_radiance(&g_atmo, moon, vv[k], m);
                     for (int c = 0; c < 3; c++)
-                        dst[k][c] = SKY_SUN_SCALE * a[c] + MOON_SKY_SCALE * m[c];
+                        dst[k][c] = SKY_SUN_SCALE * a[c] + MOON_SKY_SCALE * g_moon_tint[c] * m[c];
                 }
             }
         }
@@ -4785,6 +4793,8 @@ int main(void) {
                 atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U,
                                 my_sin(0.3054f) / my_cos(0.3054f), tilt, ground, sun, SKY_SUN_SCALE,
                                 moon, MOON_SKY_SCALE, mv);
+                for (int c = 0; c < 3; c++)
+                    ((float*)(desc + 164))[30 + c] = MOON_SKY_SCALE * g_moon_tint[c];
             }
         }
         /* Lens flare (ps_post_final, final pass table dwords 28..39): sun position
@@ -4847,21 +4857,25 @@ int main(void) {
                 rt[63] = sk[27];
                 rt[67] = 1.0f / FLOOR_R;
                 rt[71] = sk[18]; /* sqrt(2 / (R hc)): the dip rule below the camera, as ps_dark */
+                rt[72] = sk[30]; /* the moon's sky scale per channel (g_moon_tint) */
+                rt[73] = sk[31];
+                rt[74] = sk[32];
+                rt[75] = 0.0f;
             }
             char tod_txt[16];
             ts_format(tod_txt, frame_tod);
+            int ts_dot = g_ts.source == TS_INGAME    ? 1
+                         : g_ts.source == TS_CONSOLE ? 2
+                         : ts_net_valid()            ? 3
+                                                     : 2;
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
-                      day_frozen, tod_txt,
-                      g_ts.source == TS_INGAME    ? 1
-                      : g_ts.source == TS_CONSOLE ? 2
-                      : ts_net_valid()            ? 3
-                                                  : 2);
+                      day_frozen, tod_txt, ts_dot);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
             if (g_clock_mode) {
                 const float lsun[3] = {sun_dx, sun_dy, sun_dz},
                             lmoon[3] = {-sun_dx, -sun_dy, -sun_dz};
                 clock_frame(cam_yaw, cam_pitch, is_night ? lmoon : lsun, is_night,
-                            (const float*)(desc + 32), frame_tod, ts_local_days());
+                            (const float*)(desc + 32), frame_tod, ts_local_days(), ts_dot);
             }
         }
 

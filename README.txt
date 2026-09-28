@@ -1,3 +1,22 @@
+NIGHT HORIZON, D-PAD, CLOCK-MODE DOT, INTERNET ZONE  (build=night-tint-dot)
+
+- Night horizon: the moon (opposite the sun) lit the sky with the sun's neutral scattering - a
+  noon-like whitish horizon - while the floor and cube get the cool moonlight colour; next to them
+  the horizon read orange-brown. The moon's sky light now has that colour per channel: linear
+  moonlight / its luminance (brightness unchanged) x MOON_SKY_SCALE, in ps_dark (CAFE00E9, d[30..32]
+  instead of the scalar d[27]; tint 1 bitwise the previous, tinted = + (t - 1) x the moon term to
+  1.3e-7), ps_resolve's horizon band (CAFE0404, [72..74]) and the CPU sky colours. Near the
+  horizon its red / blue went 0.43 -> 0.15.
+- D-pad time of day: taps and holds up to 2 s at DAY_SCRUB_START, then 5x (a jump, no ramp).
+- Clock mode shows the clock source's dot (grey / yellow / green, the time panel's colours) before
+  the date, the pair centred; ps_clock (CAFE0307, [58..63]; dot off: bitwise the previous).
+- Internet time: the last trace showed ip-api.com never answered and the display fallback measured
+  the console against itself (a race: ts_utc read "not synced", then the answer landed). Now
+  ts_utc records which clock it returned; a second service, worldtimeapi.org /api/ip ("utc_offset"
+  "+HH:MM", DST included), follows ip-api.com; failed lookups retry every minute; "tz_http ipapi=
+  worldtimeapi= tries=" traces each result (-1 DNS, -2 socket, -3 connect / send, -4 not HTTP 200
+  or no field, -5 not a real zone).
+
 INTERNET TIME'S OWN TIME ZONE, A LOADING SCREEN THAT SHOWS  (build=loadscreen-iptz)
 
 - The last trace: every console source agreed on +60 min ("tz used=60 ... zone_raw=0 dst=1"): the

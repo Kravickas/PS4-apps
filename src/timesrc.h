@@ -76,8 +76,10 @@ typedef struct {
     volatile int net_tz_ok; /* internet time's own zone: from ip-api.com (the thread) */
     int net_tz_min;         /* its offset (minutes) */
     char net_tz_name[48];   /* its IANA name, for the trace */
-    int tz_src;             /* where it came from: 4 settings, 3 kernel, 2 RTC local clock, 1 RTC */
-    uint64_t tz_next_us;    /* process time of the next re-read */
+    volatile int tz_http_ret[2], tz_http_tries; /* the lookups' last results (ts_http_tz) */
+    int utc_is_net;      /* the last ts_utc() was internet time (ts_local_tick uses the same) */
+    int tz_src;          /* where it came from: 4 settings, 3 kernel, 2 RTC local clock, 1 RTC */
+    uint64_t tz_next_us; /* process time of the next re-read */
 } TimeSrc;
 static TimeSrc g_ts;
 
@@ -182,7 +184,29 @@ static uint64_t ts_local_tick(uint64_t utc) {
     if (sceKernelGetProcessTime() >= g_ts.tz_next_us)
         ts_tz_refresh();
     int m = g_ts.tz_min;
-    if (g_ts.source == TS_NET && ts_net_valid()) {
+    static int tr[3] = {1, 1, -1}; /* trace the lookups' results when they change */
+    int r0 = __atomic_load_n(&g_ts.tz_http_ret[0], __ATOMIC_RELAXED),
+        r1 = __atomic_load_n(&g_ts.tz_http_ret[1], __ATOMIC_RELAXED),
+        nt = __atomic_load_n(&g_ts.tz_http_tries, __ATOMIC_ACQUIRE);
+    if (nt != tr[2] && nt > 0) {
+        static const char* const k[3] = {"tz_http ipapi=", " worldtimeapi=", " tries="};
+        long long v[3] = {r0, r1, nt};
+        char L[96];
+        int p = 0;
+        for (int i = 0; i < 3; i++) {
+            for (const char* q = k[i]; *q; q++)
+                L[p++] = *q;
+            p += lg_i64(L + p, v[i]);
+        }
+        L[p++] = '\n';
+        if (r0 != tr[0] || r1 != tr[1] || nt <= 3) /* not every retry: when the results change */
+            trace_line(L, (unsigned long)p);
+        tr[0] = r0;
+        tr[1] = r1;
+        tr[2] = nt;
+    }
+    /* the clock ts_utc just returned (internet only once it has an answer) */
+    if (g_ts.source == TS_NET && g_ts.utc_is_net) {
         int src = 3, dm = TS_TZ_BAD;
         if (__atomic_load_n(&g_ts.net_tz_ok, __ATOMIC_ACQUIRE)) {
             m = __atomic_load_n(&g_ts.net_tz_min, __ATOMIC_RELAXED);
@@ -275,14 +299,18 @@ static int ts_ntp_query(int rid, const char* host, int64_t* off) {
     return ret;
 }
 
-/* Internet time's own time zone (the console's setting may be wrong - e.g. UTC+0 with the clock
-   set an hour ahead by hand): ip-api.com's free JSON API by the caller's IP over plain HTTP/1.0
-   (http://ip-api.com/json/?fields=status,timezone,offset; offset = "Timezone UTC DST offset in
-   seconds"). Accepted: HTTP 200, "status":"success", an offset that is a real zone (a multiple of
-   15 min within +-14 h). 0 and *min on success. */
-static int ts_http_tz(int rid, int* min, char* name, int name_len) {
+/* Internet time's own time zone (the console's own may be set wrong - this one's is UTC+0 with
+   summer time while its owner lives at UTC+2): asked by the caller's IP over plain HTTP/1.0,
+   port 80. Two independent services, in order (DNS blocklists often carry one of them):
+   1. ip-api.com: GET /json/?fields=status,timezone,offset - "offset" is "Timezone UTC DST offset in
+      seconds" (ip-api.com/docs/api:json), with "status":"success";
+   2. worldtimeapi.org: GET /api/ip - "utc_offset" "+HH:MM", DST included ("raw_offset" is not).
+   Accepted: HTTP 200 and an offset that is a real zone (a multiple of 15 min within +-14 h).
+   Returns 0 and *min / name, or the failing step: -1 DNS, -2 socket, -3 connect / send, -4 not
+   HTTP 200 or no field, -5 not a real zone. */
+static int ts_http_get(int rid, const char* host, const char* req, int req_len, char* r, int cap) {
     uint32_t addr = 0;
-    if (sceNetResolverStartNtoa(rid, "ip-api.com", &addr, 0, 0, 0) < 0 || addr == 0)
+    if (sceNetResolverStartNtoa(rid, host, &addr, 0, 0, 0) < 0 || addr == 0)
         return -1;
     int s = sceNetSocket("tz", 2, 1, 0); /* AF_INET, SOCK_STREAM */
     if (s < 0)
@@ -293,75 +321,89 @@ static int ts_http_tz(int rid, int* min, char* name, int name_len) {
     unsigned char sa[16] = {16, 2, 0, 80}; /* sin_len, AF_INET, port 80 (big-endian) */
     for (int i = 0; i < 4; i++)
         sa[4 + i] = ((const unsigned char*)&addr)[i];
-    static const char req[] =
-        "GET /json/?fields=status,timezone,offset HTTP/1.0\r\n"
-        "Host: ip-api.com\r\nUser-Agent: ShadCube4\r\nConnection: close\r\n\r\n";
-    char r[1024];
-    int n = 0, ret = -3;
+    int n = -3;
     if (sceNetConnect(s, sa, sizeof(sa)) == 0 &&
-        sceNetSend(s, req, sizeof(req) - 1, 0) == (int)sizeof(req) - 1) {
+        sceNetSend(s, req, (unsigned long)req_len, 0) == req_len) {
+        n = 0;
         for (;;) {
-            int k = sceNetRecv(s, r + n, sizeof(r) - 1 - (unsigned long)n, 0);
+            int k = sceNetRecv(s, r + n, (unsigned long)(cap - 1 - n), 0);
             if (k <= 0)
                 break;
             n += k;
-            if (n >= (int)sizeof(r) - 1)
+            if (n >= cap - 1)
                 break;
         }
         r[n] = 0;
-        ret = -4;
-        /* "HTTP/1.x 200", then the body after the blank line */
-        const char* b = 0;
-        for (int i = 0; i + 3 < n; i++)
-            if (r[i] == '\r' && r[i + 1] == '\n' && r[i + 2] == '\r' && r[i + 3] == '\n') {
-                b = r + i + 4;
-                break;
-            }
-        int http_ok = n > 12 && r[0] == 'H' && r[1] == 'T' && r[2] == 'T' && r[3] == 'P' &&
-                      r[9] == '2' && r[10] == '0' && r[11] == '0';
-        const char* st = 0;
-        const char* of = 0;
-        const char* tz = 0;
-        for (const char* q = b; http_ok && q && *q; q++) {
-            static const char k1[] = "\"status\":\"success\"",
-                              k2[] = "\"offset\":", k3[] = "\"timezone\":\"";
-            int m1 = 1, m2 = 1, m3 = 1;
-            for (int j = 0; k1[j]; j++)
-                m1 &= q[j] == k1[j];
-            for (int j = 0; k2[j]; j++)
-                m2 &= q[j] == k2[j];
-            for (int j = 0; k3[j]; j++)
-                m3 &= q[j] == k3[j];
-            if (m1)
-                st = q;
-            if (m2)
-                of = q + sizeof(k2) - 1;
-            if (m3)
-                tz = q + sizeof(k3) - 1;
-        }
-        if (st && of) {
-            int sign = 1, v = 0, digits = 0;
-            if (*of == '-') {
-                sign = -1;
-                of++;
-            }
-            for (; *of >= '0' && *of <= '9' && digits < 7; of++, digits++)
-                v = v * 10 + (*of - '0');
-            v *= sign;
-            int a = v < 0 ? -v : v;
-            if (digits > 0 && a <= 14 * 3600 && a % 900 == 0) {
-                *min = v / 60;
-                int j = 0;
-                for (; tz && tz[j] && tz[j] != '"' && j < name_len - 1; j++)
-                    name[j] = tz[j];
-                name[j] = 0;
-                ret = 0;
-            } else
-                ret = -5;
-        }
     }
     sceNetSocketClose(s);
-    return ret;
+    if (n < 0)
+        return n;
+    /* "HTTP/1.x 200" */
+    return (n > 12 && r[0] == 'H' && r[1] == 'T' && r[2] == 'T' && r[3] == 'P' && r[9] == '2' &&
+            r[10] == '0' && r[11] == '0')
+               ? n
+               : -4;
+}
+static const char* ts_find(const char* r, const char* key) {
+    for (; *r; r++) {
+        int j = 0;
+        while (key[j] && r[j] == key[j])
+            j++;
+        if (!key[j])
+            return r + j;
+    }
+    return 0;
+}
+static void ts_copy_name(const char* q, char* name, int name_len) {
+    int j = 0;
+    for (; q && q[j] && q[j] != '"' && j < name_len - 1; j++)
+        name[j] = q[j];
+    name[j] = 0;
+}
+static int ts_tz_ok_sec(int v) {
+    int a = v < 0 ? -v : v;
+    return a <= 14 * 3600 && a % 900 == 0;
+}
+static int ts_http_tz(int rid, int service, int* min, char* name, int name_len) {
+    static const char q1[] =
+        "GET /json/?fields=status,timezone,offset HTTP/1.0\r\n"
+        "Host: ip-api.com\r\nUser-Agent: ShadCube4\r\nConnection: close\r\n\r\n";
+    static const char q2[] =
+        "GET /api/ip HTTP/1.0\r\n"
+        "Host: worldtimeapi.org\r\nUser-Agent: ShadCube4\r\nConnection: close\r\n\r\n";
+    char r[2048];
+    int n = service == 0 ? ts_http_get(rid, "ip-api.com", q1, sizeof(q1) - 1, r, sizeof(r))
+                         : ts_http_get(rid, "worldtimeapi.org", q2, sizeof(q2) - 1, r, sizeof(r));
+    if (n < 0)
+        return n;
+    int v = 0, sign = 1, digits = 0;
+    if (service == 0) { /* "status":"success", "offset":<seconds> */
+        const char* of = ts_find(r, "\"offset\":");
+        if (!ts_find(r, "\"status\":\"success\"") || !of)
+            return -4;
+        if (*of == '-') {
+            sign = -1;
+            of++;
+        }
+        for (; *of >= '0' && *of <= '9' && digits < 7; of++, digits++)
+            v = v * 10 + (*of - '0');
+        v *= sign;
+    } else { /* "utc_offset":"+HH:MM" */
+        const char* of = ts_find(r, "\"utc_offset\":\"");
+        if (!of || (of[0] != '+' && of[0] != '-') || of[3] != ':')
+            return -4;
+        for (int i = 1; i <= 5; i++)
+            if (i != 3 && (of[i] < '0' || of[i] > '9'))
+                return -4;
+        v = (of[0] == '-' ? -1 : 1) * (((of[1] - '0') * 10 + (of[2] - '0')) * 3600 +
+                                       ((of[4] - '0') * 10 + (of[5] - '0')) * 60);
+        digits = 1;
+    }
+    if (!digits || !ts_tz_ok_sec(v))
+        return -5;
+    *min = v / 60;
+    ts_copy_name(ts_find(r, "\"timezone\":\""), name, name_len);
+    return 0;
 }
 
 static void* ts_net_thread(void* arg) {
@@ -381,17 +423,27 @@ static void* ts_net_thread(void* arg) {
                 ok = 1;
             }
         }
+        int tz = 0;
         if (ok) { /* internet time's own zone, with every sync (follows DST changes) */
-            int m;
-            char nm[48];
-            if (ts_http_tz(rid, &m, nm, sizeof(nm)) == 0) {
-                for (int j = 0; j < (int)sizeof(nm); j++)
-                    g_ts.net_tz_name[j] = nm[j];
-                __atomic_store_n(&g_ts.net_tz_min, m, __ATOMIC_RELAXED);
-                __atomic_store_n(&g_ts.net_tz_ok, 1, __ATOMIC_RELEASE);
+            for (int sv = 0; sv < 2 && !tz; sv++) {
+                int m;
+                char nm[48];
+                int r = ts_http_tz(rid, sv, &m, nm, sizeof(nm));
+                __atomic_store_n(&g_ts.tz_http_ret[sv], r, __ATOMIC_RELAXED);
+                if (r == 0) {
+                    for (int j = 0; j < (int)sizeof(nm); j++)
+                        g_ts.net_tz_name[j] = nm[j];
+                    __atomic_store_n(&g_ts.net_tz_min, m, __ATOMIC_RELAXED);
+                    __atomic_store_n(&g_ts.net_tz_ok, 1, __ATOMIC_RELEASE);
+                    tz = 1;
+                }
             }
+            __atomic_add_fetch(&g_ts.tz_http_tries, 1, __ATOMIC_RELEASE);
         }
-        sceKernelUsleep(ok ? TS_NTP_EVERY_US : TS_NTP_RETRY_US);
+        /* synced with a zone: 30 min; synced but no zone yet: a minute; no sync: 30 s */
+        sceKernelUsleep(!ok                      ? TS_NTP_RETRY_US
+                        : (tz || g_ts.net_tz_ok) ? TS_NTP_EVERY_US
+                                                 : 60000000u);
     }
     return 0;
 }
@@ -425,8 +477,10 @@ static uint64_t ts_utc(void) {
             int64_t m = (int64_t)(TS_SLEW_US_PER_S * dt);
             g_ts.shown_off += d > m ? m : d < -m ? -m : d;
         }
+        g_ts.utc_is_net = 1;
         return (uint64_t)((int64_t)us + g_ts.shown_off);
     }
+    g_ts.utc_is_net = 0;
     TsRtcTick t;
     sceRtcGetCurrentTick(&t);
     return t.tick;

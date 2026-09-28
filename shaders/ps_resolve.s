@@ -13,7 +13,8 @@
 ; channel, out = C + (colour - C) e^-tau; the 4-sample average. Table: [0] colour T#, [8] depth T#,
 ; [16] horizon T# (64 x 168 RGBA16F), [24] S#; [28] F, n far | R tan, far | U tan, far - n | cam, hc
 ; | beta_R RGB, beta_M | 1/H_R, 1/H_M, H_R, H_M | E_R, E_M, 1/(2R), tilt0 | sun hx hz, moon hx hz |
-; tx, tz, sun scale, moon scale | sun L, 1/R | moon L, sqrt(2 / (R hc)).
+; tx, tz, sun scale, moon scale | sun L, 1/R | moon L, sqrt(2 / (R hc)) | the moon's scale per channel
+; (MOON_SKY_SCALE x the moonlight colour / its luminance: the night sky has the night light's colour), 0.
 s_load_dwordx8 s[4:11], s[0:1], 0x0
 s_load_dwordx8 s[12:19], s[0:1], 0x8
 s_load_dwordx8 s[20:27], s[0:1], 0x10
@@ -22,6 +23,7 @@ s_load_dwordx16 s[32:47], s[0:1], 0x1c
 s_load_dwordx16 s[48:63], s[0:1], 0x2c
 s_load_dwordx8 s[64:71], s[0:1], 0x3c
 s_load_dwordx4 s[72:75], s[0:1], 0x44
+s_load_dwordx4 s[76:79], s[0:1], 0x48
 s_waitcnt lgkmcnt(0)
 v_cvt_u32_f32 v4, v2
 v_cvt_u32_f32 v5, v3
@@ -326,8 +328,6 @@ v_rcp_f32 v55, v55
 v_mul_f32 v55, 0x3c8557c9, v55
 v_mul_f32 v55, v55, v52
 v_mul_f32 v52, 0x3d747645, v52
-v_mul_f32 v52, s67, v52
-v_mul_f32 v55, s67, v55
 s_waitcnt vmcnt(0)
 v_sub_f32 v60, v60, v56
 v_mac_f32 v56, v54, v60
@@ -335,27 +335,33 @@ v_sub_f32 v83, v83, v64
 v_mac_f32 v64, v54, v83
 v_sub_f32 v89, v89, v86
 v_mac_f32 v86, v54, v89
+v_mul_f32 v56, s76, v56
+v_mul_f32 v64, s76, v64
 v_mac_f32 v47, v56, v52
 v_mac_f32 v47, v64, v55
-v_mac_f32 v47, s67, v86
+v_mac_f32 v47, s76, v86
 v_sub_f32 v61, v61, v57
 v_mac_f32 v57, v54, v61
 v_sub_f32 v84, v84, v65
 v_mac_f32 v65, v54, v84
 v_sub_f32 v90, v90, v87
 v_mac_f32 v87, v54, v90
+v_mul_f32 v57, s77, v57
+v_mul_f32 v65, s77, v65
 v_mac_f32 v48, v57, v52
 v_mac_f32 v48, v65, v55
-v_mac_f32 v48, s67, v87
+v_mac_f32 v48, s77, v87
 v_sub_f32 v62, v62, v58
 v_mac_f32 v58, v54, v62
 v_sub_f32 v85, v85, v66
 v_mac_f32 v66, v54, v85
 v_sub_f32 v91, v91, v88
 v_mac_f32 v88, v54, v91
+v_mul_f32 v58, s78, v58
+v_mul_f32 v66, s78, v66
 v_mac_f32 v49, v58, v52
 v_mac_f32 v49, v66, v55
-v_mac_f32 v49, s67, v88
+v_mac_f32 v49, s78, v88
 v_mov_b32 v67, 0
 v_mov_b32 v68, 0
 v_mov_b32 v69, 0

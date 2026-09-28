@@ -4,7 +4,9 @@
 ; and the glass text lying on it; then clamp, sRGB and dither like ps_ui. Table: [0] frame T#, [8]
 ; bilinear clamp S#, [12] heavy frost T# (60 x 34), [20] internal light T# (480 x 270), [28] text
 ; T# (RG8 1152 x 648), [36] point S#; [40] slab centre x, y, half w, h, corner radius, 1/1920,
-; 1/1080, strength | light colour RGB, fill, l2 x, y, slab origin x, y | 1/1152, 1/648.
+; 1/1080, strength | light colour RGB, fill, l2 x, y, slab origin x, y | 1/1152, 1/648 | the clock
+; source's dot: centre x, y, radius (off: -100), linear RGB - an antialiased disc over a shadow
+; (0.449 black at +2.8 px, the time panel's scaled), after everything else.
 s_load_dwordx8 s[4:11], s[0:1], 0x0
 s_load_dwordx4 s[12:15], s[0:1], 0x8
 s_load_dwordx8 s[16:23], s[0:1], 0xc
@@ -13,6 +15,8 @@ s_load_dwordx8 s[32:39], s[0:1], 0x1c
 s_load_dwordx4 s[40:43], s[0:1], 0x24
 s_load_dwordx16 s[44:59], s[0:1], 0x28
 s_load_dwordx2 s[60:61], s[0:1], 0x38
+s_load_dwordx4 s[68:71], s[0:1], 0x3a
+s_load_dwordx2 s[72:73], s[0:1], 0x3e
 s_mov_b32 s62, 0x046f4f3d
 s_mov_b32 s63, 0x0127409f
 s_mov_b32 s64, 0x4bf14f21
@@ -1369,6 +1373,35 @@ v_mul_f32 v46, 0x3e800000, v50
 v_mul_f32 v47, 0x3e800000, v51
 clock_text_done:
 clock_done:
+v_subrev_f32 v52, s68, v2
+v_subrev_f32 v53, s69, v3
+v_subrev_f32 v54, 0x40333333, v52
+v_mul_f32 v54, v54, v54
+v_subrev_f32 v55, 0x40333333, v53
+v_mac_f32 v54, v55, v55
+v_sqrt_f32 v54, v54
+v_sub_f32 v55, s70, v54
+v_add_f32 v55, 0.5, v55
+v_max_f32 v55, 0, v55
+v_min_f32 v55, 1.0, v55
+v_mul_f32 v55, 0xbee60000, v55
+v_add_f32 v55, 1.0, v55
+v_mul_f32 v45, v45, v55
+v_mul_f32 v46, v46, v55
+v_mul_f32 v47, v47, v55
+v_mul_f32 v54, v52, v52
+v_mac_f32 v54, v53, v53
+v_sqrt_f32 v54, v54
+v_sub_f32 v55, s70, v54
+v_add_f32 v55, 0.5, v55
+v_max_f32 v55, 0, v55
+v_min_f32 v55, 1.0, v55
+v_sub_f32 v54, s71, v45
+v_mac_f32 v45, v54, v55
+v_sub_f32 v54, s72, v46
+v_mac_f32 v46, v54, v55
+v_sub_f32 v54, s73, v47
+v_mac_f32 v47, v54, v55
 v_mov_b32 v8, v45
 v_mov_b32 v9, v46
 v_mov_b32 v10, v47

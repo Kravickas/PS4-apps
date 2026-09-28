@@ -98,7 +98,7 @@ static int clock_entries(float* out, float l2x, float l2y) {
 /* This frame's clock: L the scene's light (unit, world: the sun by day, the moon by night), lc the
    scene's light colour (desc[32]), tod the clock's seconds since midnight, days its local date. */
 static void clock_frame(float yaw, float pitch, const float L[3], int night, const float lc[3],
-                        double tod, long days) {
+                        double tod, long days, int dot) {
     float F[3], R[3], U[3];
     cam_basis(yaw, pitch, F, R, U);
     float fz = L[0] * F[0] + L[1] * F[1] + L[2] * F[2];
@@ -154,4 +154,11 @@ static void clock_frame(float yaw, float pitch, const float L[3], int night, con
     const unsigned char* tex = clock_update(tod, days, g_ts.h12);
     if (tex)
         build_tsharp_rg8(k + 28, tex, CLOCK_W, CLOCK_H, CLOCK_W);
+    /* the clock source's dot (ps_clock [58..63]): centre on screen, radius (off: -100), linear
+       colour */
+    kc[18] = 0.5f * (float)(DISPLAY_W - CLOCK_W) + g_clock.dot_x;
+    kc[19] = 0.5f * (float)(DISPLAY_H - CLOCK_H) + g_clock.dot_y;
+    kc[20] = dot > 0 && dot < 4 ? CLOCK_DOT_R : -100.0f;
+    for (int c = 0; c < 3; c++)
+        kc[21 + c] = srgb_to_linear((float)k_ts_dot_srgb[dot > 0 && dot < 4 ? dot : 0][c] / 255.0f);
 }

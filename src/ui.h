@@ -342,6 +342,10 @@ static int ui_pill_width(const char* s) {
     return UI_PILL_PADL + UI_PILL_DOT + UI_PILL_GAP + w + UI_PILL_PADR;
 }
 
+/* The clock source's dot (sRGB): 0 none, 1 grey (in-game), 2 yellow (console), 3 green (internet);
+   the time panel's and clock mode's (ps_clock) */
+static const unsigned char k_ts_dot_srgb[4][3] = {
+    {0, 0, 0}, {150, 150, 158}, {240, 205, 70}, {110, 215, 130}};
 /* dot: 0 = no time panel, 1 grey (in-game), 2 yellow (console), 3 green (internet) */
 static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* time_txt, int dot) {
     if (!g_ui.ok)
@@ -435,8 +439,6 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* tim
     g_ui.nclip = 0;
     /* the time panel: its box cleared and redrawn in every new buffer (a dozen glyphs) */
     {
-        static const unsigned char dots[4][3] = {
-            {0, 0, 0}, {150, 150, 158}, {240, 205, 70}, {110, 215, 130}};
         static const unsigned char white[3] = {255, 255, 255}, black[3] = {0, 0, 0};
         static int px0 = 0, pw = 0;
         if (pw > 0)
@@ -447,7 +449,7 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* tim
             float cy = (float)UI_Y0 + 0.5f * UI_PILL_H, r = 0.5f * UI_PILL_DOT;
             float cx = (float)(px0 + UI_PILL_PADL) + r;
             ui_disc(b, cx + 1.0f, cy + 1.0f, r, black, 115);
-            ui_disc(b, cx, cy, r, dots[dot], 256);
+            ui_disc(b, cx, cy, r, k_ts_dot_srgb[dot], 256);
             ui_text(b, px0 + UI_PILL_PADL + UI_PILL_DOT + UI_PILL_GAP,
                     UI_Y0 + UI_PILL_H / 2 + UI_FONT_CAP / 2, time_txt, white);
             g_ui.pill[0] = (float)px0 + 0.5f * (float)pw;

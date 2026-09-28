@@ -311,7 +311,7 @@ v_mac_f32 v30, v50, v33
 v_mul_f32 v18, v18, v38
 v_mac_f32 v18, v24, v39
 v_add_f32 v18, v18, v30
-v_mac_f32 v41, s47, v18
+v_mac_f32 v41, s50, v18
 v_sub_f32 v22, v22, v19
 v_mac_f32 v19, v50, v22
 v_sub_f32 v28, v28, v25
@@ -321,7 +321,7 @@ v_mac_f32 v31, v50, v34
 v_mul_f32 v19, v19, v38
 v_mac_f32 v19, v25, v39
 v_add_f32 v19, v19, v31
-v_mac_f32 v42, s47, v19
+v_mac_f32 v42, s51, v19
 v_sub_f32 v23, v23, v20
 v_mac_f32 v20, v50, v23
 v_sub_f32 v29, v29, v26
@@ -331,7 +331,7 @@ v_mac_f32 v32, v50, v35
 v_mul_f32 v20, v20, v38
 v_mac_f32 v20, v26, v39
 v_add_f32 v20, v20, v32
-v_mac_f32 v43, s47, v20
+v_mac_f32 v43, s52, v20
 ; ---- sun disc: coverage (1 px anti-aliased edge) x mu^alpha per channel (Hestroffer & Magnan
 ; 1998 power law, mu = sqrt(1 - d^2 / r^2)) x its colour through the air x SUN_HDR ----
 v_subrev_f32 v8, s4, v2

@@ -9,8 +9,12 @@
 #define CLOCK_W 1152
 #define CLOCK_H 648
 #define CLOCK_BUFS 3
-#define CLOCK_BASE_Y 409         /* the time's baseline in the slab (the screen's CY + 85) */
-#define CLOCK_DATE_Y 511         /* the date's (CY + 187) */
+#define CLOCK_BASE_Y 409 /* the time's baseline in the slab (the screen's CY + 85) */
+#define CLOCK_DATE_Y 511 /* the date's (CY + 187) */
+/* The clock source's dot before the date, as in the time panel (dot 10 and gap 9 px at a 14 px cap
+   height there; the date's cap is 39 px): drawn by ps_clock, dot + gap + date centred together */
+#define CLOCK_DOT_R 14.0f
+#define CLOCK_DOT_GAP 25.0f
 #define CLOCK_SEC_GAP 8          /* between the minutes and the seconds */
 #define CLOCK_RC 56.0f           /* the slab's corner radius */
 #define CLOCK_LIGHT_LS 170.0f    /* internal light: scattering length (px) */
@@ -32,6 +36,7 @@ typedef struct {
     /* what each buffer holds: its glyphs where they are (partial updates diff against it) */
     ClockPlace held[CLOCK_BUFS][CLOCK_MAX_GLYPHS];
     int nheld[CLOCK_BUFS], valid[CLOCK_BUFS];
+    float dot_x, dot_y; /* the dot's centre in the slab (with the current buffer's date) */
 } Clock;
 static Clock g_clock;
 
@@ -222,7 +227,12 @@ static const unsigned char* clock_update(double sec, long days, int h12) {
         float x0 = 0.5f * ((float)CLOCK_W - (wt + (float)CLOCK_SEC_GAP + ws));
         clock_layout(P, &n, 300, x0, CLOCK_BASE_Y, hm, 1);
         clock_layout(P, &n, 110, x0 + wt + (float)CLOCK_SEC_GAP, CLOCK_BASE_Y, sc, 2);
-        clock_layout(P, &n, 52, 0.5f * ((float)CLOCK_W - clock_width(52, dt)), CLOCK_DATE_Y, dt, 3);
+        float wd = clock_width(52, dt), dl = 2.0f * CLOCK_DOT_R + CLOCK_DOT_GAP;
+        float xd = 0.5f * ((float)CLOCK_W - (wd + dl)) + dl;
+        clock_layout(P, &n, 52, xd, CLOCK_DATE_Y, dt, 3);
+        const ClockGlyph* cap = clock_glyph_of(52, 'H'); /* the dot on the date's cap centre */
+        g_clock.dot_x = xd - CLOCK_DOT_GAP - CLOCK_DOT_R;
+        g_clock.dot_y = (float)CLOCK_DATE_Y + (cap ? cap->yoff + 0.5f * (float)cap->h : -19.5f);
         /* Only the glyphs that differ from what this buffer holds are redrawn: the digits are
            tabular, so a changed number keeps every glyph's origin; a new layout (the count or an
            origin changed - the date, 9:59 -> 10:00 in 12 h) redraws everything. */
