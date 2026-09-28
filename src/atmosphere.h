@@ -72,10 +72,27 @@ float atmo_elev_deg(float y);
 /* ps_dark constants desc[164..203] (layout in ps_dark.s). F, R, U: camera basis (unit, world);
    tan_half_fov: tan(half vertical fov) - the view direction of the aspect-scaled NDC point (x, y)
    is normalize(F + x tan R + y tan U), build_mvp's projection inverted; moon_view: the sun
+   tilt: the camera's dipped horizon (atmo_tilted_y) - d[3], d[7], d[11] for ps_dark's rows; the
+   lights' slices from their heights above it.
    direction in the moon's own frame (x right, y up, z toward the viewer). */
 void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float R[3],
-                     const float U[3], float tan_half_fov, const float sun[3], float sun_scale,
-                     const float moon[3], float moon_sky_scale, const float moon_view[3]);
+                     const float U[3], float tan_half_fov, const float tilt[3], const float sun[3],
+                     float sun_scale, const float moon[3], float moon_sky_scale,
+                     const float moon_view[3]);
+/* The table's horizon (row coordinate 32: rows 31 and 32 blended 1:1, as ps_dark samples y' = 0)
+   for both lights, without the phases: 6 rows x ATMO_SKY_W RGBA16F texels (sun Rayleigh, Mie,
+   multiple; moon the same), each blended between the light's slices like ps_dark and x the light's
+   sky scale. sun_y / moon_y: the lights' heights above the dipped horizon (atmo_tilted_y). */
+void atmo_horizon_table(const AtmoAsset* s, float sun_y, float sun_scale, float moon_y,
+                        float moon_scale, uint16_t* out);
+/* A light's height above the horizon a camera h above the curved floor sees in the light's
+   azimuth: tan(dip) = tilt[0] + tilt[1] hx + tilt[2] hz (tilt = sqrt(2 h / R), cam x / R, cam z /
+   R; hx, hz the light's horizontal unit), y' = sin(elevation + dip). */
+float atmo_tilted_y(const float L[3], const float tilt[3]);
+/* The atmosphere near the ground in world units (m_per_unit metres each): Rayleigh scattering
+   (= extinction) RGB and Mie extinction per unit at sea level, their scale heights in units
+   (ozone lies 10 - 40 km up: none near the ground). */
+void atmo_aerial_coeffs(float m_per_unit, float beta_r[3], float* beta_m, float* h_r, float* h_m);
 /* Sun limb darkening I = mu^alpha (Hestroffer & Magnan 1998, eq. 5):
    alpha = -0.023 + 0.292 / lambda[um] at 680 / 550 / 440 nm. */
 #define ATMO_LIMB_R 0.40641f

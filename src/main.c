@@ -149,18 +149,22 @@
 #define SKY_SUN_SCALE 3.14159265f
 #define MOON_SKY_SCALE 0.1481f
 #define MOON_SCALE 3.6375f
-/* Fog (ps_resolve, per MSAA sample): height fog of density FOG_SIGMA0 e^(-(y - FOG_Y0) / FOG_H)
-   per unit, single scattering albedo FOG_ALBEDO (the atmosphere's Mie aerosol, 0.9) and its phase
-   (Cornette-Shanks g 0.8). FOG_SIGMA0 = 2.0547e-3 matches the previous fog at 200 units from the
-   default camera (33.7 %; exact integral down to the curved floor): 3.9 / 9.4 / 18 / 33 / 55 % at
-   20 / 50 / 100 / 200 / 400 units. The floor reaches FLOOR_HALF 3000: its edge stays behind the
-   curvature until the camera is 225 units up. */
-#define FOG_SIGMA0 2.0547e-3f
-#define FOG_H 30.0f
-#define FOG_Y0 (-0.5f)
-#define FOG_ALBEDO 0.9f
+/* Aerial perspective (ps_resolve, per MSAA sample): the scene seen through the sky's own atmosphere
+   (atmosphere.c: Rayleigh + Mie, their scale heights) with AERIAL_M_PER_UNIT metres per world unit,
+   the fog colour the sky's colour at the camera's horizon in that direction - far floor fades into
+   exactly the sky above it, and the only glow around the sun is the sky's own aureole (the
+   separate haze layer's forward scattering drew a 7 deg white glow at floor level). 114.16 keeps
+   the previous fog's strength: green extinction 1.7998e-5 / m x 114.16 = 2.0547e-3 / unit; blue
+   2.3x, red 0.57x; Rayleigh scale height 70 units, Mie 10.5. */
+#define AERIAL_M_PER_UNIT 114.16f
+/* Arena: the camera stays within +-ARENA_HALF of the centre and ARENA_EYE_MIN .. ARENA_HEIGHT above
+   the floor under it, so the floor always reaches the horizon: sqrt(2 FLOOR_R ARENA_HEIGHT) = 1673
+   <= FLOOR_HALF - ARENA_HALF = 1700 (the dipped horizon is FLOOR_R's, the same planet). */
+#define ARENA_HALF 300.0f
+#define ARENA_HEIGHT 100.0f
+#define ARENA_EYE_MIN 0.1f /* never below the floor */
 #define CAM_NEAR 0.01f
-#define CAM_FAR 3500.0f      /* the curved floor's horizon from 225 units up is 3000 away */
+#define CAM_FAR 2500.0f      /* the farthest visible floor: the horizon, <= 1673 away */
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
@@ -208,7 +212,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "sky-dir-fix"
+#define BUILD_TAG "arena-sky"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -393,13 +397,12 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define CUBE_VERTS      36
 #define FLOOR_VERTS (FLOOR_GRID * FLOOR_GRID * 6) /* 2 tris per grid quad */
 #define FLOOR_GRID 128
-#define FLOOR_HALF 3000.0f /* floor spans +-FLOOR_HALF in X and Z */
-/* Radius of the floor's curvature (y = -0.5 - r^2 / (2 FLOOR_R)): 400000 puts the horizon ~920
-   units from the default camera, where the fog is 84 % - the floor fades into the sky instead of
-   ending at a line 200 units away (FLOOR_R 20000). The floor edge hides behind the curvature up to
-   11 units of camera height and behind 98 % fog above that. */
-#define FLOOR_R 400000.0f
-#define FLOOR_UV_MAX 1500.0f /* texture tiles across: one per 4 units */
+#define FLOOR_HALF 2000.0f /* floor spans +-FLOOR_HALF in X and Z */
+/* The planet: the floor is y = -0.5 - r^2 / (2 FLOOR_R), and the horizon a camera h above it sees
+   dips by atan(sqrt(2 h / FLOOR_R)) (7 deg from 100 up): the sky follows it (ps_dark), so from up
+   high the sky, the sun and the sunset show below eye level down to the real horizon. */
+#define FLOOR_R 14000.0f
+#define FLOOR_UV_MAX 1000.0f /* texture tiles across: one per 4 units */
 #define TOTAL_VERTS     (BG_VERTS + CUBE_VERTS + FLOOR_VERTS)
 #define VERT_STRIDE     48
 #define IDENT_OFF       0
@@ -462,11 +465,13 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
 #define FROST_PASSES 6
 #define UI_BLOCK (FROST_BLOCK + FROST_PASSES)
 #define RESOLVE_BLOCK (UI_BLOCK + 2)
-#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 2) /* the resolve uses two blocks */
+#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 3) /* the resolve uses three blocks */
 static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
 static uint32_t* g_post_tab = 0;
+static uint16_t* g_hz_table =
+    0; /* ps_resolve: the sky's horizon, 64 x 6 RGBA16F (atmo_horizon_table) */
 /* Prop box for the lens flare occlusion test: model-space bounds and the world
    transform (3x4 rows) of the loaded model, or of the built-in cube (+-0.4). */
 static float g_prop_lo[3] = {-0.4f, -0.4f, -0.4f};
@@ -1535,6 +1540,18 @@ static void cam_basis(float yaw, float pitch, float* F, float* R, float* U) {
     R[0] = cy, R[1] = 0.0f, R[2] = sy;
     U[0] = sy * sp, U[1] = cp, U[2] = -cy * sp;
 }
+
+/* The camera above the curved floor: its height hc and the dipped horizon's tilt (sqrt(2 hc / R),
+   x / R, z / R) - ps_dark's sky rows and ps_resolve's horizon use the same. */
+static void cam_horizon(float cx, float cy, float cz, float* hc, float tilt[3]) {
+    float h = cy + 0.5f + (cx * cx + cz * cz) / (2.0f * FLOOR_R);
+    if (h < 0.0f)
+        h = 0.0f;
+    *hc = h;
+    tilt[0] = my_sqrt(2.0f * h / FLOOR_R);
+    tilt[1] = cx / FLOOR_R;
+    tilt[2] = cz / FLOOR_R;
+}
 /* The sun direction in the moon's own frame (x right, y up, z toward the viewer = -moon), for
    ps_dark's Lommel-Seeliger lighting of the moon disc. */
 static void moon_frame_sun(const float* moon, const float* sun, const float* R, float* out) {
@@ -1757,7 +1774,10 @@ static void build_post_tables(uint32_t* tab) {
     if (g_msaa_color) {
         uint32_t* r = tab + RESOLVE_BLOCK * 32;
         build_tsharp_f16(r, g_msaa_color, DISPLAY_W, DISPLAY_H, DISPLAY_W);
-        build_tsharp_depth_msaa(r + 8, g_msaa_depth, DISPLAY_W, DISPLAY_H); /* fog: sample depths */
+        build_tsharp_depth_msaa(r + 8, g_msaa_depth, DISPLAY_W, DISPLAY_H); /* sample depths */
+        if (g_hz_table)
+            build_tsharp_f16(r + 16, g_hz_table, ATMO_SKY_W, 6, ATMO_SKY_W); /* the sky's horizon */
+        build_ssharp_clamp(r + 24, 1);                                       /* bilinear, clamp */
         r[3] = (r[3] & ~((0x1Fu << 20) | (0xFu << 28) | (0xFu << 16) | (0xFu << 12))) |
                ((uint32_t)MSAA_TILE_INDEX << 20) | (0xEu << 28) | (2u << 16);
     }
@@ -1869,7 +1889,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
-#define PS_RESOLVE_RSRC1 ((6u << 6) | 13u)   /* v0-v55, s0-s51 + VCC */
+#define PS_RESOLVE_RSRC1 ((9u << 6) | 17u)   /* v0-v70, s0-s75 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
@@ -3277,8 +3297,9 @@ int main(void) {
         const float sun[3] = {0.0f, 0.70710678f, -0.70710678f},
                     moon[3] = {0.0f, -0.70710678f, 0.70710678f};
         const float mv[3] = {0.0f, 0.0f, 1.0f};
+        const float tilt[3] = {0.0f, 0.0f, 0.0f};
         atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U, my_sin(0.3054f) / my_cos(0.3054f),
-                        sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
+                        tilt, sun, SKY_SUN_SCALE, moon, MOON_SKY_SCALE, mv);
     }
     build_tsharp_tex(desc + 72, &floor_nrm);
     /* ps_floor parallax + fog: camera desc[104] (xyz per frame, w = log2(FOG_MIN)),
@@ -3439,6 +3460,16 @@ int main(void) {
     trace_msg(g_msaa_color ? "msaa: 4x (colour 66355200 B, depth 33177600 B, tile 13)\n"
                            : "msaa: off\n");
     g_post_tab = (uint32_t*)gpu_alloc_typed(POST_TABLE_BLOCKS * 32 * 4, 0x100, MEM_TYPE_ONION);
+    g_hz_table = (uint16_t*)gpu_alloc_typed(ATMO_SKY_W * 6 * 8, 0x100, MEM_TYPE_ONION);
+    if (g_hz_table) { /* the default sky's until the frame loop writes it */
+        my_memset(g_hz_table, 0, ATMO_SKY_W * 6 * 8);
+        if (g_atmo_ok) {
+            const float* sk = (const float*)(desc + 164);
+            const float tilt0[3] = {0.0f, 0.0f, 0.0f};
+            atmo_horizon_table(&g_atmo, atmo_tilted_y(sk + 12, tilt0), SKY_SUN_SCALE,
+                               atmo_tilted_y(sk + 24, tilt0), MOON_SKY_SCALE, g_hz_table);
+        }
+    }
     if (post_ok && g_post_tab) {
         build_post_tables(g_post_tab);
         /* Final pass (ps_post_final): glare T# at dwords 40..47, bilinear clamp S# at 48..51. */
@@ -3767,7 +3798,6 @@ int main(void) {
     int day_frozen = 0;        /* Square */
     int day_step = DAY_MULT_ONE; /* index into k_day_tenths (L1 / R1) */
     float day_hold = 0.0f;     /* L1 / R1 auto-repeat timer */
-    float play_time_s = 0.0f;  /* this session, for the leaderboard */
     int cube_rotation_enabled = 1;  // Start button toggles this (default: spinning)
     float cube_angle_y = 0.0f;       // accumulator (advances only when enabled)
     float cube_angle_x = 0.0f;
@@ -4034,7 +4064,7 @@ int main(void) {
         prev_buttons = pad.buttons;
 
         /* Controls (the on-screen list, src/ui.h, shows the same):
-           Cross     freeze / unfreeze the cube      Circle  show / hide the leaderboard
+           Cross     freeze / unfreeze the cube
            Square    freeze / unfreeze day and night Triangle reset the camera
            L1 / R1   day and night slower / faster (k_day_tenths; held: repeats)
            L2 / R2   camera down / up                 D-pad up / down: camera speed
@@ -4042,8 +4072,6 @@ int main(void) {
            sticks: move / look. */
         if (pressed & PAD_CROSS)
             cube_rotation_enabled = !cube_rotation_enabled;
-        if (pressed & PAD_CIRCLE)
-            g_ui.leaderboard = !g_ui.leaderboard;
         if (pressed & PAD_SQUARE)
             day_frozen = !day_frozen;
         if (pressed & PAD_OPTIONS)
@@ -4091,6 +4119,14 @@ int main(void) {
             cam_x += my_cos(cam_yaw) * lx * spd;
             cam_z += my_sin(cam_yaw) * lx * spd;
         }
+        /* Arena (ARENA_*): over the middle of the floor, ARENA_EYE_MIN .. ARENA_HEIGHT above it */
+        cam_x = cam_x > ARENA_HALF ? ARENA_HALF : (cam_x < -ARENA_HALF ? -ARENA_HALF : cam_x);
+        cam_z = cam_z > ARENA_HALF ? ARENA_HALF : (cam_z < -ARENA_HALF ? -ARENA_HALF : cam_z);
+        {
+            float fy = -0.5f - (cam_x * cam_x + cam_z * cam_z) / (2.0f * FLOOR_R);
+            cam_y = cam_y > fy + ARENA_HEIGHT ? fy + ARENA_HEIGHT : cam_y;
+            cam_y = cam_y < fy + ARENA_EYE_MIN ? fy + ARENA_EYE_MIN : cam_y;
+        }
 
         /* Right stick: look around */
         float rx = ((float)pad.rx - 128.0f) / 128.0f;
@@ -4124,7 +4160,6 @@ int main(void) {
         if (!day_frozen)
             sun_angle +=
                 sun_speed * (float)k_day_tenths[day_step] * 6.0f * dt_sec; /* x tenths / 10 x 60 */
-        play_time_s += dt_sec;
         /* Wrap every accumulator once per frame, after all increments. */
         sun_angle    = wrap_2pi(sun_angle);
         cam_yaw      = wrap_2pi(cam_yaw);
@@ -4602,13 +4637,14 @@ int main(void) {
             sc[3] = 0.0f;
             mc[3] = 0.0f;
             {
-                float F[3], R[3], U[3], mv[3];
+                float F[3], R[3], U[3], mv[3], hc, tilt[3];
                 cam_basis(cam_yaw, cam_pitch, F, R, U);
+                cam_horizon(cam_x, cam_y, cam_z, &hc, tilt);
                 const float sun[3] = {sun_dx, sun_dy, sun_dz},
                             moon[3] = {-sun_dx, -sun_dy, -sun_dz};
                 moon_frame_sun(moon, sun, R, mv);
                 atmo_sky_consts(&g_atmo, (float*)(desc + 164), F, R, U,
-                                my_sin(0.3054f) / my_cos(0.3054f), sun, SKY_SUN_SCALE, moon,
+                                my_sin(0.3054f) / my_cos(0.3054f), tilt, sun, SKY_SUN_SCALE, moon,
                                 MOON_SKY_SCALE, mv);
             }
         }
@@ -4627,54 +4663,54 @@ int main(void) {
                 vis = flare_visibility(cam_yaw, cam_pitch, cam,
                                        sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), sd[1]);
             }
-            { /* the fog between the camera and the sun dims the flare like the disc */
-                const float sy = ((const float*)(desc + 176))[1];
-                float hc = cam_y - FOG_Y0, ec = atmo_expf(-hc / FOG_H);
-                vis *= sy > 1e-4f ? atmo_expf(-FOG_SIGMA0 * FOG_H * ec / sy) : 0.0f;
-            }
             flare_consts(ft, sd, scl, vis);
-            if (g_msaa_color) { /* fog constants (ps_resolve table, dwords 16..47) */
+            if (g_msaa_color) { /* aerial perspective: ps_resolve table dwords 28..71 + horizon */
                 float* rt = (float*)(g_post_tab + RESOLVE_BLOCK * 32);
-                float F[3], R[3], U[3], ups[3] = {0, 0, 0}, cms[3], upm[3] = {0, 0, 0}, cmm[3];
+                float F[3], R[3], U[3], hc, tilt[3], br[3], bm, hr, hm;
                 cam_basis(cam_yaw, cam_pitch, F, R, U);
+                cam_horizon(cam_x, cam_y, cam_z, &hc, tilt);
+                atmo_aerial_coeffs(AERIAL_M_PER_UNIT, br, &bm, &hr, &hm);
                 /* the view direction of the aspect-scaled NDC point (x, y): F + x tan R + y tan U,
                    tan = tan(half fov) - build_mvp's projection (scale cot) inverted */
                 const float tan_half = my_sin(0.3054f) / my_cos(0.3054f);
-                const float* ld = (const float*)(desc + 12); /* scene light direction x magnitude */
-                const float* lc = (const float*)(desc + 32); /* its colour */
-                const float* gr = (const float*)(desc + 160); /* the lit floor's radiance */
-                float lm = my_sqrt(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]);
-                float hc = cam_y - FOG_Y0, ec = atmo_expf(-hc / FOG_H);
-                if (g_atmo_ok) {
-                    atmo_sky_means(&g_atmo, ((const float*)(desc + 176))[1], ups, cms);
-                    atmo_sky_means(&g_atmo, ((const float*)(desc + 188))[1], upm, cmm);
-                }
+                const float* sk = (const float*)(desc + 164); /* this frame's sky constants */
                 for (int c = 0; c < 3; c++) {
-                    rt[16 + c] = F[c];
-                    rt[20 + c] = R[c] * tan_half;
-                    rt[24 + c] = U[c] * tan_half;
-                    rt[28 + c] = lm > 1e-6f ? ld[c] / lm : 0.0f;
-                    /* FS: the scene light scattered by the haze, E = pi x (the radiance of a white
-                       surface facing the light); FA: isotropic - half the mean sky, half the floor
-                     */
-                    rt[32 + c] = FOG_ALBEDO * 3.14159265f * lc[c] * lm;
-                    rt[36 + c] =
-                        FOG_ALBEDO *
-                        (0.5f * (SKY_SUN_SCALE * ups[c] + MOON_SKY_SCALE * upm[c]) + 0.5f * gr[c]);
+                    rt[28 + c] = F[c];
+                    rt[32 + c] = R[c] * tan_half;
+                    rt[36 + c] = U[c] * tan_half;
+                    rt[44 + c] = br[c];
+                    rt[64 + c] = sk[12 + c]; /* sun L */
+                    rt[68 + c] = sk[24 + c]; /* moon L */
                 }
-                rt[19] = 1.0f / FOG_H;
-                rt[23] = FOG_SIGMA0 * ec;
-                rt[27] = CAM_NEAR * CAM_FAR;
-                rt[31] = CAM_FAR;
-                rt[35] = CAM_FAR - CAM_NEAR;
-                rt[39] = FOG_SIGMA0 * FOG_H;
-                rt[40] = ec;
-                rt[41] = -hc / FOG_H;
-                for (int i = 42; i < 48; i++)
-                    rt[i] = 0.0f;
+                rt[31] = CAM_NEAR * CAM_FAR;
+                rt[35] = CAM_FAR;
+                rt[39] = CAM_FAR - CAM_NEAR;
+                rt[40] = cam_x;
+                rt[41] = cam_y;
+                rt[42] = cam_z;
+                rt[43] = hc;
+                rt[47] = bm;
+                rt[48] = 1.0f / hr;
+                rt[49] = 1.0f / hm;
+                rt[50] = hr;
+                rt[51] = hm;
+                rt[52] = atmo_expf(-hc / hr);
+                rt[53] = atmo_expf(-hc / hm);
+                rt[54] = 1.0f / (2.0f * FLOOR_R);
+                rt[55] = tilt[0];
+                rt[56] = sk[16]; /* the lights' horizontal units */
+                rt[57] = sk[17];
+                rt[58] = sk[28];
+                rt[59] = sk[29];
+                rt[60] = tilt[1];
+                rt[61] = tilt[2];
+                rt[62] = rt[63] = rt[67] = rt[71] = 0.0f;
+                if (g_hz_table && g_atmo_ok)
+                    atmo_horizon_table(&g_atmo, atmo_tilted_y(sk + 12, tilt), SKY_SUN_SCALE,
+                                       atmo_tilted_y(sk + 24, tilt), MOON_SKY_SCALE, g_hz_table);
             }
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
-                      day_frozen, (unsigned long)play_time_s);
+                      day_frozen);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
         }
 

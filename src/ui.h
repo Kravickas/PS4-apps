@@ -1,10 +1,9 @@
-/* On-screen panels: top left, always the OPTIONS hint, camera speed and day speed, plus the
-   controls list when OPTIONS is pressed; top right, the leaderboard on CIRCLE (for now this
-   session's play time). The CPU lays out text (URW Gothic Demi) and DS4 icons from
+/* On-screen panel, top left: always the OPTIONS hint, camera speed and day speed, plus the
+   controls list when OPTIONS is pressed. The CPU lays out text (URW Gothic Demi) and DS4 icons from
    assets/ui/ui_atlas.bin (tools/make_ui_atlas.py, src/ui_atlas.h) into a 1920x1080 RGBA8 texture
    (premultiplied, sRGB-space values), only when the content changes, triple-buffered so frames in
-   flight keep reading theirs. ps_post_final blurs the scene under the panels' rounded rects
-   (frosted glass) and composites the texture after its sRGB encode. */
+   flight keep reading theirs. ps_ui blurs the scene under the panel's rounded rect (frosted
+   glass) and composites the texture after its sRGB encode. */
 #pragma once
 #include "ui_atlas.h"
 
@@ -23,28 +22,25 @@
 #define UI_ICON_BELOW (UI_ICON_PX - UI_ICON_ABOVE)
 #define UI_LINE_ABOVE (UI_ICON_ABOVE > UI_FONT_ASCENT ? UI_ICON_ABOVE : UI_FONT_ASCENT)
 #define UI_LINE_BELOW (UI_ICON_BELOW > UI_FONT_DESCENT ? UI_ICON_BELOW : UI_FONT_DESCENT)
-#define UI_LB_GAP 20 /* leaderboard: gap to the opened controls panel */
 
 typedef struct {
     const unsigned char* atlas; /* RGBA8, UI_ATLAS_W x UI_ATLAS_H, straight alpha */
     unsigned char* buf[UI_BUFS];
     int cur, ok;
-    int controls, leaderboard;
+    int controls;
     char key[96];  /* content of the current buffer; recompose when it changes */
-    float rect[8]; /* panels: centre x, y, half w, h (px) for the left panel and the leaderboard */
-    int lb[4];     /* leaderboard rect x0, y0, x1, y1 (px), fixed at init */
-    /* Per buffer: dirty boxes x0, y0, x1, y1 (empty: x1 <= x0) of the left panel [0] and the
-       leaderboard [1], and the state it shows (valid = 0: never drawn). */
-    int dirty[UI_BUFS][2][4];
+    float rect[4]; /* the panel: centre x, y, half w, h (px) */
+    /* Per buffer: the dirty box x0, y0, x1, y1 (empty: x1 <= x0) and the state it shows
+       (valid = 0: never drawn). */
+    int dirty[UI_BUFS][4];
     struct {
-        int valid, controls, leaderboard, cam, day, frozen;
-        unsigned long play;
+        int valid, controls, cam, day, frozen;
     } st[UI_BUFS];
     int* drawing;   /* dirty box being grown by ui_blit, or 0 */
     int nclip;      /* > 0: ui_blit draws only inside clip[0 .. nclip - 1] (partial redraw) */
-    int clip[3][4]; /* x0, y0, x1, y1 */
-    int ycam, yday, ytime; /* baselines of the value lines (fixed by the layout) */
-    int gtop, gbot;        /* glyph box extent around a baseline, shadow included */
+    int clip[2][4]; /* x0, y0, x1, y1 */
+    int ycam, yday; /* baselines of the value lines (fixed by the layout) */
+    int gtop, gbot; /* glyph box extent around a baseline, shadow included */
 } Ui;
 static Ui g_ui;
 
@@ -74,12 +70,9 @@ static int ui_load_atlas(const char* path) {
     return 0;
 }
 
-static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mult, int day_frozen,
-                         int* bottom);
-
 static int ui_init(void) {
     my_memset(&g_ui, 0, sizeof(g_ui));
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 4; i++)
         g_ui.rect[i] = -1e6f;
     if (ui_load_atlas(ASSET_DIR "ui/ui_atlas.bin") != 0)
         return -1;
@@ -90,13 +83,6 @@ static int ui_init(void) {
             return -2;
         my_memset(g_ui.buf[b], 0, (unsigned long)UI_W * UI_H * 4);
     }
-    /* Leaderboard: centred, 10 % of the height above and below; left edge UI_LB_GAP right of
-       the opened controls panel (measured in its widest state), right edge mirrored. */
-    int bottom = 0, right = ui_left_panel(0, 1, 2500, 20, 1, &bottom);
-    g_ui.lb[0] = right + UI_LB_GAP;
-    g_ui.lb[1] = UI_H / 10;
-    g_ui.lb[2] = UI_W - g_ui.lb[0];
-    g_ui.lb[3] = UI_H - UI_H / 10;
     /* band of a text line around its baseline: every glyph box, plus the 2 px shadow offset */
     g_ui.gtop = 1 << 20, g_ui.gbot = -(1 << 20);
     for (int i = 0; i < 96; i++) {
@@ -275,7 +261,6 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
             const char* label;
         } rows[] = {
             {{UI_ICON_CROSS, -1}, "Freeze / unfreeze cube"},
-            {{UI_ICON_CIRCLE, -1}, "Show / hide leaderboard"},
             {{UI_ICON_SQUARE, -1}, "Freeze / unfreeze day and night"},
             {{UI_ICON_TRIANGLE, -1}, "Reset camera"},
             {{UI_ICON_L1, UI_ICON_R1}, "Day and night slower / faster"},
@@ -304,22 +289,18 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
     return xr + UI_PAD;
 }
 
-/* Lays out both panels into the next buffer when the content key changes; sets the rects. */
-static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long play_s) {
+/* Lays out the panel into the next buffer when the content key changes; sets the rect. */
+static void ui_update(int cam_pct, int day_mult, int day_frozen) {
     if (!g_ui.ok)
         return;
     char key[96], *k = key;
     k += ui_fmt_int(k, g_ui.controls);
-    *k++ = ',';
-    k += ui_fmt_int(k, g_ui.leaderboard);
     *k++ = ',';
     k += ui_fmt_int(k, cam_pct);
     *k++ = ',';
     k += ui_fmt_int(k, day_mult);
     *k++ = ',';
     k += ui_fmt_int(k, day_frozen);
-    *k++ = ',';
-    k += ui_fmt_int(k, g_ui.leaderboard ? (long)play_s : 0);
     int same = 1;
     for (int i = 0; key[i] || g_ui.key[i]; i++)
         if (key[i] != g_ui.key[i]) {
@@ -333,25 +314,20 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
 
     int nb = (g_ui.cur + 1) % UI_BUFS;
     unsigned char* b = g_ui.buf[nb];
-    const int lbv = g_ui.leaderboard ? 1 : 0;
-    const unsigned long play = lbv ? play_s : 0;
-    int* dp = g_ui.dirty[nb][0];
-    int* dl = g_ui.dirty[nb][1];
+    int* dp = g_ui.dirty[nb];
 
     /* Partial redraw when this buffer shows the same layout and only values differ: clear the
        bands of the changed value lines and redraw everything clipped to them - identical to a
        full redraw (same draw order inside the bands, nothing differs outside). */
     int partial = g_ui.st[nb].valid && g_ui.st[nb].controls == g_ui.controls &&
-                  g_ui.st[nb].leaderboard == lbv && g_ui.st[nb].frozen == day_frozen;
+                  g_ui.st[nb].frozen == day_frozen;
     g_ui.nclip = 0;
     if (partial) {
-        int ys[3], m = 0;
+        int ys[2], m = 0;
         if (g_ui.st[nb].cam != cam_pct)
             ys[m++] = g_ui.ycam;
         if (g_ui.st[nb].day != day_mult)
             ys[m++] = g_ui.yday;
-        if (lbv && g_ui.st[nb].play != play)
-            ys[m++] = g_ui.ytime;
         for (int i = 0; i < m; i++) { /* bands in y order (insertion sort), overlaps merged */
             int y0 = ys[i] + g_ui.gtop, y1 = ys[i] + g_ui.gbot;
             y0 = y0 < 0 ? 0 : y0;
@@ -380,17 +356,13 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         for (int i = 0; i < n; i++)
             ui_clear(b, 0, g_ui.clip[i][1], UI_W, g_ui.clip[i][3] - g_ui.clip[i][1]);
     } else { /* full redraw: clear only what was drawn into this buffer last time */
-        for (int k = 0; k < 2; k++) {
-            int* dr = g_ui.dirty[nb][k];
-            if (dr[2] > dr[0])
-                ui_clear(b, dr[0], dr[1], dr[2] - dr[0], dr[3] - dr[1]);
-            dr[0] = dr[1] = dr[2] = dr[3] = 0;
-        }
+        if (dp[2] > dp[0])
+            ui_clear(b, dp[0], dp[1], dp[2] - dp[0], dp[3] - dp[1]);
+        dp[0] = dp[1] = dp[2] = dp[3] = 0;
     }
     unsigned char* db = (partial && g_ui.nclip == 0) ? 0 : b; /* 0: already current, measure */
 
-    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210};
-    /* left panel: rect = the bounding box of what was laid out */
+    /* the panel's rect = the bounding box of what was laid out */
     g_ui.drawing = dp;
     int bottom = 0,
         right = ui_left_panel(db, g_ui.controls, cam_pct, day_mult, day_frozen, &bottom);
@@ -400,56 +372,21 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
     g_ui.rect[2] = 0.5f * (x1 - x0);
     g_ui.rect[3] = 0.5f * (y1 - y0);
 
-    /* leaderboard (fixed rect, centred; set by ui_init): this session's play time until
-       multiplayer scores exist */
-    if (lbv) {
-        char t[24], *q = t;
-        q += ui_fmt_int(q, (long)(play_s / 3600));
-        *q++ = ':';
-        *q++ = (char)('0' + (play_s / 600) % 6);
-        *q++ = (char)('0' + (play_s / 60) % 10);
-        *q++ = ':';
-        *q++ = (char)('0' + (play_s % 60) / 10);
-        *q++ = (char)('0' + play_s % 10);
-        *q = 0;
-        int lx0 = g_ui.lb[0], lx1 = g_ui.lb[2], ly = g_ui.lb[1] + UI_PAD + UI_LINE_ABOVE;
-        g_ui.drawing = dl;
-        if (db)
-            ui_text(db, lx0 + UI_PAD, ly, "Leaderboard", white);
-        ly += UI_LH;
-        g_ui.ytime = ly;
-        if (db) {
-            ui_text(db, lx0 + UI_PAD, ly, "You", white);
-            ui_text(db, lx1 - UI_PAD - ui_text_width(t), ly, t, white);
-        }
-        ly += UI_LH;
-        if (db)
-            ui_text(db, lx0 + UI_PAD, ly, "Multiplayer scores soon", grey);
-        g_ui.rect[4] = 0.5f * (float)(g_ui.lb[0] + g_ui.lb[2]);
-        g_ui.rect[5] = 0.5f * (float)(g_ui.lb[1] + g_ui.lb[3]);
-        g_ui.rect[6] = 0.5f * (float)(g_ui.lb[2] - g_ui.lb[0]);
-        g_ui.rect[7] = 0.5f * (float)(g_ui.lb[3] - g_ui.lb[1]);
-    } else {
-        for (int i = 4; i < 8; i++)
-            g_ui.rect[i] = -1e6f;
-    }
     g_ui.drawing = 0;
     g_ui.nclip = 0;
     g_ui.st[nb].valid = 1;
     g_ui.st[nb].controls = g_ui.controls;
-    g_ui.st[nb].leaderboard = lbv;
     g_ui.st[nb].cam = cam_pct;
     g_ui.st[nb].day = day_mult;
     g_ui.st[nb].frozen = day_frozen;
-    g_ui.st[nb].play = play;
     g_ui.cur = nb;
 }
 
-/* UI pass table (ps_ui) dwords 28..47: rects, the current buffer's T# (RGBA8 UNORM, linear) and a
-   point S#. */
+/* UI pass table (ps_ui): dwords 28..31 the panel's rect, 36..47 the current buffer's T# (RGBA8
+   UNORM, linear) and a point S#. */
 static void ui_write_table(uint32_t* blk) {
     float* r = (float*)(blk + 28);
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 4; i++)
         r[i] = g_ui.ok ? g_ui.rect[i] : -1e6f;
     if (g_ui.ok) {
         build_tsharp(blk + 36, g_ui.buf[g_ui.cur], UI_W, UI_H);

@@ -4,7 +4,8 @@
 ; phase, 56 light-elevation slices of 64 x 64 stacked in three RGBA16F atlases; per light two
 ; slices blended, the phases applied per pixel (sharp Mie aureole). The sun, the moon (and the
 ; stars, ps_stars) lie beyond the atmosphere: they are ADDED to the in-scattered sky light.
-; desc[164..203] (atmo_sky_consts): F, R/fov, U/fov | sun L, E | shx, shz, row0, row1 | f |
+; desc[164..203] (atmo_sky_consts): F, tilt0 | R tan, tilt x | U tan, tilt z | sun L, E | shx, shz,
+; row0, row1 | f |
 ;   moon L, E | mhx, mhz, row0, row1 | f, sun in the moon frame (x, y, z) | limb alpha RGB
 ; desc[204] / [212] / [220] atlas T#s, [228] their S#, [232] moon albedo T#, [240] its S#.
 s_mov_b32 m0, s2
@@ -45,21 +46,35 @@ v_rsq_f32 v7, v7
 v_mul_f32 v4, v4, v7
 v_mul_f32 v5, v5, v7
 v_mul_f32 v6, v6, v7
-; table row: clamp((0.5 + 0.5 sign(Vy) sqrt|Vy|) x 64, 0.5, 63.5); 1 / |V horizontal|
-v_and_b32 v8, 0x7fffffff, v5
+; 1 / |V horizontal|; the view's height above the camera's dipped horizon (the curved floor seen
+; from h above it at (cx, cz)): tan(dip) = d[3] + (d[7] Vx + d[11] Vz) / |Vh| (sqrt(2h/R), cx/R, cz/R),
+; y' = Vy cos(dip) + |Vh| sin(dip) - zero tilt: y' = Vy
+v_mul_f32 v12, v4, v4
+v_mac_f32 v12, v6, v6
+v_max_f32 v12, 0x2b8cbccc, v12
+v_rsq_f32 v10, v12
+v_mul_f32 v12, v12, v10
+v_mul_f32 v8, s27, v4
+v_mac_f32 v8, s31, v6
+v_mul_f32 v8, v8, v10
+v_add_f32 v8, s23, v8
+v_mul_f32 v9, v8, v8
+v_add_f32 v9, 1.0, v9
+v_rsq_f32 v9, v9
+v_mul_f32 v8, v8, v9
+v_mul_f32 v12, v12, v8
+v_mac_f32 v12, v5, v9
+; table row: clamp((0.5 + 0.5 sign(y') sqrt|y'|) x 64, 0.5, 63.5)
+v_and_b32 v8, 0x7fffffff, v12
 v_sqrt_f32 v8, v8
 v_mul_f32 v8, 0.5, v8
 v_add_f32 v9, 0.5, v8
-v_sub_f32 v10, 0.5, v8
-v_cmp_le_f32 vcc, 0, v5
-v_cndmask_b32 v9, v10, v9, vcc
+v_sub_f32 v13, 0.5, v8
+v_cmp_le_f32 vcc, 0, v12
+v_cndmask_b32 v9, v13, v9, vcc
 v_mul_f32 v9, 0x42800000, v9
 v_max_f32 v9, 0.5, v9
 v_min_f32 v9, 0x427e0000, v9
-v_mul_f32 v10, v4, v4
-v_mac_f32 v10, v6, v6
-v_max_f32 v10, 0x2b8cbccc, v10
-v_rsq_f32 v10, v10
 v_mov_b32 v41, 0
 v_mov_b32 v42, 0
 v_mov_b32 v43, 0

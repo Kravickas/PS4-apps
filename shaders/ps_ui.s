@@ -1,11 +1,11 @@
-; UI pass: the finished frame (linear, clamped; final pass) + frosted glass under the panels (the frame
+; UI pass: the finished frame (linear, clamped; final pass) + frosted glass under the panel (the frame
 ; blurred: 240 x 135, binomial H V H V) + the UI texture, sRGB-encoded and dithered, to the display.
 s_load_dwordx8 s[4:11], s[0:1], 0x0
 s_load_dwordx4 s[12:15], s[0:1], 0x8
 s_load_dwordx4 s[16:19], s[0:1], 0xc
 s_load_dwordx8 s[20:27], s[0:1], 0x10
 s_load_dwordx4 s[28:31], s[0:1], 0x18
-s_load_dwordx8 s[32:39], s[0:1], 0x1c
+s_load_dwordx4 s[32:35], s[0:1], 0x1c
 s_load_dwordx8 s[40:47], s[0:1], 0x24
 s_load_dwordx4 s[48:51], s[0:1], 0x2c
 s_waitcnt lgkmcnt(0)
@@ -19,7 +19,7 @@ v_mul_f32 v20, 0x4253ee82, v20
 v_fract_f32 v20, v20
 v_subrev_f32 v20, 0.5, v20
 v_mul_f32 v20, 0x3b808081, v20
-; >>> panels: coverage m (v37) and edge e (v38) of two rounded rects (dwords 28..35: centre x, y, half w, h in px; hidden = half -1e6), radius 16
+; >>> panel: coverage m (v37) and edge e (v38) of the rounded rect (dwords 28..31: centre x, y, half w, h in px; hidden = half -1e6), radius 16
 v_mov_b32 v37, 0
 v_mov_b32 v38, 0
 v_subrev_f32 v39, s32, v2
@@ -30,29 +30,6 @@ v_max_f32 v39, 0, v39
 v_subrev_f32 v40, s33, v3
 v_max_f32 v40, v40, -v40
 v_subrev_f32 v40, s35, v40
-v_add_f32 v40, 0x41800000, v40
-v_max_f32 v40, 0, v40
-v_mul_f32 v39, v39, v39
-v_mac_f32 v39, v40, v40
-v_sqrt_f32 v39, v39
-v_add_f32 v39, 0xc1800000, v39
-v_sub_f32 v40, 0.5, v39
-v_max_f32 v40, 0, v40
-v_min_f32 v40, 1.0, v40
-v_max_f32 v37, v37, v40
-v_add_f32 v40, 0x3f400000, v39
-v_max_f32 v40, v40, -v40
-v_sub_f32 v40, 1.0, v40
-v_max_f32 v40, 0, v40
-v_max_f32 v38, v38, v40
-v_subrev_f32 v39, s36, v2
-v_max_f32 v39, v39, -v39
-v_subrev_f32 v39, s38, v39
-v_add_f32 v39, 0x41800000, v39
-v_max_f32 v39, 0, v39
-v_subrev_f32 v40, s37, v3
-v_max_f32 v40, v40, -v40
-v_subrev_f32 v40, s39, v40
 v_add_f32 v40, 0x41800000, v40
 v_max_f32 v40, 0, v40
 v_mul_f32 v39, v39, v39
@@ -92,7 +69,7 @@ v_sub_f32 v42, v42, v10
 v_mac_f32 v10, v42, v37
 v_mac_f32 v10, 0x3da3d70a, v38
 ui_frost_done:
-; <<< panels
+; <<< panel
 v_max_f32 v8, 0, v8
 v_min_f32 v8, 1.0, v8
 v_max_f32 v9, 0, v9

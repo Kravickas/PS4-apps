@@ -1,3 +1,68 @@
+ARENA, SMALL PLANET, SKY-COLOURED AERIAL PERSPECTIVE  (build=arena-sky)
+
+What was wrong: (1) the sun looked huge at floor level and normal high up - the
+height-fog layer (Cornette-Shanks g 0.8 haze, all in the lowest ~30 units)
+scattered sunlight forward into a white glow out to 7-8.5 deg from the sun
+(disc 1.56 deg) through its whole column at floor level, and there is no such
+column 100 units up; (2) going up, the horizon stayed at eye level while the
+floor's edge showed below it, with fog colour filling the gap (a band).
+Now, in the way shader packs do it but from the same physics as the sky:
+- Arena: the camera stays within +-300 in X and Z (ARENA_HALF) and 0.1 ..
+  100 units above the floor under it (ARENA_EYE_MIN, ARENA_HEIGHT). Floor
+  +-2000 (FLOOR_HALF, grid 128, 1000 texture tiles = one per 4 units as
+  before), CAM_FAR 2500.
+- Small planet: the floor's curvature FLOOR_R 14000. From h above it the
+  horizon is sqrt(2 R h) away (171 units at the start height, 1673 from 100
+  up) and dips by atan(sqrt(2h/R)) - 0.7 deg at the start, 6.8 deg from 100 up.
+  sqrt(2 x 14000 x 100) = 1673 <= 2000 - 300: the floor always reaches the
+  horizon, its edge is never visible.
+- The sky follows the dipped horizon (ps_dark CAFE00E7): the table row uses the
+  view's height above the real horizon in its azimuth, y' = Vy cos(dip) + |Vh|
+  sin(dip), tan(dip) = sqrt(2h/R) + (cam x Vx + cam z Vz) / (R |Vh|) (the
+  second term: the floor seen from off-centre is tilted by up to 1.2 deg); each
+  light's slice uses its height above that horizon. From up high the sky, the
+  sun disc and the sunset are visible below eye level, down to the horizon.
+- Aerial perspective replaces the height fog (ps_resolve CAFE0402): the scene is
+  seen through the sky's own atmosphere - Rayleigh (RGB) and Mie extinction of
+  atmosphere.c, their scale heights 8 km / 1.2 km, AERIAL_M_PER_UNIT 114.16
+  metres per unit (keeps the previous fog's strength in green; blue 2.3x, red
+  0.57x: distance turns blue). Exact density integral along each ray from the
+  camera's to the point's height above the curved floor. The in-scattered
+  colour is the sky's own colour at the horizon in that direction (the sun's and
+  moon's Rayleigh / Mie / multiple terms from ps_dark's table rows 31/32, a
+  64 x 6 RGBA16F table written per frame by atmo_horizon_table, the phases
+  per pixel at the true horizon direction): far floor fades into exactly the
+  sky above it, and the only glow around the sun is the sky's own aureole - a
+  normal-sized sun at every height. Sky and stars are not fogged (the sky is
+  already the atmosphere). The flare's separate fog dimming is gone.
+Verified: ps_dark with zero tilt bitwise identical to the previous one (6600
+px); tilted, the visible sky vs float64 max rel 4.0e-5 (16324 px, 4 views,
+heights 1-100, sun 2-4 deg below eye level); ps_resolve vs float64 max rel
+8.1e-5 in 3 cameras (incl. 102 up at the arena corner), no non-finite values;
+the fog colour at the horizon vs the sky drawn there max rel 3.1e-4 (half
+floats); the arena clamp and the horizon (main.c's own cam_horizon, clamp and
+floor ray-cast): 7.2 million azimuth tests over 20000 random cameras, a ray
+0.02 deg below the dipped horizon always hits the floor inside its bounds, one
+0.02 deg above never does. atmosphere.bin unchanged (byte-identical regen).
+On PS4, check: the resolve still reads the depth as a 4-sample texture (first
+hardware run of that).
+
+============================================================
+LEADERBOARD REMOVED  (build=no-leaderboard)
+============================================================
+The leaderboard panel (CIRCLE: this session's play time, "Multiplayer scores
+soon") and everything behind it are gone: its layout and drawing, rect, dirty
+box, redraw band and content-key fields in src/ui.h, the play-time counter and
+the CIRCLE toggle in main.c, the controls-list row, and ps_ui's second frosted
+rect (CAFE0301: one rounded rect, dwords 28..31). CIRCLE is unbound. There was
+no network / NP code. Verified: ps_ui old (second rect hidden) vs new bitwise
+identical on 160000 pixels; the UI buffers, rects and table words byte-identical
+to the old code (minus the CIRCLE row) over 7200 frames / 4898 states.
+Controls now: Cross freeze/unfreeze cube | Square freeze/unfreeze day and night
+| Triangle reset camera | L1 / R1 day slower / faster | L2 / R2 camera down / up
+| D-pad up / down camera speed | D-pad left / right move the sun | OPTIONS
+show/hide controls | sticks move / look.
+
 ============================================================
 SKY DIRECTION FIX  (build=sky-dir-fix)
 ============================================================

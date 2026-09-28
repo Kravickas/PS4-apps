@@ -16,6 +16,8 @@
 static const double kRay[3] = {1.24062e-6 / (0.68 * 0.68 * 0.68 * 0.68),
                                1.24062e-6 / (0.55 * 0.55 * 0.55 * 0.55),
                                1.24062e-6 / (0.44 * 0.44 * 0.44 * 0.44)};
+#define RAYLEIGH_H 8000.0 /* density scale heights (m) */
+#define MIE_H 1200.0
 #define MIE_EXT (5.328e-3 / 1200.0)
 #define MIE_SCA (0.9 * MIE_EXT)
 /* ozone: kMaxOzoneNumberDensity x kOzoneCrossSection at 680 / 550 / 440 nm (filled in by
@@ -94,10 +96,10 @@ static int hits_ground(double r, double mu) {
     return mu < 0.0 && r * r * (mu * mu - 1.0) + RB * RB >= 0.0;
 }
 static double dens_ray(double h) {
-    return clampd(a_exp(-h / 8000.0), 0.0, 1.0);
+    return clampd(a_exp(-h / RAYLEIGH_H), 0.0, 1.0);
 }
 static double dens_mie(double h) {
-    return clampd(a_exp(-h / 1200.0), 0.0, 1.0);
+    return clampd(a_exp(-h / MIE_H), 0.0, 1.0);
 }
 static double dens_ozone(double h) {
     return h < 25000.0 ? clampd(h / 15000.0 - 2.0 / 3.0, 0.0, 1.0)
@@ -361,6 +363,22 @@ void atmo_sky_for(const Atmo* a, float elev_deg, float* out) {
 }
 
 /* ---------------- run time ---------------- */
+/* The table's horizon row per image, slice and column: rows 31 and 32 of each slice blended 1:1 -
+   ps_dark's bilinear fetch at row coordinate 32.0 (y' = 0). Filled once when the asset is bound. */
+static float g_hz[3][ATMO_SLICES][ATMO_SKY_W][3];
+static float half_to_float(uint16_t h);
+static void horizon_cache(const AtmoAsset* s) {
+    const int W = ATMO_SKY_W;
+    for (int t = 0; t < 3; t++)
+        for (int k = 0; k < ATMO_SLICES; k++)
+            for (int i = 0; i < W; i++)
+                for (int c = 0; c < 3; c++) {
+                    const uint16_t* p = s->img[t];
+                    float a = half_to_float(p[((long)(k * ATMO_SKY_H + 31) * W + i) * 4 + c]);
+                    float b = half_to_float(p[((long)(k * ATMO_SKY_H + 32) * W + i) * 4 + c]);
+                    g_hz[t][k][i][c] = a * 0.5f + b * 0.5f;
+                }
+}
 int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas, const float* means) {
     const uint32_t* h = (const uint32_t*)head;
     if (h[0] != 0x324D5441u || h[1] != ATMO_T_W || h[2] != ATMO_T_H || h[3] != ATMO_SKY_W ||
@@ -374,6 +392,7 @@ int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas, const flo
     s->t.sky_samples = 0;
     for (int t = 0; t < 3; t++)
         s->img[t] = (const uint16_t*)atlas + (long)t * ATMO_SKY_W * ATMO_SLICES * ATMO_SKY_H * 4;
+    horizon_cache(s); /* after img[] */
     return 0;
 }
 void atmo_light_ground(const AtmoAsset* s, float mu, float out[3]) {
@@ -479,9 +498,17 @@ void atmo_sky_radiance(const AtmoAsset* s, const float L[3], const float V[3], f
             out[c] += (t0[c] + (t1[c] - t0[c]) * f) * w;
     }
 }
+float atmo_tilted_y(const float L[3], const float tilt[3]) {
+    float hl = (float)a_sqrt((double)L[0] * L[0] + (double)L[2] * L[2]);
+    float hx = hl > 1e-6f ? L[0] / hl : 1.0f, hz = hl > 1e-6f ? L[2] / hl : 0.0f;
+    float t = tilt[0] + tilt[1] * hx + tilt[2] * hz;
+    float c = (float)(1.0 / a_sqrt(1.0 + (double)t * t)), sn = t * c;
+    return L[1] * c + hl * sn;
+}
 void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float R[3],
-                     const float U[3], float tan_half_fov, const float sun[3], float sun_scale,
-                     const float moon[3], float moon_sky_scale, const float moon_view[3]) {
+                     const float U[3], float tan_half_fov, const float tilt[3], const float sun[3],
+                     float sun_scale, const float moon[3], float moon_sky_scale,
+                     const float moon_view[3]) {
     (void)s;
     for (int i = 0; i < 40; i++)
         d[i] = 0.0f;
@@ -493,6 +520,9 @@ void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float
         d[24 + c] = moon[c];
         d[33 + c] = moon_view[c];
     }
+    d[3] = tilt[0];
+    d[7] = tilt[1];
+    d[11] = tilt[2];
     d[15] = sun_scale;
     d[27] = moon_sky_scale;
     const float* L[2] = {sun, moon};
@@ -501,7 +531,7 @@ void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float
         float* o = d + (k ? 28 : 16);
         o[0] = hl > 1e-6f ? L[k][0] / hl : 1.0f;
         o[1] = hl > 1e-6f ? L[k][2] / hl : 0.0f;
-        slice_of(L[k][1], &o[2], &o[3], k ? &d[32] : &d[20]);
+        slice_of(atmo_tilted_y(L[k], tilt), &o[2], &o[3], k ? &d[32] : &d[20]);
     }
     d[36] = ATMO_LIMB_R;
     d[37] = ATMO_LIMB_G;
@@ -520,4 +550,59 @@ void atmo_sky_means(const AtmoAsset* s, float y, float up[3], float cosm[3]) {
 }
 float atmo_expf(float x) {
     return (float)a_exp(x);
+}
+
+/* float -> half, round to nearest even (as the GPU converts; tools/make_atmosphere.c) */
+static uint16_t to_half(float f) {
+    union {
+        float f;
+        unsigned int u;
+    } v = {f};
+    unsigned int x = v.u, sg = (x >> 16) & 0x8000u, e = (x >> 23) & 0xFFu, m = x & 0x7FFFFFu;
+    if (e == 0xFF)
+        return (uint16_t)(sg | 0x7C00u | (m ? 0x200u : 0u));
+    int ee = (int)e - 127 + 15;
+    if (ee >= 31)
+        return (uint16_t)(sg | 0x7C00u);
+    if (ee <= 0) {
+        if (ee < -10)
+            return (uint16_t)sg;
+        m |= 0x800000u;
+        unsigned int sh = (unsigned int)(14 - ee), r = m >> sh, rem = m & ((1u << sh) - 1u),
+                     half = 1u << (sh - 1);
+        if (rem > half || (rem == half && (r & 1u)))
+            r++;
+        return (uint16_t)(sg | r);
+    }
+    unsigned int r = ((unsigned int)ee << 10) | (m >> 13), rem = m & 0x1FFFu;
+    if (rem > 0x1000u || (rem == 0x1000u && (r & 1u)))
+        r++;
+    return (uint16_t)(sg | r);
+}
+void atmo_horizon_table(const AtmoAsset* s, float sun_y, float sun_scale, float moon_y,
+                        float moon_scale, uint16_t* out) {
+    (void)s;
+    const float ys[2] = {sun_y, moon_y}, sc[2] = {sun_scale, moon_scale};
+    for (int k = 0; k < 2; k++) {
+        float r0, r1, f;
+        slice_of(ys[k], &r0, &r1, &f);
+        int k0 = (int)r0 / ATMO_SKY_H, k1 = (int)r1 / ATMO_SKY_H;
+        for (int t = 0; t < 3; t++)
+            for (int i = 0; i < ATMO_SKY_W; i++) {
+                uint16_t* o = out + ((long)(k * 3 + t) * ATMO_SKY_W + i) * 4;
+                for (int c = 0; c < 3; c++) {
+                    float a = g_hz[t][k0][i][c], b = g_hz[t][k1][i][c];
+                    o[c] = to_half((a + (b - a) * f) * sc[k]);
+                }
+                o[3] = 0;
+            }
+    }
+}
+
+void atmo_aerial_coeffs(float m_per_unit, float beta_r[3], float* beta_m, float* h_r, float* h_m) {
+    for (int c = 0; c < 3; c++)
+        beta_r[c] = (float)(kRay[c] * m_per_unit);
+    *beta_m = (float)(MIE_EXT * m_per_unit);
+    *h_r = (float)(RAYLEIGH_H / m_per_unit);
+    *h_m = (float)(MIE_H / m_per_unit);
 }
