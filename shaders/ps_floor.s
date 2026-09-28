@@ -85,6 +85,14 @@ v_mul_f32 v7, s46, v37
 v_sub_f32 v7, 1.0, v7
 v_max_f32 v7, 0, v7
 v_mul_f32 v7, s40, v7
+; POM LOD fade (Tatarchuk, DX SDK ParallaxOcclusionMapping): height-map mip at the base UV (isotropic sampler)
+image_get_lod v8, v[10:11], s[24:31], s[32:35] dmask:0x1
+s_waitcnt vmcnt(0)
+v_max_f32 v8, 0, v8
+v_sub_f32 v8, 0x40400000, v8
+v_max_f32 v8, 0, v8
+v_min_f32 v8, 1.0, v8
+v_mul_f32 v7, v7, v8
 v_max_f32 v8, 0x3dcccccd, v6
 v_rcp_f32 v8, v8
 v_mul_f32 v8, v8, v7
@@ -477,11 +485,47 @@ v_mul_f32 v70, 0.5, v65
 v_add_f32 v70, 0.5, v70
 v_max_legacy_f32 v71, 0, v66
 v_min_legacy_f32 v71, 1.0, v71
-image_sample v72, v[69:70], s[56:63], s[64:67] dmask:0x1
+; bilinear PCF: the 2 x 2 texels around the sample point (point sampler at texel centres, 4096^2 map),
+; each compared with the reference (lit unless stored < ref), blended by the fractional position
+v_mul_f32 v84, 0x45800000, v69
+v_add_f32 v84, -0.5, v84
+v_floor_f32 v85, v84
+v_sub_f32 v84, v84, v85
+v_mul_f32 v86, 0x45800000, v70
+v_add_f32 v86, -0.5, v86
+v_floor_f32 v87, v86
+v_sub_f32 v86, v86, v87
+v_add_f32 v88, 0.5, v85
+v_mul_f32 v88, 0x39800000, v88
+v_add_f32 v89, 0.5, v87
+v_mul_f32 v89, 0x39800000, v89
+v_add_f32 v90, 0x39800000, v88
+v_mov_b32 v91, v89
+v_mov_b32 v92, v88
+v_add_f32 v93, 0x39800000, v89
+v_mov_b32 v94, v90
+v_mov_b32 v95, v93
+image_sample_lz v96, v[88:89], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v97, v[90:91], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v98, v[92:93], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v99, v[94:95], s[56:63], s[64:67] dmask:0x1
 s_waitcnt vmcnt(0)
-v_cmp_lt_f32 vcc, v72, v71
-v_mov_b32 v73, 0
-v_cndmask_b32 v72, 1.0, v73, vcc
+v_mov_b32 v85, 0
+v_cmp_lt_f32 vcc, v96, v71
+v_cndmask_b32 v96, 1.0, v85, vcc
+v_cmp_lt_f32 vcc, v97, v71
+v_cndmask_b32 v97, 1.0, v85, vcc
+v_cmp_lt_f32 vcc, v98, v71
+v_cndmask_b32 v98, 1.0, v85, vcc
+v_cmp_lt_f32 vcc, v99, v71
+v_cndmask_b32 v99, 1.0, v85, vcc
+v_sub_f32 v97, v97, v96
+v_mac_f32 v96, v97, v84
+v_sub_f32 v99, v99, v98
+v_mac_f32 v98, v99, v84
+v_sub_f32 v98, v98, v96
+v_mac_f32 v96, v98, v86
+v_mov_b32 v72, v96
 v_cmp_lt_f32 vcc, 0, v67
 v_cndmask_b32 v72, 1.0, v72, vcc
 v_mul_f32 v73, 0x3f4848e6, v72

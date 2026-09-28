@@ -139,7 +139,8 @@
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
-#define BLOOM_INTENSITY 0.25f
+/* Was 0.25: same glow shape at 0.4x the strength (sun: +0.20 at 60 px, +0.05 at 100 px). */
+#define BLOOM_INTENSITY 0.1f
 #define EXPOSURE 1.0f
 
 /* Floor surface (ps_floor): parallax occlusion mapping from the height map
@@ -168,8 +169,11 @@
 #define DAY_REPEAT_DELAY 0.40f /* L1 / R1 held: first repeat after this (s) */
 #define DAY_REPEAT_EVERY 0.15f /* then one step every this (s) */
 /* Day and night multiples for L1 / R1 (x1 = one day in ~39 s). */
-static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
-#define DAY_MULT_COUNT ((int)(sizeof(k_day_mults) / sizeof(k_day_mults[0])))
+/* Day and night speed steps in tenths (x0.1 .. x0.9, x1, x2, x4 .. x20); starts at x1. */
+static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
+                                   20, 40, 60, 80, 100, 120, 140, 160, 180, 200};
+#define DAY_MULT_COUNT ((int)(sizeof(k_day_tenths) / sizeof(k_day_tenths[0])))
+#define DAY_MULT_ONE 9        /* index of x1 */
 #define FLARE_GHOSTS 1.0f     /* soft ghosts (the first flare's six) */
 #define FLARE_RAYS 1.0f       /* uneven rays (glare texture, tools/make_glare.py) */
 #define FLARE_GLOW 1.4f       /* glow around the sun: FLARE_GLOW / (1 + (rho / 0.08)^2) */
@@ -178,7 +182,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "msaa4x"
+#define BUILD_TAG "bloom-0.1"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -1225,7 +1229,8 @@ static void build_ssharp_aniso(uint32_t *s) {
        frustum UVs return 1.0 in R. Then the manual compare (stored < z_ref)
        with z_ref ∈ [0,1] is FALSE → fragment is lit. Out-of-frustum floor
        areas correctly stay lit.
-     - xy_mag/min_filter = 1 (Bilinear): softens the sampled edge a bit
+     - xy_mag/min_filter = 0 (Point): the shaders read the 4 texel centres and do
+       bilinear PCF themselves (see build_ssharp_pcf)
      - max_lod = 15.0 (0xF00 in u4.8): allow any mip level (shadow map
        has only level 0 anyway).
 
@@ -1238,8 +1243,11 @@ static void build_ssharp_pcf(uint32_t *s) {
     s[0] = 6u | (6u << 3) | (6u << 6) | (3u << 12);
     /* raw0 high (dword1): max_lod=0xF00 (15.0) at bits [12..23] */
     s[1] = (0xF00u << 12);
-    /* raw1 low (dword2): xy_mag=Bilinear(1) at [20..21], xy_min=Bilinear(1) at [22..23] */
-    s[2] = (1u << 20) | (1u << 22) | (1u << 29) | (1u << 30); /* + DISABLE_LSB_CEIL, FILTER_PREC_FIX (radeonsi, GFX6/7) */
+    /* raw1 low (dword2): xy_mag / xy_min = Point (0): ps_floor / ps_model do bilinear PCF
+       themselves (4 texel-centre reads, each compared, then blended); filtering the stored depths
+       first would only move the hard edge. + DISABLE_LSB_CEIL, FILTER_PREC_FIX (radeonsi, GFX6/7)
+     */
+    s[2] = (1u << 29) | (1u << 30);
     /* raw1 high (dword3): border_color_type = White(2) at bits [30..31] */
     s[3] = (2u << 30);
 }
@@ -1958,10 +1966,10 @@ static uint32_t build_dcb(struct PM4Builder *b,
     // Floor uses its own V# (floor_v) pointing at vb+FLOOR_MVP_OFF where MVP is mirrored
     // and floor verts are at V#+80.
     if (ps_floor && floor_v) {
-        /* ps_floor (parallax + fog): v0-v83, s0-s87 + VCC -> 84 VGPRs, 96 SGPRs.
+        /* ps_floor (parallax + fog + PCF): v0-v99, s0-s87 + VCC -> 100 VGPRs, 96 SGPRs.
            It reads POS_Y (v2) for the fog colour: PERSP_CENTER | POS_Y_FLOAT. */
         uint64_t a=(uint64_t)(uintptr_t)ps_floor;
-        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (11u << 6) | 20u, (2u << 1)};
+        uint32_t r[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), (11u << 6) | 24u, (2u << 1)};
         pm4_set_sh_regs(b,SH_PS_PGM_LO,r,4);
         uint32_t ud[2]={(uint32_t)((uint64_t)(uintptr_t)desc),
                         (uint32_t)((uint64_t)(uintptr_t)desc>>32)};
@@ -2009,7 +2017,8 @@ static uint32_t build_dcb(struct PM4Builder *b,
           my_memcpy(ud + 4, g_model.m, 48);
           pm4_set_sh_regs(b, SH_VS_USER_DATA_0, ud, 16);
           a = (uint64_t)(uintptr_t)g_model.ps;
-          uint32_t p[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x318u, (2u << 1)};
+          uint32_t p[4] = {(uint32_t)(a >> 8), (uint32_t)(a >> 40), 0x31Cu,
+                           (2u << 1)}; /* v0-v114, s0-s101 + VCC */
           pm4_set_sh_regs(b, SH_PS_PGM_LO, p, 4);
           pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 2u << 1); /* three params */
           pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0 + 2, 2);
@@ -3514,7 +3523,7 @@ int main(void) {
     float ground_y = -0.05f;   /* ground level */
     float eye_height = 0.15f;  /* camera height above ground */
     int day_frozen = 0;        /* Square */
-    int day_step = 0;          /* index into k_day_mults (L1 / R1) */
+    int day_step = DAY_MULT_ONE; /* index into k_day_tenths (L1 / R1) */
     float day_hold = 0.0f;     /* L1 / R1 auto-repeat timer */
     float play_time_s = 0.0f;  /* this session, for the leaderboard */
     int cube_rotation_enabled = 1;  // Start button toggles this (default: spinning)
@@ -3785,7 +3794,7 @@ int main(void) {
         /* Controls (the on-screen list, src/ui.h, shows the same):
            Cross     freeze / unfreeze the cube      Circle  show / hide the leaderboard
            Square    freeze / unfreeze day and night Triangle reset the camera
-           L1 / R1   day and night slower / faster (k_day_mults; held: repeats)
+           L1 / R1   day and night slower / faster (k_day_tenths; held: repeats)
            L2 / R2   camera down / up                 D-pad up / down: camera speed
            D-pad left / right: move the sun           OPTIONS: show / hide controls
            sticks: move / look. */
@@ -3871,7 +3880,8 @@ int main(void) {
         if (pad.buttons & PAD_RIGHT)
             sun_angle += 0.2592f * dt_sec;
         if (!day_frozen)
-            sun_angle += sun_speed * (float)k_day_mults[day_step] * 60.0f * dt_sec;
+            sun_angle +=
+                sun_speed * (float)k_day_tenths[day_step] * 6.0f * dt_sec; /* x tenths / 10 x 60 */
         play_time_s += dt_sec;
         /* Wrap every accumulator once per frame, after all increments. */
         sun_angle    = wrap_2pi(sun_angle);
@@ -4356,7 +4366,7 @@ int main(void) {
             ft[9] = 0.0f;
             ft[10] = 0.0f;
             ft[11] = 0.0f;
-            ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_mults[day_step],
+            ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
                       day_frozen, (unsigned long)play_time_s);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
         }

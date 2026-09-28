@@ -96,9 +96,17 @@ v_mac_f32 v5, v36, v33
 v_mul_f32 v6, v34, v24
 v_mac_f32 v6, v35, v25
 v_mac_f32 v6, v36, v26
-v_max_f32 v8, 0x3dcccccd, v6
-v_rcp_f32 v8, v8
-v_mul_f32 v8, s40, v8
+; POM LOD fade (Tatarchuk, DX SDK ParallaxOcclusionMapping): height-map mip at the base UV (isotropic sampler)
+image_get_lod v98, v[10:11], s[24:31], s[32:35] dmask:0x1
+s_waitcnt vmcnt(0)
+v_max_f32 v98, 0, v98
+v_sub_f32 v98, 0x40400000, v98
+v_max_f32 v98, 0, v98
+v_min_f32 v98, 1.0, v98
+v_mul_f32 v8, s40, v98
+v_max_f32 v3, 0x3dcccccd, v6
+v_rcp_f32 v3, v3
+v_mul_f32 v8, v8, v3
 v_mul_f32 v8, 0x3d800000, v8
 v_mul_f32 v40, v4, v8
 v_mul_f32 v41, v5, v8
@@ -553,6 +561,7 @@ v_max_f32 v66, v66, v97
 v_mul_f32 v66, 4.0, v66
 v_min_f32 v66, 1.0, v66
 v_mul_f32 v66, s43, v66
+v_mul_f32 v66, v66, v98
 v_sub_f32 v66, 1.0, v66
 v_mul_f32 v20, 2.0, v20
 v_add_f32 v20, -1.0, v20
@@ -620,11 +629,47 @@ v_add_f32 v82, 0.5, v82
 v_max_legacy_f32 v83, 0, v78
 v_min_legacy_f32 v83, 1.0, v83
 v_subrev_f32 v83, s47, v83
-image_sample v84, v[81:82], s[56:63], s[64:67] dmask:0x1
+; bilinear PCF: the 2 x 2 texels around the sample point (point sampler at texel centres, 4096^2 map),
+; each compared with the reference (lit unless stored < ref), blended by the fractional position
+v_mul_f32 v99, 0x45800000, v81
+v_add_f32 v99, -0.5, v99
+v_floor_f32 v100, v99
+v_sub_f32 v99, v99, v100
+v_mul_f32 v101, 0x45800000, v82
+v_add_f32 v101, -0.5, v101
+v_floor_f32 v102, v101
+v_sub_f32 v101, v101, v102
+v_add_f32 v103, 0.5, v100
+v_mul_f32 v103, 0x39800000, v103
+v_add_f32 v104, 0.5, v102
+v_mul_f32 v104, 0x39800000, v104
+v_add_f32 v105, 0x39800000, v103
+v_mov_b32 v106, v104
+v_mov_b32 v107, v103
+v_add_f32 v108, 0x39800000, v104
+v_mov_b32 v109, v105
+v_mov_b32 v110, v108
+image_sample_lz v111, v[103:104], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v112, v[105:106], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v113, v[107:108], s[56:63], s[64:67] dmask:0x1
+image_sample_lz v114, v[109:110], s[56:63], s[64:67] dmask:0x1
 s_waitcnt vmcnt(0) lgkmcnt(0)
-v_cmp_lt_f32 vcc, v84, v83
-v_mov_b32 v85, 0
-v_cndmask_b32 v84, 1.0, v85, vcc
+v_mov_b32 v100, 0
+v_cmp_lt_f32 vcc, v111, v83
+v_cndmask_b32 v111, 1.0, v100, vcc
+v_cmp_lt_f32 vcc, v112, v83
+v_cndmask_b32 v112, 1.0, v100, vcc
+v_cmp_lt_f32 vcc, v113, v83
+v_cndmask_b32 v113, 1.0, v100, vcc
+v_cmp_lt_f32 vcc, v114, v83
+v_cndmask_b32 v114, 1.0, v100, vcc
+v_sub_f32 v112, v112, v111
+v_mac_f32 v111, v112, v99
+v_sub_f32 v114, v114, v113
+v_mac_f32 v113, v114, v99
+v_sub_f32 v113, v113, v111
+v_mac_f32 v111, v113, v101
+v_mov_b32 v84, v111
 v_cmp_lt_f32 vcc, 0, v79
 v_cndmask_b32 v84, 1.0, v84, vcc
 v_mul_f32 v85, 0x3f4848e6, v84
@@ -672,20 +717,53 @@ v_mul_f32 v96, v34, v90
 v_mac_f32 v96, v35, v91
 v_mac_f32 v96, v36, v92
 v_max_f32 v96, 0, v96
+; geometric specular AA (Tokuyoshi & Kaplanyan, JCGT 10(2) 2021, Listing 5): alpha^2' =
+; saturate(alpha^2 + min(2 SIGMA2 (|dN/dx|^2 + |dN/dy|^2), KAPPA)), SIGMA2 = 0.15915494, KAPPA = 0.18;
+; coarse quad derivatives of N (v68..v70) by ds_swizzle (lane bit 0 = x, bit 1 = y); M0 = -1 for DS
+; on CI (LLVM ldsRequiresM0Init, < GFX9); the shader is in WQM here (helper lanes valid).
+s_mov_b32 m0, -1
+ds_swizzle_b32 v99, v68 offset:swizzle(QUAD_PERM,0,0,0,0)
+ds_swizzle_b32 v100, v68 offset:swizzle(QUAD_PERM,1,1,1,1)
+ds_swizzle_b32 v101, v68 offset:swizzle(QUAD_PERM,2,2,2,2)
+ds_swizzle_b32 v102, v69 offset:swizzle(QUAD_PERM,0,0,0,0)
+ds_swizzle_b32 v103, v69 offset:swizzle(QUAD_PERM,1,1,1,1)
+ds_swizzle_b32 v104, v69 offset:swizzle(QUAD_PERM,2,2,2,2)
+ds_swizzle_b32 v105, v70 offset:swizzle(QUAD_PERM,0,0,0,0)
+ds_swizzle_b32 v106, v70 offset:swizzle(QUAD_PERM,1,1,1,1)
+ds_swizzle_b32 v107, v70 offset:swizzle(QUAD_PERM,2,2,2,2)
+s_waitcnt lgkmcnt(0)
+v_sub_f32 v100, v100, v99
+v_sub_f32 v101, v101, v99
+v_sub_f32 v103, v103, v102
+v_sub_f32 v104, v104, v102
+v_sub_f32 v106, v106, v105
+v_sub_f32 v107, v107, v105
+v_mul_f32 v108, v100, v100
+v_mac_f32 v108, v101, v101
+v_mac_f32 v108, v103, v103
+v_mac_f32 v108, v104, v104
+v_mac_f32 v108, v106, v106
+v_mac_f32 v108, v107, v107
+v_mul_f32 v108, 0x3ea2f983, v108
+v_min_f32 v108, 0x3e3851ec, v108
+v_add_f32 v109, s88, v108
+v_min_f32 v109, 1.0, v109
+v_sqrt_f32 v110, v109
+v_mul_f32 v110, 0.5, v110
 v_mul_f32 v97, v93, v93
-v_mov_b32 v59, s88
+v_mov_b32 v59, v109
 v_add_f32 v59, -1.0, v59
 v_mul_f32 v97, v97, v59
 v_add_f32 v97, 1.0, v97
 v_mul_f32 v97, v97, v97
 v_rcp_f32 v97, v97
-v_mul_f32 v97, s88, v97
-v_mov_b32 v59, s89
+v_mul_f32 v97, v109, v97
+v_mov_b32 v59, v110
 v_sub_f32 v60, 1.0, v59
 v_mul_f32 v61, v94, v60
-v_add_f32 v61, s89, v61
+v_add_f32 v61, v110, v61
 v_mul_f32 v62, v95, v60
-v_add_f32 v62, s89, v62
+v_add_f32 v62, v110, v62
 v_mul_f32 v61, v61, v62
 v_rcp_f32 v61, v61
 v_mul_f32 v61, 0x3e800000, v61

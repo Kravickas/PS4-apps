@@ -204,8 +204,15 @@ static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mu
     xr = cx > xr ? cx : xr;
     y += UI_LH;
     ui_put(b, x, y, "Time of day speed", white);
-    v[0] = (char)UI_CHAR_TIMES;
-    ui_fmt_int(v + 1, day_mult);
+    v[0] = (char)UI_CHAR_TIMES; /* day_mult in tenths: x0.1 .. x0.9, then whole multiples */
+    {
+        int n = ui_fmt_int(v + 1, day_mult / 10) + 1;
+        if (day_mult % 10) {
+            v[n] = '.';
+            v[n + 1] = (char)('0' + day_mult % 10);
+            v[n + 2] = 0;
+        }
+    }
     cx = ui_put(b, x + value_dx, y, v, white);
     if (day_frozen)
         cx = ui_put(b, cx + 14, y, "(frozen)", grey);

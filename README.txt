@@ -1,4 +1,41 @@
 ============================================================
+BLOOM 0.1 + DAY SPEED IN TENTHS  (build=bloom-0.1)
+============================================================
+- BLOOM_INTENSITY 0.25 -> 0.1: the chain (6 levels 480x270 .. 15x9, summed
+  with equal weight) is unchanged, so the glow keeps its shape at 0.4x the
+  strength. Simulated exactly on the sun disc (4.0 HDR, radius 46.75 px, 0.5
+  sky): glow added at 60 / 100 / 150 / 200 px from the centre was 0.49 / 0.13 /
+  0.05 / 0.025, now 0.20 / 0.05 / 0.02 / 0.01; total glow 1.5x -> 0.6x the
+  disc's excess over the threshold.
+- Time of day speed: L1 / R1 steps x0.1 .. x0.9, x1, x2, x4 .. x20
+  (k_day_tenths, starts at x1); the panel shows x0.1 .. x0.9 with a decimal
+  point.
+
+============================================================
+SURFACE ANTI-ALIASING  (build=surface-aa)
+============================================================
+MSAA only smooths triangle edges; these three fix the aliasing computed inside
+surfaces (all verified in the emulator against the previous shaders):
+1. Parallax LOD fade (ps_floor CAFE0125, ps_model CAFE0138): Tatarchuk's POM
+   level of detail (DirectX SDK ParallaxOcclusionMapping sample). image_get_lod
+   gives the height map's mip level L at the base UV (isotropic sampler); the
+   parallax (and the cube's relief self-shadow) is scaled by
+   clamp(3 - max(L, 0), 0, 1): full up to mip 2, gone by mip 3. Removes the
+   far-floor streaks and the comb edges on the cube's sides at grazing angles.
+   Fade 1 = bit-identical to before; fade 0 = bit-identical to parallax off.
+2. Soft shadows: bilinear PCF in ps_floor and ps_model - the 2 x 2 shadow-map
+   texels around the sample point, read with a point sampler (desc[80] now
+   point) at their exact centres, each compared, blended by the fractional
+   position: a one-texel ramp instead of a hard step. Checked vs float64 PCF
+   (3.9e-8); a uniform shadow map gives bit-identical output.
+3. Geometric specular AA (ps_model): Tokuyoshi & Kaplanyan, JCGT 10(2) 2021,
+   Listing 5: alpha^2' = saturate(alpha^2 + min(2 SIGMA2 (|dN/dx|^2 +
+   |dN/dy|^2), KAPPA)), SIGMA2 = 0.15915494, KAPPA = 0.18, k' = sqrt(alpha^2')/2;
+   coarse quad derivatives via ds_swizzle_b32 (M0 = -1, as LLVM for DS ops
+   before GFX9). Checked vs the formula (1.9e-7); flat quads bit-identical.
+RSRC1: ps_floor 0x2D8 (100 VGPRs), ps_model 0x31C (116 VGPRs).
+
+============================================================
 4x MSAA  (build=msaa4x; MSAA_SAMPLES in main.c, 1 = off)
 ============================================================
 The scene renders into a 4-sample RGBA16F colour target (66 MB) and a 4-sample
