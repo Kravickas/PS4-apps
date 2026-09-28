@@ -9,6 +9,7 @@
 #include "ps_post_comp.h"
 #include "ps_post_down.h"
 #include "ps_post_final.h"
+#include "ps_ui.h"
 #include "ps_shader.h"
 #include "ps_shadow.h"
 #include "ps_shadow_clear.h"

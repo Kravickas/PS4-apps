@@ -1,4 +1,25 @@
 ============================================================
+FROSTED GLASS REDONE + CENTRED LEADERBOARD  (build=frost-glass)
+============================================================
+The glass blurred with 25 sparse taps (8 px apart): offset copies, a dotted
+grid, and the lens flare stayed sharp under it. Now the whole finished frame is
+frosted: ps_post_final (CAFE021B) writes the frame linear + clamped to an
+RGBA16F target; the frost chain (the bloom's ps_post_down / ps_post_blur,
+reusing the bloom buffers) downsamples it 1920 -> 480 -> 240 and blurs it
+binomial H V H V at 240 x 135 (sigma about 16 px at 1080p); the new UI pass
+ps_ui (CAFE0300) reads the frame, mixes in the frost under the rounded rects
+(glass = frost x 0.62 + tint, 1.5 px edge), sRGB-encodes, puts the UI texture on
+top and dithers, to the display. Checked in the emulator: final pass output
+bit-identical to the old post-clamp values (flare on / off); ps_ui with the
+panels hidden bit-identical to the old final pass; with panels vs float64
+within 1.9e-7.
+Panels: the left panel's rect is the bounding box of everything laid out (it
+cut "(frozen)" off with the controls closed). The leaderboard is centred and
+fixed: 10 % of the height above and below (y 108..972), left edge 20 px right
+of the opened controls panel (measured in its widest state), right edge
+mirrored (x 440..1480).
+
+============================================================
 CUBE EDGE LIGHT FIX  (build=light-fix)
 ============================================================
 The rounded edges were whiter than physics allows (ps_model satin, CAFE0135):

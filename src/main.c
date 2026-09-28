@@ -178,7 +178,7 @@ static const int k_day_mults[] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20};
 #define FLARE_EDGE 0.12f      /* lens flare fades out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "light-fix"
+#define BUILD_TAG "frost-glass"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -407,6 +407,13 @@ static const uint16_t g_bloom_w[BLOOM_LEVELS] = {480, 240, 120, 60, 30, 15};
 static const uint16_t g_bloom_h[BLOOM_LEVELS] = {270, 135, 68, 34, 17, 9};
 static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64, 64, 64};
 #define POST_PASSES (BLOOM_LEVELS * 4) /* down, blur H, blur V, up-add (last: composite) */
+/* Post table (32-dword blocks): the bloom chain + final pass (0..POST_PASSES-1), the final
+   pass's flare dwords (next block), then the frost chain (down 1920 -> 480, down 480 -> 240,
+   blur H V H V at 240 x 135) and the UI pass (2 blocks). */
+#define FROST_BLOCK (POST_PASSES + 2)
+#define FROST_PASSES 6
+#define UI_BLOCK (FROST_BLOCK + FROST_PASSES)
+#define POST_TABLE_BLOCKS (UI_BLOCK + 2)
 static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
@@ -421,6 +428,8 @@ static void* g_ps_post_down_gpu = 0;
 static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
+static void* g_ps_ui_gpu = 0;
+static void* g_frame = 0; /* the finished frame, linear RGBA16F (final pass -> frost chain, ps_ui) */
 #define GPU_TS(k) do { if (g_gpu_ts) pm4_gpu_timestamp(b, &g_gpu_ts[(k)]); } while (0)
 
 // === Helpers ===
@@ -1464,7 +1473,7 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
 #include "ui.h"
 
 static void build_post_tables(uint32_t* tab) {
-    my_memset(tab, 0, (POST_PASSES + 2) * 32 * 4); /* + final pass dwords 32..95 (flare, UI) */
+    my_memset(tab, 0, POST_TABLE_BLOCKS * 32 * 4);
     uint32_t* t = tab;
     for (int i = 0; i < BLOOM_LEVELS; i++, t += 32) {
         float w = g_bloom_w[i], h = g_bloom_h[i];
@@ -1505,6 +1514,40 @@ static void build_post_tables(uint32_t* tab) {
     post_consts(t, 1.0f / DISPLAY_W, 1.0f / DISPLAY_H, BLOOM_INTENSITY, EXPOSURE);
     build_tsharp_f16(t + 16, g_bloom_b[0], g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
     build_ssharp_clamp(t + 24, 1);
+    /* Frost chain (ps_post_down / ps_post_blur as in the bloom): the finished frame downsampled
+       1920 -> 480 -> 240 (threshold 0) and blurred H V H V at 240 x 135 into g_bloom_a[1]; the
+       bloom buffers are free once the final pass has read them. */
+    uint32_t* f = tab + FROST_BLOCK * 32;
+    build_tsharp_f16(f, g_frame, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+    build_ssharp_clamp(f + 8, 1);
+    post_consts(f, 1.0f / g_bloom_w[0], 1.0f / g_bloom_h[0], 1.0f / DISPLAY_W, 1.0f / DISPLAY_H);
+    ((float*)f)[28] = 0.0f;
+    f += 32;
+    build_tsharp_f16(f, g_bloom_a[0], g_bloom_w[0], g_bloom_h[0], g_bloom_pitch[0]);
+    build_ssharp_clamp(f + 8, 1);
+    post_consts(f, 1.0f / g_bloom_w[1], 1.0f / g_bloom_h[1], 1.0f / g_bloom_w[0],
+                1.0f / g_bloom_h[0]);
+    ((float*)f)[28] = 0.0f;
+    f += 32;
+    for (int k = 0; k < 2; k++) {
+        float w = g_bloom_w[1], h = g_bloom_h[1];
+        build_tsharp_f16(f, g_bloom_a[1], w, h, g_bloom_pitch[1]);
+        build_ssharp_clamp(f + 8, 1);
+        post_consts(f, 1.0f / w, 1.0f / h, 1.0f / w, 0.0f);
+        f += 32;
+        build_tsharp_f16(f, g_bloom_b[1], w, h, g_bloom_pitch[1]);
+        build_ssharp_clamp(f + 8, 1);
+        post_consts(f, 1.0f / w, 1.0f / h, 0.0f, 1.0f / h);
+        f += 32;
+    }
+    /* UI pass (ps_ui): frame + point S#, {1/w, 1/h}, frost (g_bloom_a[1]) + bilinear S#; the
+       rects, UI T# and S# (28..47) come from ui_write_table. */
+    uint32_t* u = tab + UI_BLOCK * 32;
+    build_tsharp_f16(u, g_frame, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+    build_ssharp_clamp(u + 8, 0);
+    post_consts(u, 1.0f / DISPLAY_W, 1.0f / DISPLAY_H, 0.0f, 0.0f);
+    build_tsharp_f16(u + 16, g_bloom_a[1], g_bloom_w[1], g_bloom_h[1], g_bloom_pitch[1]);
+    build_ssharp_clamp(u + 24, 1);
 }
 
 /* CB_COLOR0_INFO: FORMAT @2, LINEAR_GENERAL @7, NUMBER_TYPE @8, COMP_SWAP @11,
@@ -1570,7 +1613,8 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
-#define PS_POST_FINAL_RSRC1 ((10u << 6) | 17u) /* v69, s79 + VCC (lens flare, UI panels) */
+#define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
+#define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
@@ -1590,8 +1634,18 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     for (int i = BLOOM_LEVELS - 2; i >= 0; i--, t += 32)
         post_pass(b, g_bloom_b[i], g_bloom_pitch[i], g_bloom_w[i], g_bloom_h[i], CB_INFO_RGBA16F,
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
-    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
-              g_ps_post_final_gpu, PS_POST_FINAL_RSRC1, t, bg_v);
+    post_pass(b, g_frame, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_RGBA16F, g_ps_post_final_gpu,
+              PS_POST_FINAL_RSRC1, t, bg_v);
+    /* Frost chain, then the UI pass (frame + frosted glass + UI, sRGB) to the display. */
+    const uint32_t* f = g_post_tab + FROST_BLOCK * 32;
+    for (int k = 0; k < 2; k++, f += 32)
+        post_pass(b, g_bloom_a[k], g_bloom_pitch[k], g_bloom_w[k], g_bloom_h[k], CB_INFO_RGBA16F,
+                  g_ps_post_down_gpu, PS_POST_DOWN_RSRC1, f, bg_v);
+    for (int k = 0; k < 4; k++, f += 32)
+        post_pass(b, (k & 1) ? g_bloom_a[1] : g_bloom_b[1], g_bloom_pitch[1], g_bloom_w[1],
+                  g_bloom_h[1], CB_INFO_RGBA16F, g_ps_post_blur_gpu, PS_POST_BLUR_RSRC1, f, bg_v);
+    post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
+              PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
 }
 
 static uint32_t build_dcb(struct PM4Builder *b,
@@ -3034,26 +3088,28 @@ int main(void) {
     }
     /* Post-processing targets (fully rewritten every frame) and tables. */
     g_hdr = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 8, 0x10000);
-    int post_ok = g_hdr != 0;
+    g_frame = gpu_alloc((unsigned long)DISPLAY_W * DISPLAY_H * 8, 0x10000);
+    int post_ok = g_hdr != 0 && g_frame != 0;
     for (int i = 0; i < BLOOM_LEVELS; i++) {
         unsigned long sz = (unsigned long)g_bloom_pitch[i] * g_bloom_h[i] * 8;
         g_bloom_a[i] = gpu_alloc(sz, 0x10000);
         g_bloom_b[i] = gpu_alloc(sz, 0x10000);
         post_ok = post_ok && g_bloom_a[i] && g_bloom_b[i];
     }
-    g_post_tab = (uint32_t*)gpu_alloc_typed((POST_PASSES + 2) * 32 * 4, 0x100, MEM_TYPE_ONION);
+    g_post_tab = (uint32_t*)gpu_alloc_typed(POST_TABLE_BLOCKS * 32 * 4, 0x100, MEM_TYPE_ONION);
     if (post_ok && g_post_tab) {
         build_post_tables(g_post_tab);
         /* Final pass (ps_post_final): glare T# at dwords 40..47, bilinear clamp S# at 48..51. */
         uint32_t* fin = g_post_tab + (POST_PASSES - 1) * 32;
         build_tsharp_tex(fin + 40, &glare_tex);
         build_ssharp_clamp(fin + 48, 1);
-        /* UI slots (dwords 64..83) valid before the first frame (the loading screen runs this
-           pass too): hidden panels and a real T# - the UI buffer, or the glare texture if the
-           UI failed - so no path through the shader can ever sample a null descriptor. */
-        build_tsharp_tex(fin + 72, &glare_tex);
-        build_ssharp_clamp(fin + 80, 0);
-        ui_write_table(fin);
+        /* UI pass slots (28..47 of its block) valid before the first frame (the loading screen
+           runs the post chain too): hidden panels and a real T# - the UI buffer, or the glare
+           texture if the UI failed - so no path through ps_ui can sample a null descriptor. */
+        uint32_t* uib = g_post_tab + UI_BLOCK * 32;
+        build_tsharp_tex(uib + 36, &glare_tex);
+        build_ssharp_clamp(uib + 44, 0);
+        ui_write_table(uib);
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
     /* Copy cube verts into shadow VB at offset 0x50 */
@@ -3114,6 +3170,8 @@ int main(void) {
     g_ps_post_blur_gpu = ps_post_blur_gpu;
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
+    UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
+    g_ps_ui_gpu = ps_ui_gpu;
 #undef UPLOAD_SHADER
 
     uint32_t *dcb_mem[NUM_FRAMES];
@@ -4207,7 +4265,7 @@ int main(void) {
             ft[11] = 0.0f;
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_mults[day_step],
                       day_frozen, (unsigned long)play_time_s);
-            ui_write_table(g_post_tab + (POST_PASSES - 1) * 32);
+            ui_write_table(g_post_tab + UI_BLOCK * 32);
         }
 
         /* Build main DCB (samples shadow_depth but doesn't write it).

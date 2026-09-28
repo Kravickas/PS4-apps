@@ -25,6 +25,7 @@
 #define UI_LINE_BELOW (UI_ICON_BELOW > UI_FONT_DESCENT ? UI_ICON_BELOW : UI_FONT_DESCENT)
 #define UI_CLEAR_W 760 /* areas cleared before each redraw (left panel / leaderboard) */
 #define UI_CLEAR_H 640
+#define UI_LB_GAP 20 /* leaderboard: gap to the opened controls panel */
 
 typedef struct {
     const unsigned char* atlas; /* RGBA8, UI_ATLAS_W x UI_ATLAS_H, straight alpha */
@@ -33,6 +34,7 @@ typedef struct {
     int controls, leaderboard;
     char key[96];  /* content of the current buffer; recompose when it changes */
     float rect[8]; /* panels: centre x, y, half w, h (px) for the left panel and the leaderboard */
+    int lb[4];     /* leaderboard rect x0, y0, x1, y1 (px), fixed at init */
 } Ui;
 static Ui g_ui;
 
@@ -62,6 +64,9 @@ static int ui_load_atlas(const char* path) {
     return 0;
 }
 
+static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mult, int day_frozen,
+                         int* bottom);
+
 static int ui_init(void) {
     my_memset(&g_ui, 0, sizeof(g_ui));
     for (int i = 0; i < 8; i++)
@@ -75,6 +80,13 @@ static int ui_init(void) {
             return -2;
         my_memset(g_ui.buf[b], 0, (unsigned long)UI_W * UI_H * 4);
     }
+    /* Leaderboard: centred, 10 % of the height above and below; left edge UI_LB_GAP right of
+       the opened controls panel (measured in its widest state), right edge mirrored. */
+    int bottom = 0, right = ui_left_panel(0, 1, 2500, 20, 1, &bottom);
+    g_ui.lb[0] = right + UI_LB_GAP;
+    g_ui.lb[1] = UI_H / 10;
+    g_ui.lb[2] = UI_W - g_ui.lb[0];
+    g_ui.lb[3] = UI_H - UI_H / 10;
     g_ui.ok = 1;
     return 0;
 }
@@ -161,6 +173,78 @@ static void ui_clear(unsigned char* b, int x0, int y0, int w, int h) {
         my_memset(b + ((unsigned long)y * UI_W + x0) * 4, 0, (unsigned long)w * 4);
 }
 
+/* Text or, when b is NULL, only its extent: returns the pen position after it. */
+static int ui_put(unsigned char* b, int x, int y, const char* s, const unsigned char col[3]) {
+    return b ? ui_text(b, x, y, s, col) : x + ui_text_width(s);
+}
+
+/* The left panel: the OPTIONS hint, camera speed, time of day speed and, if controls, the
+   controls list. Draws into b, or only measures when b is NULL. Returns the panel's right edge
+   (the widest laid-out line + padding) and sets *bottom. */
+static int ui_left_panel(unsigned char* b, int controls, int cam_pct, int day_mult, int day_frozen,
+                         int* bottom) {
+    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210};
+    int x = UI_X0 + UI_PAD, y = UI_Y0 + UI_PAD + UI_LINE_ABOVE, xr = x;
+    int w1 = ui_text_width("Camera speed"), w2 = ui_text_width("Time of day speed");
+    int value_dx = (w1 > w2 ? w1 : w2) + UI_VALUE_GAP, cx;
+    if (b)
+        ui_icon(b, x, y, UI_ICON_OPTIONS);
+    cx = ui_put(b, x + UI_ICON_PX + 6, y, "to show / hide controls", white);
+    xr = cx > xr ? cx : xr;
+    char v[32];
+    y += UI_LH;
+    ui_put(b, x, y, "Camera speed", white);
+    ui_fmt_int(v, cam_pct);
+    int n = 0;
+    while (v[n])
+        n++;
+    v[n] = '%';
+    v[n + 1] = 0;
+    cx = ui_put(b, x + value_dx, y, v, white);
+    xr = cx > xr ? cx : xr;
+    y += UI_LH;
+    ui_put(b, x, y, "Time of day speed", white);
+    v[0] = (char)UI_CHAR_TIMES;
+    ui_fmt_int(v + 1, day_mult);
+    cx = ui_put(b, x + value_dx, y, v, white);
+    if (day_frozen)
+        cx = ui_put(b, cx + 14, y, "(frozen)", grey);
+    xr = cx > xr ? cx : xr;
+    if (controls) {
+        static const struct {
+            int icons[2];
+            const char* label;
+        } rows[] = {
+            {{UI_ICON_CROSS, -1}, "Freeze / unfreeze cube"},
+            {{UI_ICON_CIRCLE, -1}, "Show / hide leaderboard"},
+            {{UI_ICON_SQUARE, -1}, "Freeze / unfreeze day and night"},
+            {{UI_ICON_TRIANGLE, -1}, "Reset camera"},
+            {{UI_ICON_L1, UI_ICON_R1}, "Day and night slower / faster"},
+            {{UI_ICON_L2, UI_ICON_R2}, "Camera down / up"},
+            {{UI_ICON_DPAD_UP, UI_ICON_DPAD_DOWN}, "Camera speed up / down"},
+            {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT}, "Move the sun (time of day)"},
+            {{UI_ICON_L_2D, -1}, "Move"},
+            {{UI_ICON_R_2D, -1}, "Look"},
+        };
+        y += UI_LH + UI_GAP;
+        for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
+            int ix = x;
+            for (int i = 0; i < 2 && rows[r].icons[i] >= 0; i++) {
+                if (b)
+                    ui_icon(b, ix, y, rows[r].icons[i]);
+                ix += UI_ICON_PX + 2;
+            }
+            xr = ix > xr ? ix : xr;
+            cx = ui_put(b, x + UI_LABEL_DX, y, rows[r].label, white);
+            xr = cx > xr ? cx : xr;
+            y += UI_LH;
+        }
+        y -= UI_LH;
+    }
+    *bottom = y + UI_LINE_BELOW + UI_PAD;
+    return xr + UI_PAD;
+}
+
 /* Lays out both panels into the next buffer when the content key changes; sets the rects. */
 static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long play_s) {
     if (!g_ui.ok)
@@ -192,70 +276,18 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
     int nb = (g_ui.cur + 1) % UI_BUFS;
     unsigned char* b = g_ui.buf[nb];
     ui_clear(b, 0, 0, UI_CLEAR_W, UI_CLEAR_H);
-    ui_clear(b, UI_W - 600, 0, 600, 200);
+    ui_clear(b, g_ui.lb[0], g_ui.lb[1], g_ui.lb[2] - g_ui.lb[0], g_ui.lb[3] - g_ui.lb[1]);
 
-    /* left panel: always-visible lines */
-    int x = UI_X0 + UI_PAD, y = UI_Y0 + UI_PAD + UI_LINE_ABOVE, wmax = 0;
-    int w1 = ui_text_width("Camera speed"), w2 = ui_text_width("Time of day speed");
-    int value_dx = (w1 > w2 ? w1 : w2) + UI_VALUE_GAP;
-    ui_icon(b, x, y, UI_ICON_OPTIONS);
-    int cx = ui_text(b, x + UI_ICON_PX + 6, y, "to show / hide controls", white);
-    wmax = cx - x;
-    char v[32];
-    y += UI_LH;
-    ui_text(b, x, y, "Camera speed", white);
-    ui_fmt_int(v, cam_pct);
-    int n = 0;
-    while (v[n])
-        n++;
-    v[n] = '%';
-    v[n + 1] = 0;
-    ui_text(b, x + value_dx, y, v, white);
-    y += UI_LH;
-    ui_text(b, x, y, "Time of day speed", white);
-    v[0] = (char)UI_CHAR_TIMES;
-    ui_fmt_int(v + 1, day_mult);
-    cx = ui_text(b, x + value_dx, y, v, white);
-    if (day_frozen)
-        ui_text(b, cx + 14, y, "(frozen)", grey);
-    if (g_ui.controls) {
-        static const struct {
-            int icons[2];
-            const char* label;
-        } rows[] = {
-            {{UI_ICON_CROSS, -1}, "Freeze / unfreeze cube"},
-            {{UI_ICON_CIRCLE, -1}, "Show / hide leaderboard"},
-            {{UI_ICON_SQUARE, -1}, "Freeze / unfreeze day and night"},
-            {{UI_ICON_TRIANGLE, -1}, "Reset camera"},
-            {{UI_ICON_L1, UI_ICON_R1}, "Day and night slower / faster"},
-            {{UI_ICON_L2, UI_ICON_R2}, "Camera down / up"},
-            {{UI_ICON_DPAD_UP, UI_ICON_DPAD_DOWN}, "Camera speed up / down"},
-            {{UI_ICON_DPAD_LEFT, UI_ICON_DPAD_RIGHT}, "Move the sun (time of day)"},
-            {{UI_ICON_L_2D, -1}, "Move"},
-            {{UI_ICON_R_2D, -1}, "Look"},
-        };
-        y += UI_LH + UI_GAP;
-        for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
-            int ix = x;
-            for (int i = 0; i < 2 && rows[r].icons[i] >= 0; i++) {
-                ui_icon(b, ix, y, rows[r].icons[i]);
-                ix += UI_ICON_PX + 2;
-            }
-            cx = ui_text(b, x + UI_LABEL_DX, y, rows[r].label, white);
-            if (cx - x > wmax)
-                wmax = cx - x;
-            y += UI_LH;
-        }
-        y -= UI_LH;
-    }
-    float x0 = (float)UI_X0, y0 = (float)UI_Y0, x1 = (float)(x + wmax + UI_PAD),
-          y1 = (float)(y + UI_LINE_BELOW + UI_PAD);
+    /* left panel: rect = the bounding box of what was laid out */
+    int bottom = 0, right = ui_left_panel(b, g_ui.controls, cam_pct, day_mult, day_frozen, &bottom);
+    float x0 = (float)UI_X0, y0 = (float)UI_Y0, x1 = (float)right, y1 = (float)bottom;
     g_ui.rect[0] = 0.5f * (x0 + x1);
     g_ui.rect[1] = 0.5f * (y0 + y1);
     g_ui.rect[2] = 0.5f * (x1 - x0);
     g_ui.rect[3] = 0.5f * (y1 - y0);
 
-    /* leaderboard (top right): this session's play time until multiplayer scores exist */
+    /* leaderboard (fixed rect, centred; set by ui_init): this session's play time until
+       multiplayer scores exist */
     if (g_ui.leaderboard) {
         char t[24], *q = t;
         q += ui_fmt_int(q, (long)(play_s / 3600));
@@ -266,22 +298,17 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
         *q++ = (char)('0' + (play_s % 60) / 10);
         *q++ = (char)('0' + play_s % 10);
         *q = 0;
-        int lw = ui_text_width("Multiplayer scores soon"),
-            lw2 = ui_text_width("You") + 40 + ui_text_width(t);
-        if (lw2 > lw)
-            lw = lw2;
-        int lx0 = UI_W - UI_X0 - lw - 2 * UI_PAD, ly = UI_Y0 + UI_PAD + UI_LINE_ABOVE;
+        int lx0 = g_ui.lb[0], lx1 = g_ui.lb[2], ly = g_ui.lb[1] + UI_PAD + UI_LINE_ABOVE;
         ui_text(b, lx0 + UI_PAD, ly, "Leaderboard", white);
         ly += UI_LH;
         ui_text(b, lx0 + UI_PAD, ly, "You", white);
-        ui_text(b, UI_W - UI_X0 - UI_PAD - ui_text_width(t), ly, t, white);
+        ui_text(b, lx1 - UI_PAD - ui_text_width(t), ly, t, white);
         ly += UI_LH;
         ui_text(b, lx0 + UI_PAD, ly, "Multiplayer scores soon", grey);
-        float lx1 = (float)(UI_W - UI_X0), ly1 = (float)(ly + UI_LINE_BELOW + UI_PAD);
-        g_ui.rect[4] = 0.5f * ((float)lx0 + lx1);
-        g_ui.rect[5] = 0.5f * ((float)UI_Y0 + ly1);
-        g_ui.rect[6] = 0.5f * (lx1 - (float)lx0);
-        g_ui.rect[7] = 0.5f * (ly1 - (float)UI_Y0);
+        g_ui.rect[4] = 0.5f * (float)(g_ui.lb[0] + g_ui.lb[2]);
+        g_ui.rect[5] = 0.5f * (float)(g_ui.lb[1] + g_ui.lb[3]);
+        g_ui.rect[6] = 0.5f * (float)(g_ui.lb[2] - g_ui.lb[0]);
+        g_ui.rect[7] = 0.5f * (float)(g_ui.lb[3] - g_ui.lb[1]);
     } else {
         for (int i = 4; i < 8; i++)
             g_ui.rect[i] = -1e6f;
@@ -289,14 +316,14 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, unsigned long p
     g_ui.cur = nb;
 }
 
-/* Final pass table dwords 64..83: rects, the current buffer's T# (RGBA8 UNORM, linear), point S#.
- */
-static void ui_write_table(uint32_t* fin) {
-    float* r = (float*)(fin + 64);
+/* UI pass table (ps_ui) dwords 28..47: rects, the current buffer's T# (RGBA8 UNORM, linear) and a
+   point S#. */
+static void ui_write_table(uint32_t* blk) {
+    float* r = (float*)(blk + 28);
     for (int i = 0; i < 8; i++)
         r[i] = g_ui.ok ? g_ui.rect[i] : -1e6f;
     if (g_ui.ok) {
-        build_tsharp(fin + 72, g_ui.buf[g_ui.cur], UI_W, UI_H);
-        build_ssharp_clamp(fin + 80, 0);
+        build_tsharp(blk + 36, g_ui.buf[g_ui.cur], UI_W, UI_H);
+        build_ssharp_clamp(blk + 44, 0);
     }
 }
