@@ -1,4 +1,26 @@
 ============================================================
+PHYSICALLY BASED FOG  (build=physical-fog)
+============================================================
+Height fog applied per MSAA sample in the resolve (ps_resolve CAFE0401), so the
+floor, the cube, the sky and the stars all get the same fog, exact at MSAA edges:
+density FOG_SIGMA0 e^(-(y - FOG_Y0) / FOG_H), optical depth integrated exactly
+along each view ray (sigma0 H (e^(-hc/H) - e^(-he/H)) / Vy; series near
+horizontal; no 0 x inf at any camera height), transmittance e^-tau, and
+in-scattering C = FS P(V.L) + FA: the scene light scattered by the haze
+(Cornette-Shanks g 0.8 and albedo 0.9 - the atmosphere's own aerosol) plus the
+mean sky and floor light (the new ATM2 table: per-slice hemisphere means,
+tools/make_atmosphere.c). Sample distances from the 4-sample depth read as a
+texture (PS4 tile index 5 Depth1DThin, 2D_MSAA; DB flushed first as PAL does).
+FOG_SIGMA0 2.0547e-3 matches the previous fog at 200 units (3.9 / 9.4 / 18 / 33
+/ 55 % at 20 / 50 / 100 / 200 / 400); FOG_H 30. The per-shader fog is switched off
+when MSAA is on. Verified: ps_resolve vs float64 8e-6 (fog), 7e-7 (no fog = the
+plain resolve), 4e-6 with the camera 3000 units up.
+Floor: +-3000 units (FLOOR_GRID 128, UVs centred on the origin), curvature radius
+FLOOR_R 400000 (was 20000): the horizon moves from ~200 to ~920 units, where the
+fog is 84 %, so the floor fades into the sky instead of ending at a line. Far
+plane CAM_FAR 3500. The flare is dimmed by the fog toward the sun.
+
+============================================================
 PHYSICALLY BASED SKY, SUN AND MOON  (build=physical-sky)
 ============================================================
 Sky: Eric Bruneton's Precomputed Atmospheric Scattering (2017 reference, BSD)

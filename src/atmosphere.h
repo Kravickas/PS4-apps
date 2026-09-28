@@ -44,14 +44,22 @@ void atmo_single_d(const Atmo* a, double r, double mu, double mu_s, double nu, d
 void atmo_sky_for(const Atmo* a, float elev_deg, float* out);
 
 /* ---- run time (tables from assets/sky/atmosphere.bin, tools/make_atmosphere.c) ---- */
+/* t.trans -> the float transmittance table of the asset; img: Rayleigh, Mie, multiple as RGBA16F,
+   ATMO_SKY_W x (ATMO_SLICES * ATMO_SKY_H); means: ATMO_SLICES x 6 (upper-hemisphere mean,
+   cosine-weighted mean, RGB each). */
 typedef struct {
-    Atmo t; /* t.trans -> the float transmittance table of the asset */
-    const uint16_t*
-        img[3]; /* Rayleigh, Mie, multiple: RGBA16F, ATMO_SKY_W x (ATMO_SLICES * ATMO_SKY_H) */
+    Atmo t;
+    const uint16_t* img[3];
+    const float* means;
 } AtmoAsset;
 /* head: the asset from its start (32-byte header + transmittance); atlas: the three images.
    Returns 0 if the header matches this build's table sizes. */
-int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas);
+int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas, const float* means);
+/* Per unit light illuminance, for a light at height y (sin elevation): the mean sky radiance over
+   the upper hemisphere (up) and its cosine-weighted mean (cosm; sky light on a horizontal surface /
+   pi), interpolated between slices like ps_dark. */
+void atmo_sky_means(const AtmoAsset* s, float y, float up[3], float cosm[3]);
+float atmo_expf(float x); /* e^x (main.c has no libm) */
 /* Sunlight reaching the eye (per unit solar irradiance) for a light at cos-zenith mu (terminator
    included) - the colour of the sun / moon as seen through the atmosphere. */
 void atmo_light_ground(const AtmoAsset* s, float mu, float out[3]);

@@ -149,6 +149,18 @@
 #define SKY_SUN_SCALE 3.14159265f
 #define MOON_SKY_SCALE 0.1481f
 #define MOON_SCALE 3.6375f
+/* Fog (ps_resolve, per MSAA sample): height fog of density FOG_SIGMA0 e^(-(y - FOG_Y0) / FOG_H)
+   per unit, single scattering albedo FOG_ALBEDO (the atmosphere's Mie aerosol, 0.9) and its phase
+   (Cornette-Shanks g 0.8). FOG_SIGMA0 = 2.0547e-3 matches the previous fog at 200 units from the
+   default camera (33.7 %; exact integral down to the curved floor): 3.9 / 9.4 / 18 / 33 / 55 % at
+   20 / 50 / 100 / 200 / 400 units. The floor reaches FLOOR_HALF 3000: its edge stays behind the
+   curvature until the camera is 225 units up. */
+#define FOG_SIGMA0 2.0547e-3f
+#define FOG_H 30.0f
+#define FOG_Y0 (-0.5f)
+#define FOG_ALBEDO 0.9f
+#define CAM_NEAR 0.01f
+#define CAM_FAR 3500.0f      /* the curved floor's horizon from 225 units up is 3000 away */
 #define MOON_HDR 2.0f        /* moon disc colour x this (desc[88]) */
 #define MOON_LIGHT 0.621f    /* night light magnitude (moonlight): 0.69 - 10% */
 #define BLOOM_THRESHOLD 1.0f /* only what is brighter than white blooms */
@@ -196,7 +208,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "physical-sky"
+#define BUILD_TAG "physical-fog"
 /* Shadow map: 4096×4096 (4K). Real PS4 games render to 4K shadow maps
    regularly (and bigger). The 32 MB Vulkan validation error in the user's
    log was NOT a GCN/PS4 limit — it was specifically shadPS4's
@@ -379,10 +391,15 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
                                   move the wall -> it is not a byte budget */
 #define BG_VERTS        6
 #define CUBE_VERTS      36
-#define FLOOR_VERTS     24576 /* 64×64 grid of quads, 2 tris each = 8192 tris = 24576 verts */
-#define FLOOR_GRID 64
-#define FLOOR_HALF 300.0f   /* floor spans +-FLOOR_HALF in X and Z */
-#define FLOOR_UV_MAX 150.0f /* texture tiles across: one per 4 units */
+#define FLOOR_VERTS (FLOOR_GRID * FLOOR_GRID * 6) /* 2 tris per grid quad */
+#define FLOOR_GRID 128
+#define FLOOR_HALF 3000.0f /* floor spans +-FLOOR_HALF in X and Z */
+/* Radius of the floor's curvature (y = -0.5 - r^2 / (2 FLOOR_R)): 400000 puts the horizon ~920
+   units from the default camera, where the fog is 84 % - the floor fades into the sky instead of
+   ending at a line 200 units away (FLOOR_R 20000). The floor edge hides behind the curvature up to
+   11 units of camera height and behind 98 % fog above that. */
+#define FLOOR_R 400000.0f
+#define FLOOR_UV_MAX 1500.0f /* texture tiles across: one per 4 units */
 #define TOTAL_VERTS     (BG_VERTS + CUBE_VERTS + FLOOR_VERTS)
 #define VERT_STRIDE     48
 #define IDENT_OFF       0
@@ -445,7 +462,7 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
 #define FROST_PASSES 6
 #define UI_BLOCK (FROST_BLOCK + FROST_PASSES)
 #define RESOLVE_BLOCK (UI_BLOCK + 2)
-#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 1)
+#define POST_TABLE_BLOCKS (RESOLVE_BLOCK + 2) /* the resolve uses two blocks */
 static void* g_hdr = 0;
 static void* g_bloom_a[BLOOM_LEVELS];
 static void* g_bloom_b[BLOOM_LEVELS];
@@ -918,7 +935,7 @@ static void build_static_vb(float* vb) {
     {
         float *fp = (float*)((char*)vb + FLOOR_DATA_OFF);
         const float Y_BASE = -0.5f;
-        const float R = 20000.0f;
+        const float R = FLOOR_R;
         const float STEP = (2.0f * FLOOR_HALF) / (float)FLOOR_GRID;
         const float UV_STEP = FLOOR_UV_MAX / (float)FLOOR_GRID;
         int v = 0;
@@ -926,8 +943,11 @@ static void build_static_vb(float* vb) {
             for (int gx = 0; gx < FLOOR_GRID; gx++) {
                 float x0 = -FLOOR_HALF + (float)gx * STEP, x1 = x0 + STEP;
                 float z0 = -FLOOR_HALF + (float)gz * STEP, z1 = z0 + STEP;
-                float u0 = (float)gx * UV_STEP, u1 = u0 + UV_STEP;
-                float t0 = (float)gz * UV_STEP, t1 = t0 + UV_STEP;
+                /* UVs centred on the origin (0 at x = z = 0; the tiling is unchanged, HALF / 4 is
+                   a whole number of tiles): full float precision where the camera looks, not 0.25
+                   texel steps around u = 750 */
+                float u0 = (float)(gx - FLOOR_GRID / 2) * UV_STEP, u1 = u0 + UV_STEP;
+                float t0 = (float)(gz - FLOOR_GRID / 2) * UV_STEP, t1 = t0 + UV_STEP;
                 /* corners A (x0,z0), B (x1,z0), C (x1,z1), D (x0,z1); tris A C B, A D C */
                 const float cx[4] = {x0, x1, x1, x0}, cz[4] = {z0, z0, z1, z1};
                 const float cu[4] = {u0, u1, u1, u0}, cv[4] = {t0, t0, t1, t1};
@@ -958,16 +978,16 @@ static void build_static_vb(float* vb) {
 }
 
 /* Lens flare occlusion: does the ray o + t d (t > 0) hit the floor or the prop?
-   Floor as generated: y = -0.5 - (x^2 + z^2) / 40000 over +-FLOOR_HALF, so
-   g(t) = c + b t + a t^2 with a = (dx^2 + dz^2) / 40000, b = dy + (ox dx + oz dz) /
-   20000, c = oy + 0.5 + (ox^2 + oz^2) / 40000 (a ~ 1e-5: roots in the stable form
+   Floor as generated: y = -0.5 - (x^2 + z^2) / (2 FLOOR_R) over +-FLOOR_HALF, so
+   g(t) = c + b t + a t^2 with a = (dx^2 + dz^2) / (2 FLOOR_R), b = dy + (ox dx + oz dz) /
+   FLOOR_R, c = oy + 0.5 + (ox^2 + oz^2) / (2 FLOOR_R) (a ~ 1e-5: roots in the stable form
    q = -(b + sign(b) sqrt(b^2 - 4ac)) / 2, t = q / a, c / q). Prop: the ray in
    model space (A^-1 (o - t), A^-1 d, A = the 3x3 of g_prop_m) against the bounds
    (slabs). */
 static int flare_ray_blocked(const float* o, const float* d) {
-    float a = (d[0] * d[0] + d[2] * d[2]) / 40000.0f;
-    float b = d[1] + (o[0] * d[0] + o[2] * d[2]) / 20000.0f;
-    float c = o[1] + 0.5f + (o[0] * o[0] + o[2] * o[2]) / 40000.0f;
+    float a = (d[0] * d[0] + d[2] * d[2]) / (2.0f * FLOOR_R);
+    float b = d[1] + (o[0] * d[0] + o[2] * d[2]) / FLOOR_R;
+    float c = o[1] + 0.5f + (o[0] * o[0] + o[2] * o[2]) / (2.0f * FLOOR_R);
     float disc = b * b - 4.0f * a * c;
     if (disc >= 0.0f) {
         float q = -0.5f * (b + (b >= 0.0f ? my_sqrt(disc) : -my_sqrt(disc)));
@@ -1122,7 +1142,7 @@ static void build_mvp(float *mvp, float yaw, float pitch,
          P22 = -fa / (fa - n),  P23 = -n*fa / (fa - n),  P[3][2] = -1. */
     float aspect=(float)DISPLAY_W/(float)DISPLAY_H;
     float fov=my_cos(0.3054f)/my_sin(0.3054f);
-    float n=0.01f, fa=500.0f;
+    float n = CAM_NEAR, fa = CAM_FAR;
     float p[4][4]={
         {fov/aspect, 0, 0, 0},
         {0, fov, 0, 0},
@@ -1478,8 +1498,11 @@ static int load_atmosphere(void) {
     if (fd >= 0) {
         void* head = cpu_alloc(head_n, 0x1000);
         void* atlas = gpu_alloc(img_n, 0x10000);
-        int ok = head && atlas && read_all(fd, head, head_n) == 0 &&
-                 read_all(fd, atlas, img_n) == 0 && atmo_asset_bind(&g_atmo, head, atlas) == 0;
+        void* means = cpu_alloc((unsigned long)ATMO_SLICES * 6 * 4, 0x1000);
+        int ok = head && atlas && means && read_all(fd, head, head_n) == 0 &&
+                 read_all(fd, atlas, img_n) == 0 &&
+                 read_all(fd, means, (unsigned long)ATMO_SLICES * 6 * 4) == 0 &&
+                 atmo_asset_bind(&g_atmo, head, atlas, (const float*)means) == 0;
         sceKernelClose(fd);
         if (ok) {
             g_atmo_atlas = atlas;
@@ -1614,6 +1637,20 @@ static void build_tsharp_f16(uint32_t* t, void* tex, int w, int h, int pitch) {
     t[4] = (uint32_t)(pitch - 1) << 13;
 }
 
+/* The 4-sample scene depth as a texture (ps_resolve): Z_32_FLOAT written by the DB with
+   DB_DEPTH_INFO ARRAY_1D_TILED_THIN1 (depth micro tiles) = PS4 tile index 5 Depth1DThin (shadPS4
+   tiling.h: ArrayMode 1D, MicroTileMode Depth); IMG_DATA_FORMAT_32 / FLOAT (gfx_7_2_enum.h), TYPE
+   2D_MSAA, LAST_LEVEL log2(4) (PAL gfx6Device.cpp); no FMASK / HTILE. */
+static void build_tsharp_depth_msaa(uint32_t* t, void* base, int w, int h) {
+    uint64_t a = (uint64_t)(uintptr_t)base;
+    my_memset(t, 0, 32);
+    t[0] = (uint32_t)(a >> 8);
+    t[1] = (uint32_t)(a >> 40) | (4u << 20) | (7u << 26);
+    t[2] = (uint32_t)(w - 1) | ((uint32_t)(h - 1) << 14);
+    t[3] = 4u | (4u << 3) | (4u << 6) | (4u << 9) | (2u << 16) | (5u << 20) | (0xEu << 28);
+    t[4] = (uint32_t)(w - 1) << 13;
+}
+
 /* Clamp-to-edge sampler (CLAMP_LAST_TEXEL x/y/z), point or bilinear, LOD 0. */
 static void build_ssharp_clamp(uint32_t* s, int bilinear) {
     my_memset(s, 0, 16);
@@ -1708,6 +1745,7 @@ static void build_post_tables(uint32_t* tab) {
     if (g_msaa_color) {
         uint32_t* r = tab + RESOLVE_BLOCK * 32;
         build_tsharp_f16(r, g_msaa_color, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+        build_tsharp_depth_msaa(r + 8, g_msaa_depth, DISPLAY_W, DISPLAY_H); /* fog: sample depths */
         r[3] = (r[3] & ~((0x1Fu << 20) | (0xFu << 28) | (0xFu << 16) | (0xFu << 12))) |
                ((uint32_t)MSAA_TILE_INDEX << 20) | (0xEu << 28) | (2u << 16);
     }
@@ -1819,7 +1857,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_BLUR_RSRC1 ((2u << 6) | 12u)
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
-#define PS_RESOLVE_RSRC1 ((1u << 6) | 9u)    /* v38, s11 + VCC */
+#define PS_RESOLVE_RSRC1 ((6u << 6) | 13u)   /* v0-v55, s0-s51 + VCC */
 #define PS_UI_RSRC1 ((6u << 6) | 10u)        /* v43, s52 + VCC (frosted glass, UI) */
 
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
@@ -1827,6 +1865,11 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v) {
     const uint32_t* t = g_post_tab;
     emit_msaa_state(b, 1); /* every post pass is single-sample */
+    if (g_msaa_color)
+        /* the resolve reads the scene depth: flush the DB to memory first, as PAL does for depth
+           read as a texture (DB_ACTION_ENA with DB_DEST_BASE_ENA bit 14 and DEST_BASE_0_ENA bit 0,
+           gfx6Barrier.cpp; gfx_7_2_sh_mask.h) */
+        pm4_acquire_mem(b, COHER_RT_TO_TEXTURE | (1u << 14) | (1u << 0));
     if (g_msaa_color)
         post_pass(b, g_hdr, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_RGBA16F, g_ps_resolve_gpu,
                   PS_RESOLVE_RSRC1, g_post_tab + RESOLVE_BLOCK * 32, bg_v);
@@ -3241,7 +3284,8 @@ int main(void) {
         fc[0] = 0.0f;
         fc[1] = 0.0f;
         fc[2] = 0.0f;
-        fc[3] = my_log2(FOG_MIN);
+        fc[3] =
+            my_log2(FOG_MIN); /* -200 once ps_resolve does the fog (after the MSAA allocation) */
         fc[4] = floor_hgt.err ? 0.0f : POM_DEPTH * (FLOOR_UV_MAX / (2.0f * FLOOR_HALF));
         fc[5] = -my_log2(FOG_MIN) / FOG_FULL;
         fc[6] = floor_hgt.err ? 0.0f : 1.0f;
@@ -3375,6 +3419,11 @@ int main(void) {
             g_msaa_color = 0; /* single-sample fallback */
     }
 #endif
+    /* With MSAA the resolve applies the physically based fog to every sample: switch off the
+       per-shader fog of ps_floor / ps_model / ps_shader (their weight 2^(rate d + desc[107]) = 0).
+     */
+    if (g_msaa_color)
+        ((float*)desc)[107] = -200.0f;
     trace_msg(g_msaa_color ? "msaa: 4x (colour 66355200 B, depth 33177600 B, tile 13)\n"
                            : "msaa: off\n");
     g_post_tab = (uint32_t*)gpu_alloc_typed(POST_TABLE_BLOCKS * 32 * 4, 0x100, MEM_TYPE_ONION);
@@ -4569,7 +4618,50 @@ int main(void) {
                 vis = flare_visibility(cam_yaw, cam_pitch, cam,
                                        sd[0] * ((float)DISPLAY_H / (float)DISPLAY_W), sd[1]);
             }
+            { /* the fog between the camera and the sun dims the flare like the disc */
+                const float sy = ((const float*)(desc + 176))[1];
+                float hc = cam_y - FOG_Y0, ec = atmo_expf(-hc / FOG_H);
+                vis *= sy > 1e-4f ? atmo_expf(-FOG_SIGMA0 * FOG_H * ec / sy) : 0.0f;
+            }
             flare_consts(ft, sd, scl, vis);
+            if (g_msaa_color) { /* fog constants (ps_resolve table, dwords 16..47) */
+                float* rt = (float*)(g_post_tab + RESOLVE_BLOCK * 32);
+                float F[3], R[3], U[3], ups[3] = {0, 0, 0}, cms[3], upm[3] = {0, 0, 0}, cmm[3];
+                cam_basis(cam_yaw, cam_pitch, F, R, U);
+                const float inv_fov = my_cos(0.3054f) / my_sin(0.3054f);
+                const float* ld = (const float*)(desc + 12); /* scene light direction x magnitude */
+                const float* lc = (const float*)(desc + 32); /* its colour */
+                const float* gr = (const float*)(desc + 160); /* the lit floor's radiance */
+                float lm = my_sqrt(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]);
+                float hc = cam_y - FOG_Y0, ec = atmo_expf(-hc / FOG_H);
+                if (g_atmo_ok) {
+                    atmo_sky_means(&g_atmo, ((const float*)(desc + 176))[1], ups, cms);
+                    atmo_sky_means(&g_atmo, ((const float*)(desc + 188))[1], upm, cmm);
+                }
+                for (int c = 0; c < 3; c++) {
+                    rt[16 + c] = F[c];
+                    rt[20 + c] = R[c] * inv_fov;
+                    rt[24 + c] = U[c] * inv_fov;
+                    rt[28 + c] = lm > 1e-6f ? ld[c] / lm : 0.0f;
+                    /* FS: the scene light scattered by the haze, E = pi x (the radiance of a white
+                       surface facing the light); FA: isotropic - half the mean sky, half the floor
+                     */
+                    rt[32 + c] = FOG_ALBEDO * 3.14159265f * lc[c] * lm;
+                    rt[36 + c] =
+                        FOG_ALBEDO *
+                        (0.5f * (SKY_SUN_SCALE * ups[c] + MOON_SKY_SCALE * upm[c]) + 0.5f * gr[c]);
+                }
+                rt[19] = 1.0f / FOG_H;
+                rt[23] = FOG_SIGMA0 * ec;
+                rt[27] = CAM_NEAR * CAM_FAR;
+                rt[31] = CAM_FAR;
+                rt[35] = CAM_FAR - CAM_NEAR;
+                rt[39] = FOG_SIGMA0 * FOG_H;
+                rt[40] = ec;
+                rt[41] = -hc / FOG_H;
+                for (int i = 42; i < 48; i++)
+                    rt[i] = 0.0f;
+            }
             ui_update((int)(move_speed / MOVE_SPEED_100 * 100.0f + 0.5f), k_day_tenths[day_step],
                       day_frozen, (unsigned long)play_time_s);
             ui_write_table(g_post_tab + UI_BLOCK * 32);

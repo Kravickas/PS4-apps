@@ -361,12 +361,13 @@ void atmo_sky_for(const Atmo* a, float elev_deg, float* out) {
 }
 
 /* ---------------- run time ---------------- */
-int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas) {
+int atmo_asset_bind(AtmoAsset* s, const void* head, const void* atlas, const float* means) {
     const uint32_t* h = (const uint32_t*)head;
-    if (h[0] != 0x314D5441u || h[1] != ATMO_T_W || h[2] != ATMO_T_H || h[3] != ATMO_SKY_W ||
+    if (h[0] != 0x324D5441u || h[1] != ATMO_T_W || h[2] != ATMO_T_H || h[3] != ATMO_SKY_W ||
         h[4] != ATMO_SKY_H || h[5] != ATMO_SLICES)
         return -1;
     s->t.trans = (float*)((const char*)head + 32);
+    s->means = means;
     s->t.ms = 0;
     s->t.sky = 0;
     s->t.trans_samples = 0;
@@ -505,4 +506,18 @@ void atmo_sky_consts(const AtmoAsset* s, float* d, const float F[3], const float
     d[36] = ATMO_LIMB_R;
     d[37] = ATMO_LIMB_G;
     d[38] = ATMO_LIMB_B;
+}
+
+void atmo_sky_means(const AtmoAsset* s, float y, float up[3], float cosm[3]) {
+    float r0, r1, f;
+    slice_of(y, &r0, &r1, &f);
+    int k0 = (int)r0 / ATMO_SKY_H, k1 = (int)r1 / ATMO_SKY_H;
+    for (int c = 0; c < 3; c++) {
+        up[c] = s->means[k0 * 6 + c] + (s->means[k1 * 6 + c] - s->means[k0 * 6 + c]) * f;
+        cosm[c] =
+            s->means[k0 * 6 + 3 + c] + (s->means[k1 * 6 + 3 + c] - s->means[k0 * 6 + 3 + c]) * f;
+    }
+}
+float atmo_expf(float x) {
+    return (float)a_exp(x);
 }
