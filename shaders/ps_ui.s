@@ -141,6 +141,68 @@ v_mul_f32 v18, v18, v39
 v_add_f32 v18, v18, v42
 ui_content_done:
 ; <<< ui content
+; >>> opcode test (main.c OPCODE_TEST 1): two panels - [64] x0, [65] y0, [66] size, [67] stride (px; x0 -1e6:
+;     off). Each pixel packs its UV into one dword ([68] / [69] bits a field: 8 left, 16 right) and unpacks
+;     it through v_bfm_b32 masks, then samples [76] T# (a UNORM view: sRGB bytes as they are) with [84] S#.
+;     [70..71] (1 << bits) - 1, [72..73] their reciprocals, [74] 1 / size. ISA: width / offset = S[4:0].
+s_load_dwordx16 s[56:71], s[0:1], 0x40
+s_load_dwordx8 s[72:79], s[0:1], 0x50
+s_waitcnt lgkmcnt(0)
+v_subrev_f32 v21, s56, v2
+v_subrev_f32 v22, s57, v3
+v_mov_b32 v23, s59
+v_cmp_le_f32 vcc, v23, v21
+v_cndmask_b32 v24, 0, v23, vcc
+v_sub_f32 v25, v21, v24
+v_sub_f32 v26, s58, v25
+v_min_f32 v26, v26, v25
+v_min_f32 v26, v26, v22
+v_sub_f32 v27, s58, v22
+v_min_f32 v26, v26, v27
+v_min_f32 v26, v26, v21
+v_cmp_lt_f32 vcc, 0, v26
+; SCC = any lane inside a panel
+s_or_b32 s53, vcc_lo, vcc_hi
+s_cbranch_scc0 optest_done
+v_mov_b32 v28, 1.0
+v_cndmask_b32 v28, 0, v28, vcc
+v_cmp_le_f32 vcc, v23, v21
+v_mov_b32 v29, s60
+v_mov_b32 v30, s61
+v_cndmask_b32 v29, v29, v30, vcc
+v_mov_b32 v30, s62
+v_mov_b32 v31, s63
+v_cndmask_b32 v30, v30, v31, vcc
+v_mov_b32 v31, s64
+v_mov_b32 v32, s65
+v_cndmask_b32 v31, v31, v32, vcc
+v_mul_f32 v33, s66, v25
+v_mul_f32 v33, v33, v30
+v_cvt_u32_f32 v33, v33
+v_mul_f32 v34, s66, v22
+v_mul_f32 v34, v34, v30
+v_cvt_u32_f32 v34, v34
+; packed = U << bits | V; unpacked through the masks ((1 << bits) - 1) << bits and (1 << bits) - 1
+v_lshlrev_b32 v35, v29, v33
+v_or_b32 v35, v35, v34
+v_bfm_b32 v36, v29, v29
+v_mov_b32 v37, 0
+v_bfm_b32 v37, v29, v37
+v_and_b32 v38, v35, v36
+v_lshrrev_b32 v38, v29, v38
+v_and_b32 v39, v35, v37
+v_cvt_f32_u32 v38, v38
+v_cvt_f32_u32 v39, v39
+v_mul_f32 v38, v38, v31
+v_mul_f32 v39, v39, v31
+image_sample_lz v[40:42], v[38:39], s[68:75], s[76:79] dmask:0x7
+s_waitcnt vmcnt(0)
+v_cmp_lt_f32 vcc, 0, v28
+v_cndmask_b32 v16, v16, v40, vcc
+v_cndmask_b32 v17, v17, v41, vcc
+v_cndmask_b32 v18, v18, v42, vcc
+optest_done:
+; <<< opcode test
 v_add_f32 v16, v16, v20
 v_add_f32 v17, v17, v20
 v_add_f32 v18, v18, v20

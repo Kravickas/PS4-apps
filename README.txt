@@ -30,6 +30,11 @@ BUILD
     make all    -> eboot.bin and IV0000-SHAD00004_00-SHADCUBE40000000.pkg
   Assets live in assets/ (shipped at /app0/assets/); tools/README.txt rebuilds them.
 
+SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
+  1 = V_BFM_B32: two panels bottom right show the cube albedo, each pixel's UV packed into one dword
+  and unpacked with v_bfm_b32 masks - 8-bit fields left (control), 16-bit fields right. On the PS4
+  both show the texture; with a 4-bit field extract (shadPS4) the right panel is one flat colour.
+
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
   times per step ("load ms:"), time sources and zones ("tz", "tz_net", "tz_http"), and frame
