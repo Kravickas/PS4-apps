@@ -16,8 +16,8 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   make_gp4.py        PKG project for PkgTool.Core; called by the Makefile
   make_icon.py       sce_sys/icon0.png: the in-game rounded cube (cube.obj) with the blue
                      badge (badge_1024.png) on each face, satin; no arguments needed
-  make_glare.py      assets/images/flare/glare.dds: the lens flare's uneven rays
-                     (diffraction by front-element scratches and dust, spectral)
+  make_glare.py      assets/images/flare/glare.dds: the lens flare's rays - unused (FLARE_RAYS 0,
+                     the texture is not shipped; without it the flare samples black)
   make_moon.py       assets/images/moon/albedo.dds: NASA's LROC colour map warped to the
                      near side, for ps_dark's moon disc
   make_atmosphere.c  assets/sky/atmosphere.bin: the sky tables (host C with src/atmosphere.c)

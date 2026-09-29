@@ -148,7 +148,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
     ((int)(sizeof(k_day_tenths) / sizeof(k_day_tenths[0]))) /* entries in k_day_tenths */
 #define DAY_MULT_ONE 9        /* index of x1 */
 #define FLARE_GHOSTS 1.0f     /* soft ghosts (the first flare's six) */
-#define FLARE_RAYS 1.0f       /* uneven rays (glare texture, tools/make_glare.py) */
+#define FLARE_RAYS 0.0f       /* uneven rays (glare texture, tools/make_glare.py): off */
 #define FLARE_GLOW 1.4f       /* glow around the sun: FLARE_GLOW / (1 + (rho / 0.08)^2) */
 #define FLARE_VEIL 0.22f      /* wide warm haze: FLARE_VEIL / (1 + (rho / 0.40)^2) */
 #define GLARE_STORE_MAX 4.0f  /* glare.dds stores value / this (STORE_MAX in make_glare.py) */
