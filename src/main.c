@@ -38,11 +38,13 @@
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
-/* OPCODE_TEST: shadPS4 conformance test drawn by ps_ui, bottom right. 1 = V_BFM_B32: two 256 px
-   panels of the cube albedo whose UVs are packed into one dword and unpacked with v_bfm_b32 masks;
-   8-bit fields left (control), 16-bit right (the ISA's width / offset bit 4). On the PS4 both show
-   the texture; a 4-bit field extract makes the right panel one flat colour. 0 = off. */
-#define OPCODE_TEST 1
+/* OPCODE_TEST: shadPS4 conformance test drawn by ps_ui, two 256 px panels bottom right, 0 = off.
+   1 = V_BFM_B32: the cube albedo with each pixel's UV packed into one dword and unpacked with
+   v_bfm_b32 masks; 8-bit fields left (control), 16-bit right (the width / offset bit 4). 2 =
+   V_ALIGNBIT_B32 (left) / V_ALIGNBYTE_B32 (right): the UV (16:16) sits in a 64-bit window {hi, lo}
+   at bit (x + y) & 31, or byte (x + y) & 3, with junk above it, read back with the align op. On the
+   PS4 every panel shows the texture. */
+#define OPCODE_TEST 2
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -161,7 +163,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-bfm"
+#define BUILD_TAG "optest-align"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -279,7 +281,7 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
     13 /* PS4 GB_TILE_MODE13 Thin1dThin: ARRAY_1D_TILED_THIN1, thin micro tiles */
 #define FROST_BLOCK (POST_PASSES + 2)
 #define FROST_PASSES 6                        /* the UI glass's frost chain */
-#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 3 blocks (64..87: OPCODE_TEST) */
+#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 3 blocks (64..95: OPCODE_TEST) */
 #define RESOLVE_BLOCK (UI_BLOCK + 3)          /* ps_resolve: 3 blocks */
 #define CLOCK_FROST_BLOCK                                                                          \
     (RESOLVE_BLOCK + 3) /* the resolve uses three blocks; clock mode: frost                        \
@@ -1749,7 +1751,7 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_COMP_RSRC1 ((4u << 6) | 3u)
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
 #define PS_RESOLVE_RSRC1 ((10u << 6) | 23u)  /* v0-v95, s0-s79 + VCC */
-#define PS_UI_RSRC1 ((10u << 6) | 10u)       /* v43, s79 + VCC (frosted glass, UI, OPCODE_TEST) */
+#define PS_UI_RSRC1 ((11u << 6) | 10u)       /* v43, s87 + VCC (frosted glass, UI, OPCODE_TEST) */
 #define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
@@ -2894,9 +2896,10 @@ int main(void) {
         build_tsharp_tex(uib + 36, &glare_tex);
         build_ssharp_clamp(uib + 44, 0);
         ui_write_table(uib);
-        { /* OPCODE_TEST (ps_ui 64..87): panels, field widths, (1 << bits) - 1 and reciprocals, and
-             the cube albedo T# as UNORM (NUM_FORMAT word1[29:26] = 0: the sRGB bytes as they are)
-             with a point S#. The T# is always valid; x0 -1e6 hides the panels. */
+        { /* OPCODE_TEST (ps_ui 64..95): test 1 panels, field widths, (1 << bits) - 1 and
+             reciprocals; the cube albedo T# as UNORM (NUM_FORMAT word1[29:26] = 0: the sRGB bytes
+             as they are) with a point S#; test 2 panels, field masks, junk word, 65535 and its
+             reciprocal. The T# is always valid; x0 -1e6 hides a test. */
             float* f = (float*)(uib + 64);
             f[0] = OPCODE_TEST == 1 ? DISPLAY_W - 16.0f - 2 * 256.0f - 16.0f : -1e6f;
             f[1] = OPCODE_TEST == 1 ? DISPLAY_H - 16.0f - 256.0f : -1e6f;
@@ -2913,6 +2916,14 @@ int main(void) {
             build_tsharp_tex(uib + 76, &cube_alb);
             uib[77] &= ~(0xFu << 26);
             build_ssharp_clamp(uib + 84, 0);
+            f[24] = OPCODE_TEST == 2 ? DISPLAY_W - 16.0f - 2 * 256.0f - 16.0f : -1e6f;
+            f[25] = OPCODE_TEST == 2 ? DISPLAY_H - 16.0f - 256.0f : -1e6f;
+            uib[90] = 31;
+            uib[91] = 3;
+            uib[92] = 0x55555555u;
+            f[29] = 65535.0f;
+            f[30] = 1.0f / 65535.0f;
+            f[31] = 0.0f;
         }
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */

@@ -34,6 +34,9 @@ SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
   1 = V_BFM_B32: two panels bottom right show the cube albedo, each pixel's UV packed into one dword
   and unpacked with v_bfm_b32 masks - 8-bit fields left (control), 16-bit fields right. On the PS4
   both show the texture; with a 4-bit field extract (shadPS4) the right panel is one flat colour.
+  2 = V_ALIGNBIT_B32 (left) / V_ALIGNBYTE_B32 (right): each pixel's UV sits in a 64-bit window at bit
+  (x + y) & 31 / byte (x + y) & 3 with junk above it, read back with the align op. On the PS4 both show
+  the texture; where the shift is 0, an undefined shift by 32 can leak the junk (diagonal stripes).
 
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
