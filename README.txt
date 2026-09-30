@@ -37,6 +37,10 @@ SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
   2 = V_ALIGNBIT_B32 (left) / V_ALIGNBYTE_B32 (right): each pixel's UV sits in a 64-bit window at bit
   (x + y) & 31 / byte (x + y) & 3 with junk above it, read back with the align op. On the PS4 both show
   the texture; where the shift is 0, an undefined shift by 32 can leak the junk (diagonal stripes).
+  3 = V_CVT_PK_U8_F32: a bit grid bottom right, 28 rows x 32 cells, each row one result dword (MSB
+  left, white = 1). Rows 0..19 convert 0, 0.5, 1.5, 2.5, 127.4, 127.5, 127.6, 128.5, 254.5, 255, 255.5,
+  256, 300, 1000, -0.4, -1, -300, +inf, -inf, NaN; rows 20..27 put 171.0 into 0x11223344 at byte
+  select 0, 1, 2, 3, 4, 5, 7, 0xFFFFFFFF, in a labelled panel. Take a PNG screenshot to read it exactly.
 
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading

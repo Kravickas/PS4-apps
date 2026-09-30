@@ -9,6 +9,7 @@ s_load_dwordx4 s[32:35], s[0:1], 0x1c
 s_load_dwordx4 s[36:39], s[0:1], 0x20
 s_load_dwordx8 s[40:47], s[0:1], 0x24
 s_load_dwordx4 s[48:51], s[0:1], 0x2c
+s_load_dwordx4 s[56:59], s[0:1], 0x30
 s_waitcnt lgkmcnt(0)
 v_mul_f32 v4, s16, v2
 v_mul_f32 v5, s17, v3
@@ -20,7 +21,7 @@ v_mul_f32 v20, 0x4253ee82, v20
 v_fract_f32 v20, v20
 v_subrev_f32 v20, 0.5, v20
 v_mul_f32 v20, 0x3b808081, v20
-; >>> panels: coverage m (v37) and edge e (v38) of the rounded rects (dwords 28..31 the options panel, 32..35 the time panel: centre x, y, half w, h in px; hidden = half -1e6), radius 16
+; >>> panels: coverage m (v37) and edge e (v38) of the rounded rects (dwords 28..31 the options panel, 32..35 the time panel, 48..51 the OPCODE_TEST 3 panel: centre x, y, half w, h in px; hidden = half -1e6), radius 16
 v_mov_b32 v37, 0
 v_mov_b32 v38, 0
 v_subrev_f32 v39, s32, v2
@@ -55,6 +56,30 @@ v_max_f32 v39, 0, v39
 v_subrev_f32 v40, s37, v3
 v_max_f32 v40, v40, -v40
 v_subrev_f32 v40, s39, v40
+v_add_f32 v40, 0x41800000, v40
+v_max_f32 v40, 0, v40
+v_mul_f32 v39, v39, v39
+v_mac_f32 v39, v40, v40
+v_sqrt_f32 v39, v39
+v_add_f32 v39, 0xc1800000, v39
+v_sub_f32 v40, 0.5, v39
+v_max_f32 v40, 0, v40
+v_min_f32 v40, 1.0, v40
+v_max_f32 v37, v37, v40
+v_add_f32 v40, 0x3f400000, v39
+v_max_f32 v40, v40, -v40
+v_sub_f32 v40, 1.0, v40
+v_max_f32 v40, 0, v40
+v_max_f32 v38, v38, v40
+; the OPCODE_TEST 3 panel (dwords 48..51): the same
+v_subrev_f32 v39, s56, v2
+v_max_f32 v39, v39, -v39
+v_subrev_f32 v39, s58, v39
+v_add_f32 v39, 0x41800000, v39
+v_max_f32 v39, 0, v39
+v_subrev_f32 v40, s57, v3
+v_max_f32 v40, v40, -v40
+v_subrev_f32 v40, s59, v40
 v_add_f32 v40, 0x41800000, v40
 v_max_f32 v40, 0, v40
 v_mul_f32 v39, v39, v39
@@ -271,6 +296,165 @@ v_cndmask_b32 v17, v17, v41, vcc
 v_cndmask_b32 v18, v18, v42, vcc
 optest2_done:
 ; <<< opcode test 2
+; >>> opcode test 3 (main.c OPCODE_TEST 3): V_CVT_PK_U8_F32 bit grid - [124] x0, [125] y0 (x0 -1e6: off),
+;     [126] 1 / cell width, [127] 1 / cell height. 28 rows x 32 cells, the result's bits MSB left: white 1, grey 0
+;     (alternate bytes darker; blue-grey in rows 20..27). Rows 0..19: S0 = [96 + row] (f32), S1 = 0,
+;     S2 = 0; rows 20..27: S0 = 171.0, S1 = [96 + row], S2 = 0x11223344.
+s_load_dwordx4 s[84:87], s[0:1], 0x7c
+s_waitcnt lgkmcnt(0)
+v_subrev_f32 v21, s84, v2
+v_subrev_f32 v22, s85, v3
+v_mul_f32 v23, s86, v21
+v_mul_f32 v24, s87, v22
+v_floor_f32 v25, v23
+v_floor_f32 v26, v24
+v_sub_f32 v27, 0x41f80000, v25
+v_min_f32 v27, v27, v25
+v_min_f32 v27, v27, v26
+v_sub_f32 v28, 0x41d80000, v26
+v_min_f32 v27, v27, v28
+v_cmp_le_f32 vcc, 0, v27
+; SCC = any lane inside the grid
+s_or_b32 s53, vcc_lo, vcc_hi
+s_cbranch_scc0 optest3_done
+v_mov_b32 v28, 1.0
+v_cndmask_b32 v28, 0, v28, vcc
+s_load_dwordx16 s[56:71], s[0:1], 0x60
+s_load_dwordx8 s[72:79], s[0:1], 0x70
+s_load_dwordx4 s[80:83], s[0:1], 0x78
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v29, v26
+v_cvt_u32_f32 v30, v25
+v_mov_b32 v31, 0
+; v31 = [96 + row]
+v_mov_b32 v32, s56
+v_cmp_ne_u32 vcc, 0, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s57
+v_cmp_ne_u32 vcc, 1, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s58
+v_cmp_ne_u32 vcc, 2, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s59
+v_cmp_ne_u32 vcc, 3, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s60
+v_cmp_ne_u32 vcc, 4, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s61
+v_cmp_ne_u32 vcc, 5, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s62
+v_cmp_ne_u32 vcc, 6, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s63
+v_cmp_ne_u32 vcc, 7, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s64
+v_cmp_ne_u32 vcc, 8, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s65
+v_cmp_ne_u32 vcc, 9, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s66
+v_cmp_ne_u32 vcc, 10, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s67
+v_cmp_ne_u32 vcc, 11, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s68
+v_cmp_ne_u32 vcc, 12, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s69
+v_cmp_ne_u32 vcc, 13, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s70
+v_cmp_ne_u32 vcc, 14, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s71
+v_cmp_ne_u32 vcc, 15, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s72
+v_cmp_ne_u32 vcc, 16, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s73
+v_cmp_ne_u32 vcc, 17, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s74
+v_cmp_ne_u32 vcc, 18, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s75
+v_cmp_ne_u32 vcc, 19, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s76
+v_cmp_ne_u32 vcc, 20, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s77
+v_cmp_ne_u32 vcc, 21, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s78
+v_cmp_ne_u32 vcc, 22, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s79
+v_cmp_ne_u32 vcc, 23, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s80
+v_cmp_ne_u32 vcc, 24, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s81
+v_cmp_ne_u32 vcc, 25, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s82
+v_cmp_ne_u32 vcc, 26, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_mov_b32 v32, s83
+v_cmp_ne_u32 vcc, 27, v29
+v_cndmask_b32 v31, v32, v31, vcc
+v_cmp_gt_u32 vcc, 20, v29
+v_mov_b32 v32, 0x432b0000
+v_cndmask_b32 v32, v32, v31, vcc
+v_mov_b32 v33, 0
+v_cndmask_b32 v33, v31, v33, vcc
+v_mov_b32 v34, 0x11223344
+v_cndmask_b32 v34, v34, v33, vcc
+v_cvt_pk_u8_f32 v35, v32, v33, v34
+v_xor_b32 v36, 31, v30
+v_lshrrev_b32 v36, v36, v35
+v_and_b32 v36, 1, v36
+; grey: 1 -> 0.93, 0 -> 0.32 / 0.22 (odd bytes); blue +0.18 for 0 bits in rows 20..27; cell border 0.05
+v_lshrrev_b32 v37, 3, v30
+v_and_b32 v37, 1, v37
+v_cvt_f32_u32 v37, v37
+v_mul_f32 v37, 0xbdcccccd, v37
+v_add_f32 v37, 0x3ea3d70a, v37
+v_mov_b32 v38, 0x3f6e147b
+v_cmp_ne_u32 vcc, 0, v36
+v_cndmask_b32 v39, v37, v38, vcc
+v_mov_b32 v40, 0x3e3851ec
+v_mov_b32 v42, 0
+v_cmp_gt_u32 vcc, 20, v29
+v_cndmask_b32 v41, v40, v42, vcc
+v_cmp_ne_u32 vcc, 0, v36
+v_cndmask_b32 v41, v41, v42, vcc
+v_add_f32 v40, v39, v41
+v_sub_f32 v37, v23, v25
+v_sub_f32 v38, 1.0, v37
+v_min_f32 v37, v37, v38
+v_sub_f32 v38, v24, v26
+v_min_f32 v37, v37, v38
+v_sub_f32 v38, 1.0, v38
+v_min_f32 v37, v37, v38
+v_cmp_gt_f32 vcc, 0x3dcccccd, v37
+v_mov_b32 v38, 0x3d4ccccd
+v_cndmask_b32 v39, v39, v38, vcc
+v_cndmask_b32 v40, v40, v38, vcc
+v_cmp_lt_f32 vcc, 0, v28
+v_cndmask_b32 v16, v16, v39, vcc
+v_cndmask_b32 v17, v17, v39, vcc
+v_cndmask_b32 v18, v18, v40, vcc
+optest3_done:
+; <<< opcode test 3
 v_add_f32 v16, v16, v20
 v_add_f32 v17, v17, v20
 v_add_f32 v18, v18, v20

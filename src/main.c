@@ -38,13 +38,19 @@
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
-/* OPCODE_TEST: shadPS4 conformance test drawn by ps_ui, two 256 px panels bottom right, 0 = off.
-   1 = V_BFM_B32: the cube albedo with each pixel's UV packed into one dword and unpacked with
-   v_bfm_b32 masks; 8-bit fields left (control), 16-bit right (the width / offset bit 4). 2 =
-   V_ALIGNBIT_B32 (left) / V_ALIGNBYTE_B32 (right): the UV (16:16) sits in a 64-bit window {hi, lo}
-   at bit (x + y) & 31, or byte (x + y) & 3, with junk above it, read back with the align op. On the
-   PS4 every panel shows the texture. */
-#define OPCODE_TEST 2
+/* OPCODE_TEST: shadPS4 conformance test drawn by ps_ui, bottom right; 0 = off.
+
+   1 = V_BFM_B32: two panels of the cube albedo, each pixel's UV packed into one dword and unpacked
+   with v_bfm_b32 masks; 8-bit fields left (control), 16-bit right (the width / offset bit 4).
+
+   2 = V_ALIGNBIT_B32 (left) / V_ALIGNBYTE_B32 (right): the UV (16:16) sits in a 64-bit window
+   {hi, lo} at bit (x + y) & 31, or byte (x + y) & 3, with junk above it, read back with the align
+   op.
+
+   3 = V_CVT_PK_U8_F32 bit grid: 28 rows x 32 cells, each row one result dword, MSB left, white = 1.
+   Rows 0..19 convert k_pku8_rows (S1 0, S2 0); rows 20..27 put 171.0 into 0x11223344 at byte
+   select S1 = 0, 1, 2, 3, 4, 5, 7, 0xFFFFFFFF. */
+#define OPCODE_TEST 3
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -163,7 +169,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-align"
+#define BUILD_TAG "optest-pku8-labels"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -281,8 +287,8 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
     13 /* PS4 GB_TILE_MODE13 Thin1dThin: ARRAY_1D_TILED_THIN1, thin micro tiles */
 #define FROST_BLOCK (POST_PASSES + 2)
 #define FROST_PASSES 6                        /* the UI glass's frost chain */
-#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 3 blocks (64..95: OPCODE_TEST) */
-#define RESOLVE_BLOCK (UI_BLOCK + 3)          /* ps_resolve: 3 blocks */
+#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 4 blocks (64..127: OPCODE_TEST) */
+#define RESOLVE_BLOCK (UI_BLOCK + 4)          /* ps_resolve: 3 blocks */
 #define CLOCK_FROST_BLOCK                                                                          \
     (RESOLVE_BLOCK + 3) /* the resolve uses three blocks; clock mode: frost                        \
                          */
@@ -2569,6 +2575,9 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
+    g_ui.topt = OPCODE_TEST == 3;
+    if (g_ui.topt)
+        ui_optest_layout();
     ls_file(ASSET_DIR "ui/ui_atlas.bin");
     ts_init();
     clock_rim_init();
@@ -2924,6 +2933,39 @@ int main(void) {
             f[29] = 65535.0f;
             f[30] = 1.0f / 65535.0f;
             f[31] = 0.0f;
+            static const uint32_t k_pku8_rows[28] = {0x00000000u /* 0.0 */,
+                                                     0x3F000000u /* 0.5 */,
+                                                     0x3FC00000u /* 1.5 */,
+                                                     0x40200000u /* 2.5 */,
+                                                     0x42FECCCDu /* 127.4 */,
+                                                     0x42FF0000u /* 127.5 */,
+                                                     0x42FF3333u /* 127.6 */,
+                                                     0x43008000u /* 128.5 */,
+                                                     0x437E8000u /* 254.5 */,
+                                                     0x437F0000u /* 255.0 */,
+                                                     0x437F8000u /* 255.5 */,
+                                                     0x43800000u /* 256.0 */,
+                                                     0x43960000u /* 300.0 */,
+                                                     0x447A0000u /* 1000.0 */,
+                                                     0xBECCCCCDu /* -0.4 */,
+                                                     0xBF800000u /* -1.0 */,
+                                                     0xC3960000u /* -300.0 */,
+                                                     0x7F800000u /* +inf */,
+                                                     0xFF800000u /* -inf */,
+                                                     0x7FC00000u /* NaN */,
+                                                     0u /* S1 */,
+                                                     1u /* S1 */,
+                                                     2u /* S1 */,
+                                                     3u /* S1 */,
+                                                     4u /* S1 */,
+                                                     5u /* S1 */,
+                                                     7u /* S1 */,
+                                                     0xFFFFFFFFu /* S1 */};
+            my_memcpy(uib + 96, k_pku8_rows, sizeof(k_pku8_rows));
+            f[60] = OPCODE_TEST == 3 ? (float)g_ui.tgx : -1e6f;
+            f[61] = OPCODE_TEST == 3 ? (float)g_ui.tgy : -1e6f;
+            f[62] = 1.0f / UI_TCELL_W;
+            f[63] = 1.0f / UI_TCELL_H;
         }
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */

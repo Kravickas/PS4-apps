@@ -49,6 +49,10 @@ typedef struct {
     int clip[2][4]; /* x0, y0, x1, y1 */
     int ycam, yday; /* baselines of the value lines (fixed by the layout) */
     int gtop, gbot; /* glyph box extent around a baseline, shadow included */
+    int topt;       /* OPCODE_TEST 3 panel: on */
+    int tx0, ty0;   /* its top left; the bit grid's top left: */
+    int tgx, tgy;
+    float trect[4]; /* its rect (hidden: -1e6) */
 } Ui;
 static Ui g_ui;
 
@@ -81,7 +85,7 @@ static int ui_load_atlas(const char* path) {
 static int ui_init(void) {
     my_memset(&g_ui, 0, sizeof(g_ui));
     for (int i = 0; i < 4; i++)
-        g_ui.rect[i] = g_ui.pill[i] = -1e6f;
+        g_ui.rect[i] = g_ui.pill[i] = g_ui.trect[i] = -1e6f;
     if (ui_load_atlas(ASSET_DIR "ui/ui_atlas.bin") != 0)
         return -1;
     for (int b = 0; b < UI_BUFS; b++) {
@@ -347,6 +351,70 @@ static int ui_pill_width(const char* s) {
 static const unsigned char k_ts_dot_srgb[4][3] = {
     {0, 0, 0}, {150, 150, 158}, {240, 205, 70}, {110, 215, 130}};
 /* dot: 0 = no time panel, 1 grey (in-game), 2 yellow (console), 3 green (internet) */
+/* OPCODE_TEST 3 panel: title lines, byte headers and a label per row of the V_CVT_PK_U8_F32 bit
+   grid that ps_ui draws at tgx, tgy (UI_TGRID_COLS x UI_TGRID_ROWS cells of UI_TCELL_W x
+   UI_TCELL_H). */
+#define UI_TGRID_COLS 32
+#define UI_TGRID_ROWS 28
+#define UI_TCELL_W 16
+#define UI_TCELL_H 24
+#define UI_TLINE 28      /* title line pitch */
+#define UI_TLABEL_GAP 12 /* labels to the grid */
+static const char* const k_ui_ttitle[3] = {
+    "V_CVT_PK_U8_F32 result bits (bit 31 left, white = 1)",
+    "Top 20 rows: S0 as labelled, S1 = 0, S2 = 0",
+    "Bottom 8 rows: S0 = 171.0, S2 = 0x11223344, S1 as labelled"};
+static const char* const k_ui_tlabel[UI_TGRID_ROWS] = {
+    "S0 = 0.0",   "S0 = 0.5",    "S0 = 1.5",   "S0 = 2.5",       "S0 = 127.4",  "S0 = 127.5",
+    "S0 = 127.6", "S0 = 128.5",  "S0 = 254.5", "S0 = 255.0",     "S0 = 255.5",  "S0 = 256.0",
+    "S0 = 300.0", "S0 = 1000.0", "S0 = -0.4",  "S0 = -1.0",      "S0 = -300.0", "S0 = +inf",
+    "S0 = -inf",  "S0 = NaN",    "S1 = 0",     "S1 = 1",         "S1 = 2",      "S1 = 3",
+    "S1 = 4",     "S1 = 5",      "S1 = 7",     "S1 = 0xFFFFFFFF"};
+static const char* const k_ui_tbyte[4] = {"byte 3", "byte 2", "byte 1", "byte 0"};
+
+static void ui_optest_layout(void) {
+    int lw = 0, tw = 0;
+    for (int i = 0; i < UI_TGRID_ROWS; i++) {
+        int w = ui_text_width(k_ui_tlabel[i]);
+        lw = w > lw ? w : lw;
+    }
+    for (int i = 0; i < 3; i++) {
+        int w = ui_text_width(k_ui_ttitle[i]);
+        tw = w > tw ? w : tw;
+    }
+    int gw = lw + UI_TLABEL_GAP + UI_TGRID_COLS * UI_TCELL_W;
+    int cw = tw > gw ? tw : gw;
+    int w = UI_PAD + cw + UI_PAD;
+    int h = UI_PAD + 4 * UI_TLINE + UI_TGRID_ROWS * UI_TCELL_H + UI_PAD;
+    g_ui.tx0 = UI_W - UI_X0 - w;
+    g_ui.ty0 = UI_H - UI_Y0 - h;
+    g_ui.tgx = g_ui.tx0 + w - UI_PAD - UI_TGRID_COLS * UI_TCELL_W;
+    g_ui.tgy = g_ui.ty0 + UI_PAD + 4 * UI_TLINE;
+    g_ui.trect[0] = (float)g_ui.tx0 + 0.5f * (float)w;
+    g_ui.trect[1] = (float)g_ui.ty0 + 0.5f * (float)h;
+    g_ui.trect[2] = 0.5f * (float)w;
+    g_ui.trect[3] = 0.5f * (float)h;
+}
+
+static void ui_optest_panel(unsigned char* b) {
+    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210};
+    if (!g_ui.topt || !b)
+        return;
+    int x = g_ui.tx0 + UI_PAD, y = g_ui.ty0 + UI_PAD + UI_FONT_ASCENT;
+    for (int i = 0; i < 3; i++)
+        ui_text(b, x, y + i * UI_TLINE, k_ui_ttitle[i], i == 0 ? white : grey);
+    int by = g_ui.tgy - (UI_TLINE - UI_FONT_CAP) / 2;
+    for (int i = 0; i < 4; i++) {
+        int gx = g_ui.tgx + i * 8 * UI_TCELL_W + 4 * UI_TCELL_W;
+        ui_text(b, gx - ui_text_width(k_ui_tbyte[i]) / 2, by, k_ui_tbyte[i], grey);
+    }
+    for (int r = 0; r < UI_TGRID_ROWS; r++) {
+        int ly = g_ui.tgy + r * UI_TCELL_H + (UI_TCELL_H + UI_FONT_CAP) / 2;
+        int lx = g_ui.tgx - UI_TLABEL_GAP - ui_text_width(k_ui_tlabel[r]);
+        ui_text(b, lx, ly, k_ui_tlabel[r], white);
+    }
+}
+
 static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* time_txt, int dot) {
     if (!g_ui.ok)
         return;
@@ -429,6 +497,7 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* tim
     g_ui.drawing = dp;
     int bottom = 0,
         right = ui_left_panel(db, g_ui.controls, cam_pct, day_mult, day_frozen, &bottom);
+    ui_optest_panel(db);
     float x0 = (float)UI_X0, y0 = (float)UI_Y0, x1 = (float)right, y1 = (float)bottom;
     g_ui.rect[0] = 0.5f * (x0 + x1);
     g_ui.rect[1] = 0.5f * (y0 + y1);
@@ -468,12 +537,13 @@ static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* tim
 }
 
 /* UI pass table (ps_ui): dwords 28..31 the panel's rect, 32..35 the time panel's, 36..47 the
-   current buffer's T# (RGBA8 UNORM, linear) and a point S#. */
+   current buffer's T# (RGBA8 UNORM, linear) and a point S#, 48..51 the OPCODE_TEST 3 panel's. */
 static void ui_write_table(uint32_t* blk) {
     float* r = (float*)(blk + 28);
     for (int i = 0; i < 4; i++) {
         r[i] = g_ui.ok ? g_ui.rect[i] : -1e6f;
         r[4 + i] = g_ui.ok ? g_ui.pill[i] : -1e6f;
+        r[20 + i] = g_ui.ok && g_ui.topt ? g_ui.trect[i] : -1e6f;
     }
     if (g_ui.ok) {
         build_tsharp(blk + 36, g_ui.buf[g_ui.cur], UI_W, UI_H);
