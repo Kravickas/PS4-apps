@@ -49,8 +49,13 @@
 
    3 = V_CVT_PK_U8_F32 bit grid: 28 rows x 32 cells, each row one result dword, MSB left, white = 1.
    Rows 0..19 convert k_pku8_rows (S1 0, S2 0); rows 20..27 put 171.0 into 0x11223344 at byte
-   select S1 = 0, 1, 2, 3, 4, 5, 7, 0xFFFFFFFF. */
-#define OPCODE_TEST 3
+   select S1 = 0, 1, 2, 3, 4, 5, 7, 0xFFFFFFFF.
+
+   4 = bit grid of 35 rows, each one instruction on the operands in k_optest4_data:
+   V_CVT_PK_U16_U32, V_CVT_PK_I16_I32, V_CVT_PKNORM_U16_F32, V_CVT_PKNORM_I16_F32, S_BITSET1_B64,
+   S_BITSET0_B64, V_ASHR_I64 (high, low dword) and V_CMPX_EQ_U64 / NE_U64 / EQ_I64 (bits 0..5 EXEC
+   after the compare, 8..13 VCC). */
+#define OPCODE_TEST 4
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -169,7 +174,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-pku8-labels"
+#define BUILD_TAG "optest-4"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -287,8 +292,8 @@ static const uint16_t g_bloom_pitch[BLOOM_LEVELS] = {512, 256, 128, 64};
     13 /* PS4 GB_TILE_MODE13 Thin1dThin: ARRAY_1D_TILED_THIN1, thin micro tiles */
 #define FROST_BLOCK (POST_PASSES + 2)
 #define FROST_PASSES 6                        /* the UI glass's frost chain */
-#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 4 blocks (64..127: OPCODE_TEST) */
-#define RESOLVE_BLOCK (UI_BLOCK + 4)          /* ps_resolve: 3 blocks */
+#define UI_BLOCK (FROST_BLOCK + FROST_PASSES) /* ps_ui: 8 blocks (64..255: OPCODE_TEST) */
+#define RESOLVE_BLOCK (UI_BLOCK + 8)          /* ps_resolve: 3 blocks */
 #define CLOCK_FROST_BLOCK                                                                          \
     (RESOLVE_BLOCK + 3) /* the resolve uses three blocks; clock mode: frost                        \
                          */
@@ -2575,7 +2580,7 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
-    g_ui.topt = OPCODE_TEST == 3;
+    g_ui.topt = OPCODE_TEST == 3 || OPCODE_TEST == 4 ? OPCODE_TEST : 0;
     if (g_ui.topt)
         ui_optest_layout();
     ls_file(ASSET_DIR "ui/ui_atlas.bin");
@@ -2965,7 +2970,47 @@ int main(void) {
             f[60] = OPCODE_TEST == 3 ? (float)g_ui.tgx : -1e6f;
             f[61] = OPCODE_TEST == 3 ? (float)g_ui.tgy : -1e6f;
             f[62] = 1.0f / UI_TCELL_W;
-            f[63] = 1.0f / UI_TCELL_H;
+            f[63] = 1.0f / UI_T3CELL_H;
+            static const uint32_t k_optest4_data[85] = {
+                0x00001234u, 0x0000ABCDu,              /* PK_U16 0x1234, 0xABCD */
+                0x0000FFFFu, 0x00010000u,              /* PK_U16 0xFFFF, 0x10000 */
+                0x00011170u, 0xFFFFFFFFu,              /* PK_U16 70000, 0xFFFFFFFF */
+                0x80000000u, 0x00000001u,              /* PK_U16 0x80000000, 1 */
+                0x00000001u, 0xFFFFFFFFu,              /* PK_I16 1, -1 */
+                0x00007FFFu, 0x00008000u,              /* PK_I16 32767, 32768 */
+                0xFFFF8000u, 0xFFFF7FFFu,              /* PK_I16 -32768, -32769 */
+                0x7FFFFFFFu, 0x80000000u,              /* PK_I16 0x7FFFFFFF, 0x80000000 */
+                0x00000000u, 0x3F800000u,              /* PKNORM_U16 0.0, 1.0 */
+                0x3E800000u, 0x3F400000u,              /* PKNORM_U16 0.25, 0.75 */
+                0xBF000000u, 0x3FC00000u,              /* PKNORM_U16 -0.5, 1.5 */
+                0x7FC00000u, 0x7F800000u,              /* PKNORM_U16 NaN, +inf */
+                0x37000080u, 0x37C000C0u,              /* PKNORM_U16 0.5/65535, 1.5/65535 */
+                0x382000A0u, 0x3F000000u,              /* PKNORM_U16 2.5/65535, 32767.5/65535 */
+                0x00000000u, 0x3F800000u,              /* PKNORM_I16 0.0, 1.0 */
+                0xBF800000u, 0x3F000000u,              /* PKNORM_I16 -1.0, 0.5 */
+                0xBFC00000u, 0x40000000u,              /* PKNORM_I16 -1.5, 2.0 */
+                0x7FC00000u, 0xFF800000u,              /* PKNORM_I16 NaN, -inf */
+                0x37800100u, 0x38400180u,              /* PKNORM_I16 0.5/32767, 1.5/32767 */
+                0xB7800100u, 0xB8A00140u,              /* PKNORM_I16 -0.5/32767, -2.5/32767 */
+                0x00000000u, 0x00000000u, 0x00000028u, /* BITSET1_B64 0, 40 */
+                0x00000000u, 0x00000000u, 0x00000046u, /* BITSET1_B64 0, 70 */
+                0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000021u, /* BITSET0_B64 ~0, 33 */
+                0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFC0u, /* BITSET0_B64 ~0, 0xFFFFFFC0 */
+                0x00000000u, 0x80000000u, 0x00000024u, /* ASHR_I64 0x80000000_00000000 >> 36 */
+                0xFFFFFFFFu, 0x7FFFFFFFu, 0x00000044u, /* ASHR_I64 0x7FFFFFFF_FFFFFFFF >> 68 */
+                0x12345678u, 0x87654321u, 0x00000000u, /* ASHR_I64 0x87654321_12345678 >> 0 */
+                0x00000000u, 0x00000001u, 0x00000000u, 0x00000001u, 0x00000000u,
+                0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u,
+                0x00000000u, 0x00000000u, 0x00000005u, 0x00000000u, 0x00000005u,
+                0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000000u, /* CMPX cases: a lo, a hi, b lo,
+                                                                       b hi x 6 */
+            };
+            my_memcpy(uib + 128, k_optest4_data, sizeof(k_optest4_data));
+            f[188] = OPCODE_TEST == 4 ? (float)g_ui.tgx : -1e6f;
+            f[189] = OPCODE_TEST == 4 ? (float)g_ui.tgy : -1e6f;
+            f[190] = 1.0f / UI_TCELL_W;
+            f[191] = 1.0f / UI_T4CELL_H;
         }
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */

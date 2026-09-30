@@ -49,7 +49,10 @@ typedef struct {
     int clip[2][4]; /* x0, y0, x1, y1 */
     int ycam, yday; /* baselines of the value lines (fixed by the layout) */
     int gtop, gbot; /* glyph box extent around a baseline, shadow included */
-    int topt;       /* OPCODE_TEST 3 panel: on */
+    int topt;       /* OPCODE_TEST panel: 3 or 4 (0 = none) */
+    const char* const* ttitle; /* its 3 title lines, row labels, rows and cell height */
+    const char* const* tlabel;
+    int trows, tch;
     int tx0, ty0;   /* its top left; the bit grid's top left: */
     int tgx, tgy;
     float trect[4]; /* its rect (hidden: -1e6) */
@@ -351,41 +354,85 @@ static int ui_pill_width(const char* s) {
 static const unsigned char k_ts_dot_srgb[4][3] = {
     {0, 0, 0}, {150, 150, 158}, {240, 205, 70}, {110, 215, 130}};
 /* dot: 0 = no time panel, 1 grey (in-game), 2 yellow (console), 3 green (internet) */
-/* OPCODE_TEST 3 panel: title lines, byte headers and a label per row of the V_CVT_PK_U8_F32 bit
-   grid that ps_ui draws at tgx, tgy (UI_TGRID_COLS x UI_TGRID_ROWS cells of UI_TCELL_W x
-   UI_TCELL_H). */
+/* OPCODE_TEST 3 / 4 panel: title lines, byte headers and a label per row of the bit grid that ps_ui
+   draws at tgx, tgy (UI_TGRID_COLS x trows cells of UI_TCELL_W x tch). */
 #define UI_TGRID_COLS 32
-#define UI_TGRID_ROWS 28
 #define UI_TCELL_W 16
-#define UI_TCELL_H 24
+#define UI_T3ROWS 28
+#define UI_T3CELL_H 24
+#define UI_T4ROWS 35
+#define UI_T4CELL_H 22
 #define UI_TLINE 28      /* title line pitch */
 #define UI_TLABEL_GAP 12 /* labels to the grid */
-static const char* const k_ui_ttitle[3] = {
+static const char* const k_ui_t3title[3] = {
     "V_CVT_PK_U8_F32 result bits (bit 31 left, white = 1)",
     "Top 20 rows: S0 as labelled, S1 = 0, S2 = 0",
     "Bottom 8 rows: S0 = 171.0, S2 = 0x11223344, S1 as labelled"};
-static const char* const k_ui_tlabel[UI_TGRID_ROWS] = {
+static const char* const k_ui_t3label[UI_T3ROWS] = {
     "S0 = 0.0",   "S0 = 0.5",    "S0 = 1.5",   "S0 = 2.5",       "S0 = 127.4",  "S0 = 127.5",
     "S0 = 127.6", "S0 = 128.5",  "S0 = 254.5", "S0 = 255.0",     "S0 = 255.5",  "S0 = 256.0",
     "S0 = 300.0", "S0 = 1000.0", "S0 = -0.4",  "S0 = -1.0",      "S0 = -300.0", "S0 = +inf",
     "S0 = -inf",  "S0 = NaN",    "S1 = 0",     "S1 = 1",         "S1 = 2",      "S1 = 3",
     "S1 = 4",     "S1 = 5",      "S1 = 7",     "S1 = 0xFFFFFFFF"};
+static const char* const k_ui_t4title[3] = {
+    "Opcode checks: result bits (bit 31 left, white = 1)",
+    "Top 20 rows: pack conversions of S0, S1 as labelled",
+    "Bottom rows: 64-bit results as high, low dword; CMPX bits 0-5 EXEC, 8-13 VCC"};
+static const char* const k_ui_t4label[UI_T4ROWS] = {"PK_U16 0x1234, 0xABCD",
+                                                    "PK_U16 0xFFFF, 0x10000",
+                                                    "PK_U16 70000, 0xFFFFFFFF",
+                                                    "PK_U16 0x80000000, 1",
+                                                    "PK_I16 1, -1",
+                                                    "PK_I16 32767, 32768",
+                                                    "PK_I16 -32768, -32769",
+                                                    "PK_I16 0x7FFFFFFF, 0x80000000",
+                                                    "PKNORM_U16 0.0, 1.0",
+                                                    "PKNORM_U16 0.25, 0.75",
+                                                    "PKNORM_U16 -0.5, 1.5",
+                                                    "PKNORM_U16 NaN, +inf",
+                                                    "PKNORM_U16 0.5/65535, 1.5/65535",
+                                                    "PKNORM_U16 2.5/65535, 32767.5/65535",
+                                                    "PKNORM_I16 0.0, 1.0",
+                                                    "PKNORM_I16 -1.0, 0.5",
+                                                    "PKNORM_I16 -1.5, 2.0",
+                                                    "PKNORM_I16 NaN, -inf",
+                                                    "PKNORM_I16 0.5/32767, 1.5/32767",
+                                                    "PKNORM_I16 -0.5/32767, -2.5/32767",
+                                                    "BITSET1_B64 0, 40  hi",
+                                                    "BITSET1_B64 0, 40  lo",
+                                                    "BITSET1_B64 0, 70  hi",
+                                                    "BITSET1_B64 0, 70  lo",
+                                                    "BITSET0_B64 ~0, 33  hi",
+                                                    "BITSET0_B64 ~0, 33  lo",
+                                                    "BITSET0_B64 ~0, 0xFFFFFFC0  hi",
+                                                    "BITSET0_B64 ~0, 0xFFFFFFC0  lo",
+                                                    "ASHR_I64 0x80000000_00000000 >> 36  hi",
+                                                    "ASHR_I64 0x80000000_00000000 >> 36  lo",
+                                                    "ASHR_I64 0x7FFFFFFF_FFFFFFFF >> 68  hi",
+                                                    "ASHR_I64 0x7FFFFFFF_FFFFFFFF >> 68  lo",
+                                                    "ASHR_I64 0x87654321_12345678 >> 0  hi",
+                                                    "ASHR_I64 0x87654321_12345678 >> 0  lo",
+                                                    "CMPX_*_64: bits 0-5 EXEC, 8-13 VCC"};
 static const char* const k_ui_tbyte[4] = {"byte 3", "byte 2", "byte 1", "byte 0"};
 
 static void ui_optest_layout(void) {
+    g_ui.ttitle = g_ui.topt == 4 ? k_ui_t4title : k_ui_t3title;
+    g_ui.tlabel = g_ui.topt == 4 ? k_ui_t4label : k_ui_t3label;
+    g_ui.trows = g_ui.topt == 4 ? UI_T4ROWS : UI_T3ROWS;
+    g_ui.tch = g_ui.topt == 4 ? UI_T4CELL_H : UI_T3CELL_H;
     int lw = 0, tw = 0;
-    for (int i = 0; i < UI_TGRID_ROWS; i++) {
-        int w = ui_text_width(k_ui_tlabel[i]);
+    for (int i = 0; i < g_ui.trows; i++) {
+        int w = ui_text_width(g_ui.tlabel[i]);
         lw = w > lw ? w : lw;
     }
     for (int i = 0; i < 3; i++) {
-        int w = ui_text_width(k_ui_ttitle[i]);
+        int w = ui_text_width(g_ui.ttitle[i]);
         tw = w > tw ? w : tw;
     }
     int gw = lw + UI_TLABEL_GAP + UI_TGRID_COLS * UI_TCELL_W;
     int cw = tw > gw ? tw : gw;
     int w = UI_PAD + cw + UI_PAD;
-    int h = UI_PAD + 4 * UI_TLINE + UI_TGRID_ROWS * UI_TCELL_H + UI_PAD;
+    int h = UI_PAD + 4 * UI_TLINE + g_ui.trows * g_ui.tch + UI_PAD;
     g_ui.tx0 = UI_W - UI_X0 - w;
     g_ui.ty0 = UI_H - UI_Y0 - h;
     g_ui.tgx = g_ui.tx0 + w - UI_PAD - UI_TGRID_COLS * UI_TCELL_W;
@@ -402,16 +449,16 @@ static void ui_optest_panel(unsigned char* b) {
         return;
     int x = g_ui.tx0 + UI_PAD, y = g_ui.ty0 + UI_PAD + UI_FONT_ASCENT;
     for (int i = 0; i < 3; i++)
-        ui_text(b, x, y + i * UI_TLINE, k_ui_ttitle[i], i == 0 ? white : grey);
+        ui_text(b, x, y + i * UI_TLINE, g_ui.ttitle[i], i == 0 ? white : grey);
     int by = g_ui.tgy - (UI_TLINE - UI_FONT_CAP) / 2;
     for (int i = 0; i < 4; i++) {
         int gx = g_ui.tgx + i * 8 * UI_TCELL_W + 4 * UI_TCELL_W;
         ui_text(b, gx - ui_text_width(k_ui_tbyte[i]) / 2, by, k_ui_tbyte[i], grey);
     }
-    for (int r = 0; r < UI_TGRID_ROWS; r++) {
-        int ly = g_ui.tgy + r * UI_TCELL_H + (UI_TCELL_H + UI_FONT_CAP) / 2;
-        int lx = g_ui.tgx - UI_TLABEL_GAP - ui_text_width(k_ui_tlabel[r]);
-        ui_text(b, lx, ly, k_ui_tlabel[r], white);
+    for (int r = 0; r < g_ui.trows; r++) {
+        int ly = g_ui.tgy + r * g_ui.tch + (g_ui.tch + UI_FONT_CAP) / 2;
+        int lx = g_ui.tgx - UI_TLABEL_GAP - ui_text_width(g_ui.tlabel[r]);
+        ui_text(b, lx, ly, g_ui.tlabel[r], white);
     }
 }
 

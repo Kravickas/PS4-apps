@@ -41,6 +41,9 @@ SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
   left, white = 1). Rows 0..19 convert 0, 0.5, 1.5, 2.5, 127.4, 127.5, 127.6, 128.5, 254.5, 255, 255.5,
   256, 300, 1000, -0.4, -1, -300, +inf, -inf, NaN; rows 20..27 put 171.0 into 0x11223344 at byte
   select 0, 1, 2, 3, 4, 5, 7, 0xFFFFFFFF, in a labelled panel. Take a PNG screenshot to read it exactly.
+  4 = the same labelled bit grid for 35 rows: V_CVT_PK_U16_U32, V_CVT_PK_I16_I32, V_CVT_PKNORM_U16_F32,
+  V_CVT_PKNORM_I16_F32, S_BITSET1_B64 / S_BITSET0_B64, V_ASHR_I64 (high, low dword) and V_CMPX_EQ_U64 /
+  NE_U64 / EQ_I64 (bits 0..5 EXEC after the compare, 8..13 VCC).
 
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
