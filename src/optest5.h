@@ -15,6 +15,10 @@ static const char* const k_opt5_op[OPT5_OPS] = {
     "F32_UBYTE1",     "F32_UBYTE2",     "F32_UBYTE3",  "OFF_F32_I4",  "PKRTZ_F16_F32",
     "PKNORM_I16_F32", "PKNORM_U16_F32", "PK_U16_U32",  "PK_I16_I32",  "PKACCUM_U8_F32",
     "PK_U8_F32"};
+/* 1: no shadPS4 translator (main 94e21778: its assert stops the shader), so only with OPT5_FULL
+ * (PS4) */
+static const uint8_t k_opt5_full_only[OPT5_OPS] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+                                                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
 static const uint32_t k_opt5_row[OPT5_ROWS][4] = {
     {0, 0x00000000u, 0x00000000u, 0x00000000u},  /* I32_F32 0 */
     {0, 0x80000000u, 0x00000000u, 0x00000000u},  /* I32_F32 -0 */

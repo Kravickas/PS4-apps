@@ -15,6 +15,8 @@
 #include "ps_ui.h"
 #include "ps_cvt_a.h"
 #include "ps_cvt_b.h"
+#include "ps_cvt_full_a.h"
+#include "ps_cvt_full_b.h"
 #include "ps_clock.h"
 #include "ps_clock_light.h"
 #include "ps_resolve.h"

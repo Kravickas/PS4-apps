@@ -61,6 +61,11 @@
    results as hex digits, and at frame 120 the CPU logs them as GitHub tables to the trace log. */
 #define OPCODE_TEST 5
 
+/* OPT5_FULL: 1 = test 5 with V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 too - PS4 only (shadPS4 has no
+   translator for them and its assert stops the shader); 0 = without them and their rows, for both.
+ */
+#define OPT5_FULL 0
+
 #include "atmosphere.h"
 #include "bgm.h"
 #include "dds_loader.h"
@@ -178,7 +183,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-5"
+#define BUILD_TAG "optest-5b"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -1897,6 +1902,10 @@ static void o5_log(void) {
               ")\n\nA: FLOAT_MODE 0x00 (denormals "
               "flushed), B: FLOAT_MODE 0xC0 (f64 / f16 denormals kept); B in bold where it differs "
               "from A.\n");
+    if (!OPT5_FULL)
+        trace_msg(
+            "Without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator; OPT5_FULL 1 "
+            "has them, PS4 only).\n");
     for (int i = 0; i < n; i++) {
         int sl = g_ui.o5slot[i];
         const char* m;
@@ -3240,8 +3249,13 @@ int main(void) {
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
+#if OPT5_FULL
+    UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_full_a_binary);
+    UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_full_b_binary);
+#else
     UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_a_binary);
     UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_b_binary);
+#endif
     g_ps_ui_gpu = ps_ui_gpu;
     g_ps_cvt_a_gpu = ps_cvt_a_gpu;
     g_ps_cvt_b_gpu = ps_cvt_b_gpu;

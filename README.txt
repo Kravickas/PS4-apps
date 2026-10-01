@@ -48,6 +48,8 @@ SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
   0x00 (denormals flushed), B in 0xC0 (f64 / f16 kept), drawn as hex by the GPU; at frame 120 the
   results go to the trace log as GitHub tables. shadPS4 needs readbacksMode = Precise for the log (the
   screen does not need it; the status line says when the CPU cannot see the results).
+  Built without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator: its assert stops the
+  shader); OPT5_FULL 1 adds them, for the PS4 only.
 
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading

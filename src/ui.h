@@ -6,6 +6,9 @@
    glass) and composites the texture after its sRGB encode. */
 #pragma once
 #include "optest5.h"
+#ifndef OPT5_FULL
+#define OPT5_FULL 0 /* main.c: 1 = also the instructions shadPS4 cannot translate */
+#endif
 #include "ui_atlas.h"
 
 #define UI_W 1920
@@ -517,6 +520,8 @@ static void ui_o5_layout(void) {
     }
     int n = 0, prev = -1;
     for (int r = 0; r < OPT5_ROWS; r++) {
+        if (!OPT5_FULL && k_opt5_full_only[k_opt5_row[r][0]])
+            continue;
         if ((int)k_opt5_row[r][0] != prev)
             g_ui.o5slot[n++] = (int16_t)(-1 - (int)k_opt5_row[r][0]);
         prev = (int)k_opt5_row[r][0];
