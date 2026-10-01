@@ -183,7 +183,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-5d"
+#define BUILD_TAG "optest-5e"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -338,7 +338,7 @@ static void* g_ps_cvt_d_gpu = 0;
 static void* g_ps_cvt_e_gpu = 0;
 #define OPT5_MODES 5
 #define OPT5_STRIDE 48          /* result bytes a slot: lo, hi for modes A..E */
-#define OPT5_RT_W 384           /* the passes' target: one pixel per slot */
+#define OPT5_RT_W 512           /* the passes' target: one pixel per slot */
 #define OPT5_MARK_A 0xC0DE5A00u /* written after the last slot by each pass */
 #define OPT5_MARK_B 0xC0DE5B00u
 #define OPT5_MARK(m) (OPT5_MARK_A + ((uint32_t)(m) << 8)) /* A..E: 0xC0DE5A00..0xC0DE5E00 */
@@ -1541,6 +1541,7 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
 /* ==== §11 Modules: time sources, UI, glass clock ============================================== */
 #include "timesrc.h"
 #include "ui.h"
+_Static_assert(OPT5_ROWS + OPT5_OPS <= OPT5_RT_W, "OPCODE_TEST 5: a pixel per slot");
 
 /* after timesrc.h / ui.h: the clock uses g_ts */
 #include "clock.h" /* glass clock: text, per-frame constants */
