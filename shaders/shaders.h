@@ -13,6 +13,8 @@
 #include "ps_post_down.h"
 #include "ps_post_final.h"
 #include "ps_ui.h"
+#include "ps_cvt_a.h"
+#include "ps_cvt_b.h"
 #include "ps_clock.h"
 #include "ps_clock_light.h"
 #include "ps_resolve.h"

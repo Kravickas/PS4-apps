@@ -887,6 +887,240 @@ v_cndmask_b32 v17, v17, v39, vcc
 v_cndmask_b32 v18, v18, v40, vcc
 optest4_done:
 ; <<< opcode test 4
+; >>> opcode test 5 (main.c OPCODE_TEST 5): the V_CVT table - [52] on (0: off). The results of ps_cvt_a / ps_cvt_b
+;     ([132] V#: A lo, A hi, B lo, B hi per slot) as hex digits from the [136] T# strip ([144] S#; 16 cells of [151] px,
+;     white with coverage in alpha); slot ops from [128] V# (0xff: a heading, 8..10: a 64-bit result, 16 digits).
+;     Rows from y [148], pitch [149] ([150] = 1 / pitch); [152] 1 / [151]; strip scale [153] u, [154] v; [155] gap
+;     between the A and B fields; columns [156 + 4k] = A field x, B field x, first slot, slots (k = 0..4).
+s_load_dword s56, s[0:1], 0x34
+s_waitcnt lgkmcnt(0)
+s_cmp_eq_u32 s56, 0
+s_cbranch_scc1 optest5_done
+s_load_dwordx16 s[56:71], s[0:1], 0x94
+s_load_dwordx8 s[72:79], s[0:1], 0xa4
+s_load_dwordx4 s[80:83], s[0:1], 0xac
+s_waitcnt lgkmcnt(0)
+; v21 = y in the table, v22 = row slot in a column, v23 = y in the row
+v_subrev_f32 v21, s56, v3
+v_mul_f32 v22, s58, v21
+v_floor_f32 v22, v22
+v_mul_f32 v23, s57, v22
+v_sub_f32 v23, v21, v23
+v_add_f32 v27, 0.5, v22
+; hit (v35): x in a field (v29) of A (v30 = 0) or B (1.0), slot (v34)
+v_mov_b32 v31, 0
+v_mov_b32 v32, 1.0
+v_mov_b32 v29, 0
+v_mov_b32 v30, 0
+v_mov_b32 v34, 0
+v_mov_b32 v35, 0
+; column 0
+v_mov_b32 v25, s65
+v_subrev_f32 v25, s64, v25
+v_subrev_f32 v25, s63, v25
+v_mov_b32 v28, s67
+v_subrev_f32 v28, v22, v28
+v_add_f32 v28, -0.5, v28
+v_min_f32 v28, v28, v27
+v_mov_b32 v33, s66
+v_add_f32 v33, v33, v22
+v_subrev_f32 v24, s64, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v31, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_subrev_f32 v24, s65, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v32, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+; column 1
+v_mov_b32 v25, s69
+v_subrev_f32 v25, s68, v25
+v_subrev_f32 v25, s63, v25
+v_mov_b32 v28, s71
+v_subrev_f32 v28, v22, v28
+v_add_f32 v28, -0.5, v28
+v_min_f32 v28, v28, v27
+v_mov_b32 v33, s70
+v_add_f32 v33, v33, v22
+v_subrev_f32 v24, s68, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v31, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_subrev_f32 v24, s69, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v32, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+; column 2
+v_mov_b32 v25, s73
+v_subrev_f32 v25, s72, v25
+v_subrev_f32 v25, s63, v25
+v_mov_b32 v28, s75
+v_subrev_f32 v28, v22, v28
+v_add_f32 v28, -0.5, v28
+v_min_f32 v28, v28, v27
+v_mov_b32 v33, s74
+v_add_f32 v33, v33, v22
+v_subrev_f32 v24, s72, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v31, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_subrev_f32 v24, s73, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v32, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+; column 3
+v_mov_b32 v25, s77
+v_subrev_f32 v25, s76, v25
+v_subrev_f32 v25, s63, v25
+v_mov_b32 v28, s79
+v_subrev_f32 v28, v22, v28
+v_add_f32 v28, -0.5, v28
+v_min_f32 v28, v28, v27
+v_mov_b32 v33, s78
+v_add_f32 v33, v33, v22
+v_subrev_f32 v24, s76, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v31, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_subrev_f32 v24, s77, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v32, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+; column 4
+v_mov_b32 v25, s81
+v_subrev_f32 v25, s80, v25
+v_subrev_f32 v25, s63, v25
+v_mov_b32 v28, s83
+v_subrev_f32 v28, v22, v28
+v_add_f32 v28, -0.5, v28
+v_min_f32 v28, v28, v27
+v_mov_b32 v33, s82
+v_add_f32 v33, v33, v22
+v_subrev_f32 v24, s80, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v31, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_subrev_f32 v24, s81, v2
+v_sub_f32 v26, v25, v24
+v_min_f32 v26, v26, v24
+v_min_f32 v26, v26, v28
+v_cmp_lt_f32 vcc, 0, v26
+v_cndmask_b32 v29, v29, v24, vcc
+v_cndmask_b32 v30, v30, v32, vcc
+v_cndmask_b32 v34, v34, v33, vcc
+v_cndmask_b32 v35, v35, v32, vcc
+v_cmp_lt_f32 vcc, 0, v35
+; SCC = any lane in a field
+s_or_b32 s53, vcc_lo, vcc_hi
+s_cbranch_scc0 optest5_done
+s_mov_b32 s84, s59
+s_mov_b32 s85, s60
+s_mov_b32 s86, s61
+s_mov_b32 s87, s62
+s_load_dwordx16 s[56:71], s[0:1], 0x80
+s_load_dwordx4 s[72:75], s[0:1], 0x90
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v36, v34
+v_lshlrev_b32 v36, 4, v36
+buffer_load_dword v37, v36, s[56:59], 0 offen
+buffer_load_dwordx4 v[38:41], v36, s[60:63], 0 offen
+s_waitcnt vmcnt(0)
+; a heading has no digits; ops 8..10 give 16 digits (v42 = digit count), others 8
+v_cmp_eq_u32 vcc, 0xff, v37
+v_cndmask_b32 v35, v35, v31, vcc
+v_add_i32 v42, vcc, -8, v37
+v_cmp_gt_u32 vcc, 3, v42
+v_mov_b32 v42, 0x41000000
+v_mov_b32 v43, 0x41800000
+v_cndmask_b32 v42, v42, v43, vcc
+; v43 = digit, past the count: no digit
+v_mul_f32 v43, s85, v29
+v_floor_f32 v43, v43
+v_cmp_le_f32 vcc, v42, v43
+v_cndmask_b32 v35, v35, v31, vcc
+; the field's value (A or B), the digit's dword (v38) and nibble
+v_cmp_lt_f32 vcc, 0, v30
+v_cndmask_b32 v38, v38, v40, vcc
+v_cndmask_b32 v39, v39, v41, vcc
+v_sub_f32 v40, 0x41800000, v42
+v_add_f32 v40, v40, v43
+v_cmp_gt_f32 vcc, 0x41000000, v40
+v_cndmask_b32 v38, v38, v39, vcc
+v_cvt_u32_f32 v41, v40
+v_and_b32 v41, 7, v41
+v_xor_b32 v41, 7, v41
+v_lshlrev_b32 v41, 2, v41
+v_lshrrev_b32 v38, v41, v38
+v_and_b32 v38, 15, v38
+; strip coordinates: u = (nibble * cell + x in the cell) * [153], v = y in the row * [154]
+v_mul_f32 v41, s84, v43
+v_sub_f32 v41, v29, v41
+v_cvt_f32_u32 v38, v38
+v_mul_f32 v38, s84, v38
+v_add_f32 v38, v38, v41
+v_mul_f32 v38, s86, v38
+v_mul_f32 v39, s87, v23
+image_sample_lz v[40:43], v[38:39], s[64:71], s[72:75] dmask:0xf
+s_waitcnt vmcnt(0)
+v_cmp_lt_f32 vcc, 0, v35
+v_cndmask_b32 v43, v31, v43, vcc
+; white over the panel by the glyph's coverage
+v_sub_f32 v40, 0x3f733333, v16
+v_mul_f32 v40, v40, v43
+v_add_f32 v16, v16, v40
+v_sub_f32 v40, 0x3f733333, v17
+v_mul_f32 v40, v40, v43
+v_add_f32 v17, v17, v40
+v_sub_f32 v40, 0x3f733333, v18
+v_mul_f32 v40, v40, v43
+v_add_f32 v18, v18, v40
+optest5_done:
+; <<< opcode test 5
 v_add_f32 v16, v16, v20
 v_add_f32 v17, v17, v20
 v_add_f32 v18, v18, v20

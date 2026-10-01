@@ -25,6 +25,8 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
                      distance atlas (URW Gothic Demi; not shipped)
   make_clock_light_norm.py   src/clock_light_norm.h: the clock's internal-light normaliser
   gen_ps_clock.py    shaders/ps_clock.s (clock mode's glass)
+  gen_optest5.py     src/optest5.h: the OPCODE_TEST 5 rows (every V_CVT_* of GCN2, edge-case inputs,
+                     labels); run clang-format on the header afterwards
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
@@ -41,5 +43,7 @@ badge_1024.png: the ShadPS4 badge rebuilt at 1024 px from the original logo artw
 (shad.png), used by make_icon.py.
 
 make_ui_atlas.py FONT: assets/ui/ui_atlas.bin + src/ui_atlas.h - glyphs of the logo's font
-(URW Gothic Demi, 28 px) and the DS4 button icons in ui_icons/ (from a DS4 icon
-pack), used by the on-screen panels (src/ui.h). The font is not shipped; pass its path.
+(URW Gothic Demi, 19 px, and a 13 px set for the OPCODE_TEST 5 table) and the DS4 button icons in
+ui_icons/ (from a DS4 icon pack), used by the on-screen panels (src/ui.h). The font is not shipped;
+pass the OpenType build (URWGothic-Demi.otf, urw-base35) - the Type 1 build has other metrics and
+changes the atlas. Run clang-format on src/ui_atlas.h afterwards.

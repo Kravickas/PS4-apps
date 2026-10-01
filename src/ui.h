@@ -5,6 +5,7 @@
    flight keep reading theirs. ps_ui blurs the scene under the panel's rounded rect (frosted
    glass) and composites the texture after its sRGB encode. */
 #pragma once
+#include "optest5.h"
 #include "ui_atlas.h"
 
 #define UI_W 1920
@@ -53,6 +54,11 @@ typedef struct {
     const char* const* ttitle; /* its 3 title lines, row labels, rows and cell height */
     const char* const* tlabel;
     int trows, tch;
+    int o5n, o5dw,
+        o5status; /* OPCODE_TEST 5: slots, hex digit cell, 0 / 1 logged / 2 no readback */
+    int16_t o5slot[OPT5_ROWS + OPT5_OPS]; /* a row, or -1 - op for a heading */
+    int o5x[5], o5xa[5], o5xb[5], o5s0[5],
+        o5ns[5];    /* columns: x, A / B field x, first slot, slots */
     int tx0, ty0;   /* its top left; the bit grid's top left: */
     int tgx, tgy;
     float trect[4]; /* its rect (hidden: -1e6) */
@@ -182,6 +188,32 @@ static int ui_text(unsigned char* dst, int x, int y, const char* s, const unsign
             const UiGlyph* g = &ui_glyph[ui_glyph_index(*p)];
             if (pass == 0)
                 ui_blit(dst, g->x, g->y, g->w, g->h, cx + g->xoff + 2, y + g->yoff + 2, black, 115);
+            else
+                ui_blit(dst, g->x, g->y, g->w, g->h, cx + g->xoff, y + g->yoff, col, 256);
+            cx += g->adv;
+        }
+        if (pass == 1)
+            return cx;
+    }
+    return x;
+}
+
+/* The same at UI_FONT_S_PX (ui_glyph_s) with a 1 px shadow: the OPCODE_TEST 5 table. */
+static int ui_text_width_s(const char* s) {
+    int w = 0;
+    while (*s)
+        w += ui_glyph_s[ui_glyph_index(*s++)].adv;
+    return w;
+}
+
+static int ui_text_s(unsigned char* dst, int x, int y, const char* s, const unsigned char col[3]) {
+    static const unsigned char black[3] = {0, 0, 0};
+    for (int pass = 0; pass < 2; pass++) {
+        int cx = x;
+        for (const char* p = s; *p; p++) {
+            const UiGlyph* g = &ui_glyph_s[ui_glyph_index(*p)];
+            if (pass == 0)
+                ui_blit(dst, g->x, g->y, g->w, g->h, cx + g->xoff + 1, y + g->yoff + 1, black, 115);
             else
                 ui_blit(dst, g->x, g->y, g->w, g->h, cx + g->xoff, y + g->yoff, col, 256);
             cx += g->adv;
@@ -462,9 +494,157 @@ static void ui_optest_panel(unsigned char* b) {
     }
 }
 
+/* OPCODE_TEST 5 page: every V_CVT_* row of optest5.h in UI_O5_COLS columns over the whole screen, a
+   heading (the instruction) before each op's rows; ps_ui draws each row's results A and B as hex
+   digits in the fields at o5xa / o5xb (UI_O5_PITCH rows from UI_O5_Y0, o5dw px digit cells). */
+#define UI_O5_COLS 5
+#define UI_O5_Y0 48
+#define UI_O5_PITCH 15
+#define UI_O5_GAP_L 10   /* label to the A field */
+#define UI_O5_GAP_AB 14  /* A field to the B field */
+#define UI_O5_GAP_COL 22 /* between columns */
+static int ui_o5_wide(int row) {
+    uint32_t op = k_opt5_row[row][0];
+    return op == 8 || op == 9 || op == 10; /* F64_I32, F64_U32, F64_F32 */
+}
+
+static void ui_o5_layout(void) {
+    static const char hex[] = "0123456789ABCDEF";
+    g_ui.o5dw = 0;
+    for (int i = 0; i < 16; i++) {
+        int a = ui_glyph_s[ui_glyph_index(hex[i])].adv;
+        g_ui.o5dw = a > g_ui.o5dw ? a : g_ui.o5dw;
+    }
+    int n = 0, prev = -1;
+    for (int r = 0; r < OPT5_ROWS; r++) {
+        if ((int)k_opt5_row[r][0] != prev)
+            g_ui.o5slot[n++] = (int16_t)(-1 - (int)k_opt5_row[r][0]);
+        prev = (int)k_opt5_row[r][0];
+        g_ui.o5slot[n++] = (int16_t)r;
+    }
+    g_ui.o5n = n;
+    int per = (n + UI_O5_COLS - 1) / UI_O5_COLS, a = 0, x = UI_X0;
+    for (int k = 0; k < UI_O5_COLS; k++) {
+        int b = k == UI_O5_COLS - 1 ? n : (a + per < n ? a + per : n);
+        if (b < n && g_ui.o5slot[b - 1] < 0) /* no heading as a column's last line */
+            b--;
+        int lw = 0, hw = 0, nd = 8;
+        for (int i = a; i < b; i++) {
+            int sl = g_ui.o5slot[i];
+            if (sl < 0) {
+                int w = ui_text_width_s("V_CVT_") + ui_text_width_s(k_opt5_op[-1 - sl]);
+                hw = w > hw ? w : hw;
+            } else {
+                int w = ui_text_width_s(k_opt5_label[sl]);
+                lw = w > lw ? w : lw;
+                nd = ui_o5_wide(sl) ? 16 : nd;
+            }
+        }
+        g_ui.o5x[k] = x;
+        g_ui.o5xa[k] = x + lw + UI_O5_GAP_L;
+        g_ui.o5xb[k] = g_ui.o5xa[k] + nd * g_ui.o5dw + UI_O5_GAP_AB;
+        g_ui.o5s0[k] = a;
+        g_ui.o5ns[k] = b - a;
+        int cw = g_ui.o5xb[k] + nd * g_ui.o5dw - x;
+        x += (cw > hw ? cw : hw) + UI_O5_GAP_COL;
+        a = b;
+    }
+    g_ui.trect[0] = 0.5f * UI_W;
+    g_ui.trect[1] = 0.5f * UI_H;
+    g_ui.trect[2] = 0.5f * UI_W - 4.0f;
+    g_ui.trect[3] = 0.5f * UI_H - 4.0f;
+}
+
+static void ui_o5_draw(unsigned char* b) {
+    static const unsigned char white[3] = {255, 255, 255}, grey[3] = {205, 205, 210},
+                               head[3] = {150, 200, 255}, warn[3] = {255, 170, 120};
+    static const char* const status[3] = {"waiting for the results ...",
+                                          "results logged: ShadCube4 trace.log",
+                                          "results not visible to the CPU (shadPS4: readbacksMode "
+                                          "= Precise); the table is GPU-drawn"};
+    int y = UI_Y0 + UI_FONT_ASCENT;
+    int x = ui_text(
+        b, UI_X0 + 8, y,
+        "V_CVT_* (GCN2)   A: FLOAT_MODE 0x00 (denormals flushed)   B: 0xC0 (f64 / f16 kept)",
+        white);
+    ui_text_s(b, x + 30, y, status[g_ui.o5status], g_ui.o5status == 2 ? warn : grey);
+    for (int k = 0; k < UI_O5_COLS; k++) {
+        int nd = 8;
+        for (int i = g_ui.o5s0[k]; i < g_ui.o5s0[k] + g_ui.o5ns[k]; i++)
+            if (g_ui.o5slot[i] >= 0 && ui_o5_wide(g_ui.o5slot[i]))
+                nd = 16;
+        int hy = UI_O5_Y0 - 5;
+        ui_text_s(b, g_ui.o5xa[k] + (nd * g_ui.o5dw - ui_text_width_s("A")) / 2, hy, "A", grey);
+        ui_text_s(b, g_ui.o5xb[k] + (nd * g_ui.o5dw - ui_text_width_s("B")) / 2, hy, "B", grey);
+        for (int i = 0; i < g_ui.o5ns[k]; i++) {
+            int sl = g_ui.o5slot[g_ui.o5s0[k] + i];
+            int by = UI_O5_Y0 + i * UI_O5_PITCH + (UI_O5_PITCH + UI_FONT_S_CAP) / 2;
+            if (sl < 0)
+                ui_text_s(b, ui_text_s(b, g_ui.o5x[k], by, "V_CVT_", head), by, k_opt5_op[-1 - sl],
+                          head);
+            else
+                ui_text_s(b, g_ui.o5xa[k] - UI_O5_GAP_L - ui_text_width_s(k_opt5_label[sl]), by,
+                          k_opt5_label[sl], white);
+        }
+    }
+}
+
+/* The hex digit strip for ps_ui (256 x 16 RGBA8): 0..9, A..F of ui_glyph_s centred in o5dw px
+   cells, white with the glyph's coverage in alpha, baseline where the table's rows have it. */
+static void ui_o5_strip(unsigned char* st) {
+    for (int i = 0; i < 256 * 16 * 4; i++)
+        st[i] = 0;
+    for (int c = 0; c < 16; c++) {
+        const UiGlyph* g = &ui_glyph_s[ui_glyph_index("0123456789ABCDEF"[c])];
+        int x0 = c * g_ui.o5dw + (g_ui.o5dw - g->adv) / 2 + g->xoff;
+        int y0 = (UI_O5_PITCH + UI_FONT_S_CAP) / 2 + g->yoff;
+        for (int y = 0; y < g->h; y++)
+            for (int x = 0; x < g->w; x++) {
+                int tx = x0 + x, ty = y0 + y;
+                if (tx < 0 || tx >= 256 || ty < 0 || ty >= 16)
+                    continue;
+                unsigned char* q = st + (ty * 256 + tx) * 4;
+                q[0] = q[1] = q[2] = 255;
+                q[3] = g_ui.atlas[((g->y + y) * UI_ATLAS_W + g->x + x) * 4 + 3];
+            }
+    }
+}
+
+/* OPCODE_TEST 5: the page alone, redrawn into the next buffer when the status changes. */
+static void ui_o5_update(void) {
+    char key[8] = {'o', '5', (char)('0' + g_ui.o5status), 0};
+    int same = 1;
+    for (int i = 0; key[i] || g_ui.key[i]; i++)
+        if (key[i] != g_ui.key[i]) {
+            same = 0;
+            break;
+        }
+    if (same)
+        return;
+    for (int i = 0; i < (int)sizeof(key); i++)
+        g_ui.key[i] = key[i];
+    int nb = (g_ui.cur + 1) % UI_BUFS;
+    unsigned char* b = g_ui.buf[nb];
+    int* dp = g_ui.dirty[nb];
+    if (dp[2] > dp[0])
+        ui_clear(b, dp[0], dp[1], dp[2] - dp[0], dp[3] - dp[1]);
+    dp[0] = dp[1] = dp[2] = dp[3] = 0;
+    g_ui.drawing = dp;
+    ui_o5_draw(b);
+    g_ui.drawing = 0;
+    for (int i = 0; i < 4; i++)
+        g_ui.rect[i] = g_ui.pill[i] = -1e6f;
+    g_ui.st[nb].valid = 0;
+    g_ui.cur = nb;
+}
+
 static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* time_txt, int dot) {
     if (!g_ui.ok)
         return;
+    if (g_ui.topt == 5) {
+        ui_o5_update();
+        return;
+    }
     char key[96], *k = key;
     k += ui_fmt_int(k, g_ui.controls);
     *k++ = ',';

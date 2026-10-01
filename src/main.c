@@ -54,8 +54,12 @@
    4 = bit grid of 35 rows, each one instruction on the operands in k_optest4_data:
    V_CVT_PK_U16_U32, V_CVT_PK_I16_I32, V_CVT_PKNORM_U16_F32, V_CVT_PKNORM_I16_F32, S_BITSET1_B64,
    S_BITSET0_B64, V_ASHR_I64 (high, low dword) and V_CMPX_EQ_U64 / NE_U64 / EQ_I64 (bits 0..5 EXEC
-   after the compare, 8..13 VCC). */
-#define OPCODE_TEST 4
+   after the compare, 8..13 VCC).
+
+   5 = every V_CVT_* of GCN2 (src/optest5.h, tools/gen_optest5.py) over the whole screen: ps_cvt_a /
+   ps_cvt_b compute each row in FLOAT_MODE 0x00 (A) and 0xC0 (B) into a buffer, ps_ui draws the
+   results as hex digits, and at frame 120 the CPU logs them as GitHub tables to the trace log. */
+#define OPCODE_TEST 5
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -174,7 +178,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-4"
+#define BUILD_TAG "optest-5"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -321,6 +325,18 @@ static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
 static void* g_ps_ui_gpu = 0;
+static void* g_ps_cvt_a_gpu =
+    0; /* OPCODE_TEST 5: the conversion passes (ps_cvt, FLOAT_MODE A / B) */
+static void* g_ps_cvt_b_gpu = 0;
+#define OPT5_RT_W 384           /* the passes' target: one pixel per slot */
+#define OPT5_MARK_A 0xC0DE5A00u /* written after the last slot by each pass */
+#define OPT5_MARK_B 0xC0DE5B00u
+static struct {
+    int ok, logged;
+    uint32_t *slots, *res,
+        *tab;         /* slot table {op, a, b, c}, results {A lo, A hi, B lo, B hi}, pass tables */
+    void *rt, *strip; /* the passes' target, the hex digit strip (256 x 16 RGBA8) */
+} g_o5;
 static void* g_ps_clock_gpu = 0;       /* clock mode's UI pass (ps_clock) */
 static void* g_ps_clock_light_gpu = 0; /* its internal light (ps_clock_light) */
 static int g_clock_mode = 0;           /* Circle: the glass clock instead of the panels */
@@ -1763,6 +1779,10 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
 #define PS_RESOLVE_RSRC1 ((10u << 6) | 23u)  /* v0-v95, s0-s79 + VCC */
 #define PS_UI_RSRC1 ((11u << 6) | 10u)       /* v43, s87 + VCC (frosted glass, UI, OPCODE_TEST) */
+#define PS_CVT_A_RSRC1                                                                             \
+    ((2u << 6) | 4u) /* v19, s21 + VCC; FLOAT_MODE 0x00 (all denormals flushed) */
+#define PS_CVT_B_RSRC1                                                                             \
+    (PS_CVT_A_RSRC1 | (0xC0u << 12))         /* FLOAT_MODE 0xC0: f64 / f16 denormals kept */
 #define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
@@ -1819,9 +1839,100 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
                       g_post_tab + CLOCK_LIGHT_BLOCK * 32, bg_v);
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM,
                   g_ps_clock_gpu, PS_CLOCK_RSRC1, g_post_tab + CLOCK_BLOCK * 32, bg_v);
-    } else
+    } else {
+        if (g_o5.ok) { /* OPCODE_TEST 5: every V_CVT row in FLOAT_MODE A and B, before ps_ui reads
+                          them */
+            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_a_gpu,
+                      PS_CVT_A_RSRC1, g_o5.tab, bg_v);
+            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_b_gpu,
+                      PS_CVT_B_RSRC1, g_o5.tab + 16, bg_v);
+        }
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
                   PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
+    }
+}
+
+/* OPCODE_TEST 5: the results as GitHub tables in the trace log, one per instruction (B bold where
+   it differs from A); without both markers the CPU does not see the GPU's writes (shadPS4:
+   readbacks). */
+static int o5_hex(char* o, uint32_t v) {
+    o[0] = '0';
+    o[1] = 'x';
+    for (int i = 0; i < 8; i++)
+        o[2 + i] = "0123456789ABCDEF"[(v >> (28 - 4 * i)) & 15];
+    return 10;
+}
+
+static int o5_value(char* o, const volatile uint32_t* r, int wide) { /* 0xHI_LO for 64 bits */
+    int n = o5_hex(o, wide ? r[1] : r[0]);
+    if (!wide)
+        return n;
+    o[n++] = '_';
+    for (int i = 0; i < 8; i++)
+        o[n++] = "0123456789ABCDEF"[(r[0] >> (28 - 4 * i)) & 15];
+    return n;
+}
+
+static void o5_log(void) {
+    int n = g_ui.o5n;
+    const volatile uint32_t* r = g_o5.res;
+    char line[256];
+    int k = 0;
+    if (r[4 * n] != OPT5_MARK_A || r[4 * n + 1] != OPT5_MARK_B) {
+        k = 0;
+        const char* m = "opt5: results not visible to the CPU (markers ";
+        while (*m)
+            line[k++] = *m++;
+        k += o5_hex(line + k, r[4 * n]);
+        line[k++] = ' ';
+        k += o5_hex(line + k, r[4 * n + 1]);
+        m = "); shadPS4: readbacksMode = Precise\n";
+        while (*m)
+            line[k++] = *m++;
+        trace_line(line, (unsigned long)k);
+        g_ui.o5status = 2;
+        return;
+    }
+    trace_msg("\n## V_CVT_* on GCN2 (OPCODE_TEST 5, build " BUILD_TAG
+              ")\n\nA: FLOAT_MODE 0x00 (denormals "
+              "flushed), B: FLOAT_MODE 0xC0 (f64 / f16 denormals kept); B in bold where it differs "
+              "from A.\n");
+    for (int i = 0; i < n; i++) {
+        int sl = g_ui.o5slot[i];
+        const char* m;
+        k = 0;
+        if (sl < 0) {
+            m = "\n### V_CVT_";
+            while (*m)
+                line[k++] = *m++;
+            for (m = k_opt5_op[-1 - sl]; *m;)
+                line[k++] = *m++;
+            m = "\n\n| Input | A | B |\n|---|--:|--:|\n";
+            while (*m)
+                line[k++] = *m++;
+        } else {
+            const volatile uint32_t* v = r + 4 * i;
+            int wide = ui_o5_wide(sl), diff = v[0] != v[2] || (wide && v[1] != v[3]);
+            m = "| ";
+            while (*m)
+                line[k++] = *m++;
+            for (m = k_opt5_label[sl]; *m;)
+                line[k++] = *m++;
+            m = " | ";
+            while (*m)
+                line[k++] = *m++;
+            k += o5_value(line + k, v, wide);
+            m = diff ? " | **" : " | ";
+            while (*m)
+                line[k++] = *m++;
+            k += o5_value(line + k, v + 2, wide);
+            m = diff ? "** |\n" : " |\n";
+            while (*m)
+                line[k++] = *m++;
+        }
+        trace_line(line, (unsigned long)k);
+    }
+    g_ui.o5status = 1;
 }
 
 /* ==== §13 Main command buffer (build_dcb) ===================================================== */
@@ -2580,8 +2691,10 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
-    g_ui.topt = OPCODE_TEST == 3 || OPCODE_TEST == 4 ? OPCODE_TEST : 0;
-    if (g_ui.topt)
+    g_ui.topt = OPCODE_TEST >= 3 && OPCODE_TEST <= 5 ? OPCODE_TEST : 0;
+    if (g_ui.topt == 5)
+        ui_o5_layout();
+    else if (g_ui.topt)
         ui_optest_layout();
     ls_file(ASSET_DIR "ui/ui_atlas.bin");
     ts_init();
@@ -3011,6 +3124,57 @@ int main(void) {
             f[189] = OPCODE_TEST == 4 ? (float)g_ui.tgy : -1e6f;
             f[190] = 1.0f / UI_TCELL_W;
             f[191] = 1.0f / UI_T4CELL_H;
+            /* OPCODE_TEST 5 ([52] on; its 128..175 overlap test 4's data, unused then): the slot
+               table, the results (A and B per slot, then the two markers), the passes' target and
+               tables, the hex digit strip (ui_glyph_s digits centred in o5dw px cells, baseline as
+               the rows'). */
+            uib[52] = 0;
+            if (OPCODE_TEST == 5 && g_ui.ok) {
+                int n = g_ui.o5n, dw = g_ui.o5dw;
+                g_o5.slots = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
+                g_o5.res = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
+                g_o5.tab = (uint32_t*)gpu_alloc_typed(256, 256, MEM_TYPE_ONION);
+                g_o5.rt = gpu_alloc_typed(OPT5_RT_W * 4, 256, MEM_TYPE_GARLIC);
+                g_o5.strip = gpu_alloc_typed(256 * 16 * 4, 256, MEM_TYPE_ONION);
+                if (g_o5.slots && g_o5.res && g_o5.tab && g_o5.rt && g_o5.strip) {
+                    for (int i = 0; i < n; i++) {
+                        int sl = g_ui.o5slot[i];
+                        for (int j = 0; j < 4; j++)
+                            g_o5.slots[4 * i + j] = sl < 0 ? (j ? 0u : 0xFFu) : k_opt5_row[sl][j];
+                    }
+                    my_memset(g_o5.res, 0, n * 16 + 256);
+                    ui_o5_strip((unsigned char*)g_o5.strip);
+                    for (int h = 0; h < 2; h++) { /* ps_cvt_a (A, +0) and ps_cvt_b (B, +8) */
+                        uint32_t* t = g_o5.tab + 16 * h;
+                        build_vsharp(t, g_o5.slots, n * 16);
+                        build_vsharp(t + 4, g_o5.res, n * 16 + 8);
+                        t[8] = h ? 8u : 0u;
+                        t[9] = (uint32_t)n;
+                        t[10] = h ? OPT5_MARK_B : OPT5_MARK_A;
+                        t[11] = 0;
+                    }
+                    build_vsharp(uib + 128, g_o5.slots, n * 16);
+                    build_vsharp(uib + 132, g_o5.res, n * 16 + 8);
+                    build_tsharp(uib + 136, g_o5.strip, 256, 16);
+                    build_ssharp_clamp(uib + 144, 0);
+                    f[84] = (float)UI_O5_Y0;
+                    f[85] = (float)UI_O5_PITCH;
+                    f[86] = 1.0f / UI_O5_PITCH;
+                    f[87] = (float)dw;
+                    f[88] = 1.0f / (float)dw;
+                    f[89] = 1.0f / 256.0f;
+                    f[90] = 1.0f / 16.0f;
+                    f[91] = (float)UI_O5_GAP_AB;
+                    for (int k = 0; k < UI_O5_COLS; k++) {
+                        f[92 + 4 * k] = (float)g_ui.o5xa[k];
+                        f[93 + 4 * k] = (float)g_ui.o5xb[k];
+                        f[94 + 4 * k] = (float)g_ui.o5s0[k];
+                        f[95 + 4 * k] = (float)g_ui.o5ns[k];
+                    }
+                    uib[52] = 1;
+                    g_o5.ok = 1;
+                }
+            }
         }
     } else
         g_hdr = 0; /* no bloom: render straight into the sRGB display buffer */
@@ -3076,7 +3240,11 @@ int main(void) {
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
+    UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_a_binary);
+    UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_b_binary);
     g_ps_ui_gpu = ps_ui_gpu;
+    g_ps_cvt_a_gpu = ps_cvt_a_gpu;
+    g_ps_cvt_b_gpu = ps_cvt_b_gpu;
     UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
     g_ps_clock_gpu = ps_clock_gpu;
     UPLOAD_SHADER(ps_clock_light_gpu, ps_clock_light_binary);
@@ -4300,6 +4468,10 @@ int main(void) {
                          : g_ts.source == TS_CONSOLE ? 2
                          : ts_net_valid()            ? 3
                                                      : 2;
+            if (g_o5.ok && !g_o5.logged && frame >= 120) {
+                o5_log();
+                g_o5.logged = 1;
+            }
             ui_update(speed_pct, k_day_tenths[day_step], day_frozen, tod_txt, ts_dot);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
             if (g_clock_mode) {

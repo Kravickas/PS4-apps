@@ -1,0 +1,144 @@
+; OPCODE_TEST 5 conversion pass: one pixel per table slot (a 384 x 1 target, x = slot). Table (s[0:1]): [0..3] V# of
+; the slots {op, a, b, c} (op 0xff: a heading), [4..7] V# of the results {A lo, A hi, B lo, B hi} per slot, [8] this
+; pass's byte offset in a result (A 0, B 8), [9] slot count, [10] marker. Runs every V_CVT_* of GCN2 on the slot's
+; operands and keeps the slot's op (a, b = an f64 source; c = PK_U8's S2, PKACCUM's destination). Assembled twice:
+; ps_cvt_a (PGM_RSRC1 FLOAT_MODE 0x00) and ps_cvt_b (0xC0); slot 0 also stores the marker at [slot count * 16 + 0 / 4].
+s_load_dwordx8 s[4:11], s[0:1], 0x0
+s_load_dwordx4 s[12:15], s[0:1], 0x8
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cmp_gt_u32 vcc, s13, v4
+s_and_saveexec_b64 s[16:17], vcc
+s_cbranch_execz cvt_done
+v_lshlrev_b32 v5, 4, v4
+buffer_load_dwordx4 v[8:11], v5, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v12, 0
+v_mov_b32 v13, 0
+; V_CVT_I32_F32
+v_cvt_i32_f32 v14, v9
+v_cmp_eq_u32 vcc, 0, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_U32_F32
+v_cvt_u32_f32 v14, v9
+v_cmp_eq_u32 vcc, 1, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_FLR_I32_F32
+v_cvt_flr_i32_f32 v14, v9
+v_cmp_eq_u32 vcc, 2, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_RPI_I32_F32
+v_cvt_rpi_i32_f32 v14, v9
+v_cmp_eq_u32 vcc, 3, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_I32_F64
+v_cvt_i32_f64 v14, v[9:10]
+v_cmp_eq_u32 vcc, 4, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_U32_F64
+v_cvt_u32_f64 v14, v[9:10]
+v_cmp_eq_u32 vcc, 5, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_I32
+v_cvt_f32_i32 v14, v9
+v_cmp_eq_u32 vcc, 6, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_U32
+v_cvt_f32_u32 v14, v9
+v_cmp_eq_u32 vcc, 7, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F64_I32
+v_cvt_f64_i32 v[14:15], v9
+v_cmp_eq_u32 vcc, 8, v8
+v_cndmask_b32 v12, v12, v14, vcc
+v_cndmask_b32 v13, v13, v15, vcc
+; V_CVT_F64_U32
+v_cvt_f64_u32 v[14:15], v9
+v_cmp_eq_u32 vcc, 9, v8
+v_cndmask_b32 v12, v12, v14, vcc
+v_cndmask_b32 v13, v13, v15, vcc
+; V_CVT_F64_F32
+v_cvt_f64_f32 v[14:15], v9
+v_cmp_eq_u32 vcc, 10, v8
+v_cndmask_b32 v12, v12, v14, vcc
+v_cndmask_b32 v13, v13, v15, vcc
+; V_CVT_F32_F64
+v_cvt_f32_f64 v14, v[9:10]
+v_cmp_eq_u32 vcc, 11, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F16_F32
+v_mov_b32 v14, 0xdead0000
+v_cvt_f16_f32 v14, v9
+v_cmp_eq_u32 vcc, 12, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_F16
+v_cvt_f32_f16 v14, v9
+v_cmp_eq_u32 vcc, 13, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_UBYTE0
+v_cvt_f32_ubyte0 v14, v9
+v_cmp_eq_u32 vcc, 14, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_UBYTE1
+v_cvt_f32_ubyte1 v14, v9
+v_cmp_eq_u32 vcc, 15, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_UBYTE2
+v_cvt_f32_ubyte2 v14, v9
+v_cmp_eq_u32 vcc, 16, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_F32_UBYTE3
+v_cvt_f32_ubyte3 v14, v9
+v_cmp_eq_u32 vcc, 17, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_OFF_F32_I4
+v_cvt_off_f32_i4 v14, v9
+v_cmp_eq_u32 vcc, 18, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PKRTZ_F16_F32
+v_cvt_pkrtz_f16_f32 v14, v9, v10
+v_cmp_eq_u32 vcc, 19, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PKNORM_I16_F32
+v_cvt_pknorm_i16_f32 v14, v9, v10
+v_cmp_eq_u32 vcc, 20, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PKNORM_U16_F32
+v_cvt_pknorm_u16_f32 v14, v9, v10
+v_cmp_eq_u32 vcc, 21, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PK_U16_U32
+v_cvt_pk_u16_u32 v14, v9, v10
+v_cmp_eq_u32 vcc, 22, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PK_I16_I32
+v_cvt_pk_i16_i32 v14, v9, v10
+v_cmp_eq_u32 vcc, 23, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PKACCUM_U8_F32
+v_mov_b32 v14, v11
+v_cvt_pkaccum_u8_f32 v14, v9, v10
+v_cmp_eq_u32 vcc, 24, v8
+v_cndmask_b32 v12, v12, v14, vcc
+; V_CVT_PK_U8_F32
+v_cvt_pk_u8_f32 v14, v9, v10, v11
+v_cmp_eq_u32 vcc, 25, v8
+v_cndmask_b32 v12, v12, v14, vcc
+v_add_i32 v6, vcc, s12, v5
+buffer_store_dwordx2 v[12:13], v6, s[8:11], 0 offen
+v_cmp_eq_u32 vcc, 0, v4
+s_and_saveexec_b64 s[18:19], vcc
+s_cbranch_execz cvt_nomark
+s_lshl_b32 s20, s13, 4
+s_lshr_b32 s21, s12, 1
+s_add_u32 s20, s20, s21
+v_mov_b32 v7, s20
+v_mov_b32 v16, s14
+buffer_store_dword v16, v7, s[8:11], 0 offen
+cvt_nomark:
+s_mov_b64 exec, s[18:19]
+cvt_done:
+s_mov_b64 exec, s[16:17]
+v_mov_b32 v0, 0
+exp mrt0 v0, v0, v0, v0 done vm
+s_endpgm
