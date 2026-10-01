@@ -183,7 +183,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-5b"
+#define BUILD_TAG "optest-5d"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -333,9 +333,15 @@ static void* g_ps_ui_gpu = 0;
 static void* g_ps_cvt_a_gpu =
     0; /* OPCODE_TEST 5: the conversion passes (ps_cvt, FLOAT_MODE A / B) */
 static void* g_ps_cvt_b_gpu = 0;
+static void* g_ps_cvt_c_gpu = 0; /* FLOAT_MODE 0x10, 0x20, 0x30 (f32 denormal modes 1..3) */
+static void* g_ps_cvt_d_gpu = 0;
+static void* g_ps_cvt_e_gpu = 0;
+#define OPT5_MODES 5
+#define OPT5_STRIDE 48          /* result bytes a slot: lo, hi for modes A..E */
 #define OPT5_RT_W 384           /* the passes' target: one pixel per slot */
 #define OPT5_MARK_A 0xC0DE5A00u /* written after the last slot by each pass */
 #define OPT5_MARK_B 0xC0DE5B00u
+#define OPT5_MARK(m) (OPT5_MARK_A + ((uint32_t)(m) << 8)) /* A..E: 0xC0DE5A00..0xC0DE5E00 */
 static struct {
     int ok, logged;
     uint32_t *slots, *res,
@@ -1785,9 +1791,12 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_RESOLVE_RSRC1 ((10u << 6) | 23u)  /* v0-v95, s0-s79 + VCC */
 #define PS_UI_RSRC1 ((11u << 6) | 10u)       /* v43, s87 + VCC (frosted glass, UI, OPCODE_TEST) */
 #define PS_CVT_A_RSRC1                                                                             \
-    ((2u << 6) | 4u) /* v19, s21 + VCC; FLOAT_MODE 0x00 (all denormals flushed) */
+    ((3u << 6) | 4u) /* v19, s23 + VCC; FLOAT_MODE 0x00 (all denormals flushed) */
 #define PS_CVT_B_RSRC1                                                                             \
     (PS_CVT_A_RSRC1 | (0xC0u << 12))         /* FLOAT_MODE 0xC0: f64 / f16 denormals kept */
+#define PS_CVT_C_RSRC1 (PS_CVT_A_RSRC1 | (0x10u << 12)) /* f32 denorm: in kept, out flushed */
+#define PS_CVT_D_RSRC1 (PS_CVT_A_RSRC1 | (0x20u << 12)) /* f32 denorm: in flushed, out kept */
+#define PS_CVT_E_RSRC1 (PS_CVT_A_RSRC1 | (0x30u << 12)) /* f32 denorm: in and out kept */
 #define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
@@ -1851,6 +1860,12 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
                       PS_CVT_A_RSRC1, g_o5.tab, bg_v);
             post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_b_gpu,
                       PS_CVT_B_RSRC1, g_o5.tab + 16, bg_v);
+            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_c_gpu,
+                      PS_CVT_C_RSRC1, g_o5.tab + 32, bg_v);
+            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_d_gpu,
+                      PS_CVT_D_RSRC1, g_o5.tab + 48, bg_v);
+            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_e_gpu,
+                      PS_CVT_E_RSRC1, g_o5.tab + 64, bg_v);
         }
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
                   PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
@@ -1883,14 +1898,19 @@ static void o5_log(void) {
     const volatile uint32_t* r = g_o5.res;
     char line[256];
     int k = 0;
-    if (r[4 * n] != OPT5_MARK_A || r[4 * n + 1] != OPT5_MARK_B) {
+    int marks_ok = 1;
+    for (int m = 0; m < OPT5_MODES; m++)
+        marks_ok &= r[OPT5_STRIDE / 4 * n + m] == OPT5_MARK(m);
+    if (!marks_ok) {
         k = 0;
         const char* m = "opt5: results not visible to the CPU (markers ";
         while (*m)
             line[k++] = *m++;
-        k += o5_hex(line + k, r[4 * n]);
-        line[k++] = ' ';
-        k += o5_hex(line + k, r[4 * n + 1]);
+        for (int m = 0; m < OPT5_MODES; m++) {
+            k += o5_hex(line + k, r[OPT5_STRIDE / 4 * n + m]);
+            line[k++] = m + 1 < OPT5_MODES ? ' ' : ')';
+        }
+        k--;
         m = "); shadPS4: readbacksMode = Precise\n";
         while (*m)
             line[k++] = *m++;
@@ -1898,10 +1918,11 @@ static void o5_log(void) {
         g_ui.o5status = 2;
         return;
     }
-    trace_msg("\n## V_CVT_* on GCN2 (OPCODE_TEST 5, build " BUILD_TAG
-              ")\n\nA: FLOAT_MODE 0x00 (denormals "
-              "flushed), B: FLOAT_MODE 0xC0 (f64 / f16 denormals kept); B in bold where it differs "
-              "from A.\n");
+    trace_msg(
+        "\n## V_CVT_* on GCN2 (OPCODE_TEST 5, build " BUILD_TAG
+        ")\n\nA: FLOAT_MODE 0x00 (denormals "
+        "flushed), B: FLOAT_MODE 0xC0 (f64 / f16 denormals kept), C: 0x10, D: 0x20, E: 0x30 (f32 "
+        "denormal inputs kept / outputs kept / both kept); bold where it differs from A.\n");
     if (!OPT5_FULL)
         trace_msg(
             "Without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator; OPT5_FULL 1 "
@@ -1916,28 +1937,32 @@ static void o5_log(void) {
                 line[k++] = *m++;
             for (m = k_opt5_op[-1 - sl]; *m;)
                 line[k++] = *m++;
-            m = "\n\n| Input | A | B |\n|---|--:|--:|\n";
+            m = "\n\n| Input | A | B | C | D | E |\n|---|--:|--:|--:|--:|--:|\n";
             while (*m)
                 line[k++] = *m++;
         } else {
-            const volatile uint32_t* v = r + 4 * i;
-            int wide = ui_o5_wide(sl), diff = v[0] != v[2] || (wide && v[1] != v[3]);
+            const volatile uint32_t* v = r + OPT5_STRIDE / 4 * i;
+            int wide = ui_o5_wide(sl);
             m = "| ";
             while (*m)
                 line[k++] = *m++;
             for (m = k_opt5_label[sl]; *m;)
                 line[k++] = *m++;
-            m = " | ";
-            while (*m)
-                line[k++] = *m++;
-            k += o5_value(line + k, v, wide);
-            m = diff ? " | **" : " | ";
-            while (*m)
-                line[k++] = *m++;
-            k += o5_value(line + k, v + 2, wide);
-            m = diff ? "** |\n" : " |\n";
-            while (*m)
-                line[k++] = *m++;
+            for (int md = 0; md < OPT5_MODES; md++) {
+                const volatile uint32_t* w = v + 2 * md;
+                int diff = md && (w[0] != v[0] || (wide && w[1] != v[1]));
+                m = diff ? " | **" : " | ";
+                while (*m)
+                    line[k++] = *m++;
+                k += o5_value(line + k, w, wide);
+                if (diff) {
+                    line[k++] = '*';
+                    line[k++] = '*';
+                }
+            }
+            line[k++] = ' ';
+            line[k++] = '|';
+            line[k++] = '\n';
         }
         trace_line(line, (unsigned long)k);
     }
@@ -3141,29 +3166,33 @@ int main(void) {
             if (OPCODE_TEST == 5 && g_ui.ok) {
                 int n = g_ui.o5n, dw = g_ui.o5dw;
                 g_o5.slots = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
-                g_o5.res = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
-                g_o5.tab = (uint32_t*)gpu_alloc_typed(256, 256, MEM_TYPE_ONION);
+                g_o5.res = (uint32_t*)gpu_alloc_typed(n * OPT5_STRIDE + 256, 256, MEM_TYPE_ONION);
+                g_o5.tab = (uint32_t*)gpu_alloc_typed(16 * 4 * OPT5_MODES, 256, MEM_TYPE_ONION);
                 g_o5.rt = gpu_alloc_typed(OPT5_RT_W * 4, 256, MEM_TYPE_GARLIC);
                 g_o5.strip = gpu_alloc_typed(256 * 16 * 4, 256, MEM_TYPE_ONION);
                 if (g_o5.slots && g_o5.res && g_o5.tab && g_o5.rt && g_o5.strip) {
                     for (int i = 0; i < n; i++) {
                         int sl = g_ui.o5slot[i];
                         for (int j = 0; j < 4; j++)
-                            g_o5.slots[4 * i + j] = sl < 0 ? (j ? 0u : 0xFFu) : k_opt5_row[sl][j];
+                            g_o5.slots[4 * i + j] =
+                                sl < 0 ? (j ? 0u : 0xFFu)
+                                : j    ? k_opt5_row[sl][j]
+                                       : k_opt5_row[sl][0] |
+                                          (k_opt5_wide[k_opt5_row[sl][0]] ? 0x100u : 0u);
                     }
-                    my_memset(g_o5.res, 0, n * 16 + 256);
+                    my_memset(g_o5.res, 0, n * OPT5_STRIDE + 256);
                     ui_o5_strip((unsigned char*)g_o5.strip);
-                    for (int h = 0; h < 2; h++) { /* ps_cvt_a (A, +0) and ps_cvt_b (B, +8) */
+                    for (int h = 0; h < OPT5_MODES; h++) { /* ps_cvt_a..e: mode h at + 8 h */
                         uint32_t* t = g_o5.tab + 16 * h;
                         build_vsharp(t, g_o5.slots, n * 16);
-                        build_vsharp(t + 4, g_o5.res, n * 16 + 8);
-                        t[8] = h ? 8u : 0u;
+                        build_vsharp(t + 4, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
+                        t[8] = 8u * (uint32_t)h;
                         t[9] = (uint32_t)n;
-                        t[10] = h ? OPT5_MARK_B : OPT5_MARK_A;
+                        t[10] = OPT5_MARK(h);
                         t[11] = 0;
                     }
                     build_vsharp(uib + 128, g_o5.slots, n * 16);
-                    build_vsharp(uib + 132, g_o5.res, n * 16 + 8);
+                    build_vsharp(uib + 132, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
                     build_tsharp(uib + 136, g_o5.strip, 256, 16);
                     build_ssharp_clamp(uib + 144, 0);
                     f[84] = (float)UI_O5_Y0;
@@ -3174,12 +3203,7 @@ int main(void) {
                     f[89] = 1.0f / 256.0f;
                     f[90] = 1.0f / 16.0f;
                     f[91] = (float)UI_O5_GAP_AB;
-                    for (int k = 0; k < UI_O5_COLS; k++) {
-                        f[92 + 4 * k] = (float)g_ui.o5xa[k];
-                        f[93 + 4 * k] = (float)g_ui.o5xb[k];
-                        f[94 + 4 * k] = (float)g_ui.o5s0[k];
-                        f[95 + 4 * k] = (float)g_ui.o5ns[k];
-                    }
+                    ui_o5_cols(f);
                     uib[52] = 1;
                     g_o5.ok = 1;
                 }
@@ -3252,13 +3276,22 @@ int main(void) {
 #if OPT5_FULL
     UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_full_a_binary);
     UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_full_b_binary);
+    UPLOAD_SHADER(ps_cvt_c_gpu, ps_cvt_full_c_binary);
+    UPLOAD_SHADER(ps_cvt_d_gpu, ps_cvt_full_d_binary);
+    UPLOAD_SHADER(ps_cvt_e_gpu, ps_cvt_full_e_binary);
 #else
     UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_a_binary);
     UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_b_binary);
+    UPLOAD_SHADER(ps_cvt_c_gpu, ps_cvt_c_binary);
+    UPLOAD_SHADER(ps_cvt_d_gpu, ps_cvt_d_binary);
+    UPLOAD_SHADER(ps_cvt_e_gpu, ps_cvt_e_binary);
 #endif
     g_ps_ui_gpu = ps_ui_gpu;
     g_ps_cvt_a_gpu = ps_cvt_a_gpu;
     g_ps_cvt_b_gpu = ps_cvt_b_gpu;
+    g_ps_cvt_c_gpu = ps_cvt_c_gpu;
+    g_ps_cvt_d_gpu = ps_cvt_d_gpu;
+    g_ps_cvt_e_gpu = ps_cvt_e_gpu;
     UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
     g_ps_clock_gpu = ps_clock_gpu;
     UPLOAD_SHADER(ps_clock_light_gpu, ps_clock_light_binary);
@@ -3755,6 +3788,8 @@ int main(void) {
             day_frozen = !day_frozen;
         if (pressed & PAD_OPTIONS)
             g_ui.controls = !g_ui.controls;
+        if ((pressed & PAD_TOUCHPAD) && g_o5.ok)
+            g_ui.o5page = (g_ui.o5page + 1) % g_ui.o5pages;
         if (pressed & PAD_TRI) {
             cam_yaw = -1.5708f;
             cam_pitch = 0;
@@ -4488,6 +4523,8 @@ int main(void) {
             }
             ui_update(speed_pct, k_day_tenths[day_step], day_frozen, tod_txt, ts_dot);
             ui_write_table(g_post_tab + UI_BLOCK * 32);
+            if (g_o5.ok)
+                ui_o5_cols((float*)(g_post_tab + UI_BLOCK * 32 + 64));
             if (g_clock_mode) {
                 const float lsun[3] = {sun_dx, sun_dy, sun_dz},
                             lmoon[3] = {-sun_dx, -sun_dy, -sun_dz};

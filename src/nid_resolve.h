@@ -167,6 +167,7 @@ struct OrbisPadData {
 #define PAD_L3 0x0002
 #define PAD_R3 0x0004
 #define PAD_OPTIONS 0x0008
+#define PAD_TOUCHPAD 0x100000 /* touch pad press (OPCODE_TEST 5: table page) */
 #define PAD_UP 0x0010
 #define PAD_RIGHT 0x0020
 #define PAD_DOWN 0x0040
