@@ -27,6 +27,8 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   gen_ps_clock.py    shaders/ps_clock.s (clock mode's glass)
   gen_optest5.py     src/optest5.h: the OPCODE_TEST 5 rows (every V_CVT_* of GCN2, edge-case inputs,
                      labels); run clang-format on the header afterwards
+  gen_ps_cvt.py      shaders/ps_cvt.s (without the V_CVT_* shadPS4 cannot translate) and ps_cvt_full.s
+                     (OPT5_FULL, PS4 only): the OPCODE_TEST 5 conversion pass
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
