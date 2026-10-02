@@ -20,6 +20,19 @@ int32_t sceKernelCheckedReleaseDirectMemory(long start, size_t len);
 int32_t sceKernelDirectMemoryQuery(long offset, int32_t flags, void* info, size_t info_size);
 int32_t sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int32_t* prot);
 int32_t sceKernelEnableDmemAliasing(void);
+int32_t sceKernelMtypeprotect(const void* addr, size_t len, int32_t mtype, int32_t prot);
+int32_t sceKernelMprotect(const void* addr, size_t len, int32_t prot);
+// OpenOrbis declares the last two by value; libkernel stores through them (0x19019, 0x19027).
+int32_t sceKernelAvailableDirectMemorySize(long search_start, long search_end, size_t alignment,
+                                           long* phys_out, size_t* size_out);
+// Not in the OpenOrbis headers; argument registers from libkernel 0x19d80 / 0x19f30.
+int32_t sceKernelMemoryPoolExpand(uint64_t search_start, uint64_t search_end, uint64_t len,
+                                  uint64_t alignment, uint64_t* phys_out);
+int32_t sceKernelMemoryPoolReserve(void* addr_in, uint64_t len, uint64_t alignment, int32_t flags,
+                                   void** addr_out);
+int32_t sceKernelMemoryPoolCommit(void* addr, uint64_t len, int32_t type, int32_t prot,
+                                  int32_t flags);
+int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -428,6 +441,16 @@ static long alloc(int pages, int type, int32_t* ret) {
     return alloc_in(0, g_dmem, pages, type, ret);
 }
 
+static long alloc_al(uint64_t lo, uint64_t hi, int pages, uint64_t align, int type,
+                     int32_t* ret) {
+    long pa = -1;
+    const int32_t r =
+        sceKernelAllocateDirectMemory((long)lo, (long)hi, pages * PG, align, type, &pa);
+    if (ret)
+        *ret = r;
+    return r == 0 ? pa : -1;
+}
+
 static bool allocated(uint64_t pa) {
     DmemInfo q;
     my_memset(&q, 0, sizeof(q));
@@ -779,6 +802,471 @@ static void run_b() {
     b_alias("B12", "map twice after enable, rel", 0x5A0C0000);
 }
 
+// ---- D: release edges -----------------------------------------------------------------------
+
+// Block of `pages`; pre-free pages in `prefree`; one release; report the whole block.
+static void d_block(const char* id, const char* name, Op op, int pages, uint32_t prefree,
+                    uint64_t off, uint64_t len) {
+    int32_t r = 0;
+    const long pa = alloc(pages, 3, &r);
+    if (pa < 0)
+        return setup_failed(id, name, "alloc", r);
+    for (int i = 0; i < pages; i++)
+        if (prefree & (1u << i))
+            sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG);
+    Line l = head(id, name);
+    l.ret("ret", release(op, pa + (long)off, len));
+    phys_str(l, pa, pages).end();
+    release_all(pa, pages);
+}
+
+// Pages 4-5 mapped and outside the released range; a hole at 2-3 inside it.
+static void d_outside_mapped(const char* id, const char* name) {
+    int32_t r = 0;
+    const long pa = alloc(6, 3, &r);
+    if (pa < 0)
+        return setup_failed(id, name, "alloc", r);
+    uint8_t* va = map(pa + 4 * PG, 2, &r);
+    if (!va) {
+        setup_failed(id, name, "map", r);
+        return release_all(pa, 6);
+    }
+    stamp(va, 2, 0x5A0D0000);
+    sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG);
+    Line l = head(id, name);
+    l.ret("ret", sceKernelReleaseDirectMemory(pa, 4 * PG));
+    va_str(l, "va45", va, pa + 4 * PG, 2, 0x5A0D0000).c(' ');
+    phys_str(l, pa, 6).end();
+    unmap_all(va, 2);
+    release_all(pa, 6);
+}
+
+static void d_own_page(const char* id, const char* name, Op op, uint64_t len) {
+    int32_t r = 0;
+    const long pa = alloc(1, 3, &r);
+    if (pa < 0)
+        return setup_failed(id, name, "alloc", r);
+    Line l = head(id, name);
+    l.ret("ret", release(op, pa, len));
+    phys_str(l, pa, 1).end();
+    release_all(pa, 1);
+}
+
+static void run_d() {
+    say("== D  release edges (block pages outside the released range must stay A)");
+    const uint64_t last = g_dmem - PG;
+    a_raw("D1", "chk  last page, len 1<<63", CHK, last, 0x8000000000000000ull);
+    a_raw("D2", "chk  last page, len 7FFF..C000", CHK, last, 0x7FFFFFFFFFFFC000ull);
+    a_raw("D3", "rel  start 1<<63, len 4000", REL, 0x8000000000000000ull, PG);
+    a_raw("D4", "chk  start 1<<63, len 4000", CHK, 0x8000000000000000ull, PG);
+    a_raw("D5", "rel  start FFFF..C000, len 4000", REL, 0xFFFFFFFFFFFFC000ull, PG);
+    a_raw("D6", "chk  start FFFF..C000, len 4000", CHK, 0xFFFFFFFFFFFFC000ull, PG);
+    d_block("D7", "rel  0-3 of 6, hole at 2-3", REL, 6, 0xC, 0, 4 * PG);
+    d_block("D8", "chk  0-3 of 6, hole at 2-3", CHK, 6, 0xC, 0, 4 * PG);
+    d_block("D9", "rel  0-3 of 6, hole at 0-1", REL, 6, 0x3, 0, 4 * PG);
+    d_block("D10", "rel  0-3 of 8, holes at 1,3", REL, 8, 0xA, 0, 4 * PG);
+    d_block("D11", "rel  1-4 of 6, hole at 2", REL, 6, 0x4, PG, 4 * PG);
+    d_outside_mapped("D12", "rel  0-3, hole 2-3, 4-5 mapped");
+    d_own_page("D13", "chk  own page, len 1<<62", CHK, 1ull << 62);
+    d_own_page("D14", "rel  own page, len 0", REL, 0);
+}
+
+// ---- Q: query edges --------------------------------------------------------------------------
+
+static void q_raw(const char* id, const char* name, long at, int32_t flags, size_t size,
+                  long ref) {
+    DmemInfo q;
+    my_memset(&q, 0, sizeof(q));
+    const int32_t r = sceKernelDirectMemoryQuery(at, flags, &q, size);
+    Line l = head(id, name);
+    l.ret("ret", r);
+    if (r == 0) {
+        l.s("start=").shex((long long)(q.start - (uint64_t)ref)).s(" end=");
+        if (q.end == 0)
+            l.s("unset");
+        else
+            l.shex((long long)(q.end - (uint64_t)ref));
+        l.s(" mtype=").dec(q.mtype);
+    }
+    l.end();
+}
+
+// Contiguous 4-page blocks of the given types; returns the base or -1. Unused slots: type -1.
+static long build(int n, const int* types, long* blk, uint64_t align) {
+    int32_t r = 0;
+    const long c = alloc_al(0, g_dmem, n * 4, align, 3, &r);
+    if (c < 0)
+        return -1;
+    sceKernelReleaseDirectMemory(c, n * 4 * PG);
+    bool ok = true;
+    for (int i = 0; i < n; i++) {
+        blk[i] = -1;
+        if (types[i] < 0)
+            continue;
+        blk[i] = alloc_in(c + i * 4 * PG, c + (i + 1) * 4 * PG, 4, types[i], &r);
+        ok = ok && blk[i] == (long)(c + i * 4 * PG);
+    }
+    if (!ok) {
+        for (int i = 0; i < n; i++)
+            release_all(blk[i], 4);
+        return -1;
+    }
+    return c;
+}
+
+static void run_q() {
+    say("== Q  query edges");
+    {
+        // [hole][A t3][B t3][wall t0]; offsets relative to A
+        const int t[4] = {-1, 3, 3, 0};
+        long blk[4];
+        const long c = build(4, t, blk, PG);
+        if (c < 0) {
+            say("Q1   SKIP layout");
+        } else {
+            q_raw("Q1", "find-next from hole before A|B", c, 1, sizeof(DmemInfo), blk[1]);
+            q_raw("Q2", "exact query of the hole", c, 0, sizeof(DmemInfo), blk[1]);
+            q_raw("Q3", "find-next from inside B", blk[2], 1, sizeof(DmemInfo), blk[1]);
+            for (int i = 0; i < 4; i++)
+                release_all(blk[i], 4);
+        }
+    }
+    {
+        // [wall t3][X t0][Y t0][wall t3]; offsets relative to X
+        const int t[4] = {3, 0, 0, 3};
+        long blk[4];
+        const long c = build(4, t, blk, PG);
+        if (c < 0) {
+            say("Q4   SKIP layout");
+        } else {
+            q_raw("Q4", "type 0 run: query Y", blk[2], 0, sizeof(DmemInfo), blk[1]);
+            int32_t r = 0;
+            uint8_t* vx = map(blk[1], 4, &r);
+            q_raw("Q5", "type 0 run: query Y, X mapped", blk[2], 0, sizeof(DmemInfo), blk[1]);
+            unmap_all(vx, 4);
+            for (int i = 0; i < 4; i++)
+                release_all(blk[i], 4);
+        }
+    }
+    int32_t r = 0;
+    const long pa = alloc(2, 3, &r);
+    if (pa < 0) {
+        setup_failed("Q6", "query edges", "alloc", r);
+        return;
+    }
+    q_raw("Q6", "offset +1000 inside alloc", pa + 0x1000, 0, sizeof(DmemInfo), pa);
+    q_raw("Q7", "info size 10", pa, 0, 0x10, pa);
+    q_raw("Q8", "info size 0", pa, 0, 0, pa);
+    q_raw("Q9", "offset = dmem size", (long)g_dmem, 0, sizeof(DmemInfo), pa);
+    q_raw("Q10", "find-next from last page", (long)(g_dmem - PG), 1, sizeof(DmemInfo), pa);
+    q_raw("Q11", "flags 2", pa, 2, sizeof(DmemInfo), pa);
+    release_all(pa, 2);
+}
+
+// ---- V: available direct memory --------------------------------------------------------------
+
+static void v_line(const char* id, const char* name, long lo, long hi, size_t align, long ref) {
+    long phys = -1;
+    size_t size = 0;
+    const int32_t r = sceKernelAvailableDirectMemorySize(lo, hi, align, &phys, &size);
+    Line l = head(id, name);
+    l.ret("ret", r).s("phys=").shex((long long)(phys - ref)).s(" size=").hex(size).end();
+}
+
+static void run_v() {
+    say("== V  available size; layout A(0-3) hole(4-7) B(8-11) free(12-19), rel to base");
+    const int t[5] = {3, -1, 3, -1, -1};
+    long blk[5];
+    const long c = build(5, t, blk, 0x40000);
+    if (c < 0)
+        return say("V1   SKIP layout");
+    v_line("V1", "whole layout, align 4000", c, c + (long)(20 * PG), PG, c);
+    v_line("V2", "whole layout, align 20000", c, c + (long)(20 * PG), 0x20000, c);
+    v_line("V3", "only the hole 4-7", c + (long)(4 * PG), c + (long)(8 * PG), PG, c);
+    v_line("V4", "only allocated A", c, c + (long)(4 * PG), PG, c);
+    v_line("V5", "end before start", c + (long)(8 * PG), c, PG, c);
+    v_line("V6", "align 3000", c, c + (long)(20 * PG), 0x3000, c);
+    for (int i = 0; i < 5; i++)
+        release_all(blk[i], 4);
+}
+
+// ---- E: allocate / map validation ------------------------------------------------------------
+
+static void e_alloc(const char* id, const char* name, long lo, long hi, size_t len, size_t align,
+                    int type) {
+    long pa = -1;
+    const int32_t r = sceKernelAllocateDirectMemory(lo, hi, len, align, type, &pa);
+    Line l = head(id, name);
+    l.ret("ret", r);
+    if (r == 0) {
+        l.s("phys%4000=").hex((uint64_t)pa % PG);
+        sceKernelReleaseDirectMemory(pa - (pa % (long)PG), len ? (len + PG - 1) / PG * PG : PG);
+    }
+    l.end();
+}
+
+static void e_map(const char* id, const char* name, long phys, size_t len, int prot) {
+    void* va = 0;
+    const int32_t r = sceKernelMapDirectMemory(&va, len, prot, 0, phys, PG);
+    Line l = head(id, name);
+    l.ret("ret", r);
+    if (r == 0) {
+        int32_t pr = -1;
+        l.s("prot=").c(mapped(va, &pr) ? (char)('0' + (pr & 7)) : '.');
+        if (len)
+            sceKernelMunmap(va, len);
+    }
+    l.end();
+}
+
+static void run_e() {
+    say("== E  allocate / map validation");
+    e_alloc("E1", "alloc len 0", 0, (long)g_dmem, 0, PG, 3);
+    e_alloc("E2", "alloc len 1000", 0, (long)g_dmem, 0x1000, PG, 3);
+    e_alloc("E3", "alloc align 3000", 0, (long)g_dmem, PG, 0x3000, 3);
+    e_alloc("E4", "alloc align 1000", 0, (long)g_dmem, PG, 0x1000, 3);
+    e_alloc("E5", "alloc align 0", 0, (long)g_dmem, PG, 0, 3);
+    e_alloc("E6", "alloc type 11", 0, (long)g_dmem, PG, PG, 11);
+    e_alloc("E7", "alloc type -1", 0, (long)g_dmem, PG, PG, -1);
+    e_alloc("E8", "alloc range smaller than len", (long)(g_dmem - PG), (long)g_dmem, 2 * PG, PG,
+            3);
+    e_alloc("E9", "alloc search start +1000", 0x1000, (long)g_dmem, PG, PG, 3);
+    e_alloc("E10", "alloc end before start", (long)g_dmem, 0, PG, PG, 3);
+    int32_t r = 0;
+    const long pa = alloc(4, 3, &r);
+    if (pa < 0)
+        return setup_failed("E11", "map validation", "alloc", r);
+    sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG);
+    e_map("E11", "map free page", pa + (long)(2 * PG), PG, 0x3);
+    e_map("E12", "map phys +1000", pa + 0x1000, PG, 0x3);
+    e_map("E13", "map len 5000", pa, PG + 0x1000, 0x3);
+    e_map("E14", "map half free (2 alloc + 2 free)", pa, 4 * PG, 0x3);
+    e_map("E15", "map len 0", pa, 0, 0x3);
+    e_map("E16", "map prot 0", pa, PG, 0);
+    e_map("E17", "map prot 1 (read only)", pa, PG, 0x1);
+    release_all(pa, 4);
+}
+
+// ---- F: mapping variants -------------------------------------------------------------------
+
+static Line& prot_str(Line& l, uint8_t* va, int pages) {
+    l.s("prot=[");
+    for (int i = 0; i < pages; i++) {
+        int32_t pr = 0;
+        l.c(mapped(va + i * PG, &pr) ? (char)('0' + (pr & 7)) : '.');
+    }
+    return l.s("]");
+}
+
+static uint8_t* f_setup(const char* id, const char* name, long* pa, int pages, uint32_t tag) {
+    int32_t r = 0;
+    *pa = alloc(pages, 3, &r);
+    if (*pa < 0) {
+        setup_failed(id, name, "alloc", r);
+        return nullptr;
+    }
+    uint8_t* va = map(*pa, pages, &r);
+    if (!va) {
+        setup_failed(id, name, "map", r);
+        release_all(*pa, pages);
+        return nullptr;
+    }
+    stamp(va, pages, tag);
+    return va;
+}
+
+static void run_f() {
+    say("== F  mapping variants, 4 pages unless noted");
+    long pa = -1;
+    if (uint8_t* va = f_setup("F1", "mtype 2-3 -> 0, rel 1-2", &pa, 4, 0x5A0F1000)) {
+        const int32_t rm = sceKernelMtypeprotect(va + 2 * PG, 2 * PG, 0, 0x3);
+        DmemInfo q;
+        my_memset(&q, 0, sizeof(q));
+        sceKernelDirectMemoryQuery(pa + (long)(2 * PG), 0, &q, sizeof(q));
+        Line l = head("F1", "mtype 2-3 -> 0, rel 1-2");
+        l.ret("mt", rm).s("q2mtype=").dec(q.mtype).c(' ');
+        l.ret("ret", sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
+        va_str(l, "va", va, pa, 4, 0x5A0F1000).c(' ');
+        phys_str(l, pa, 4).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F2", "mprotect 1-2 ro, rel all", &pa, 4, 0x5A0F2000)) {
+        const int32_t rp = sceKernelMprotect(va + PG, 2 * PG, 0x1);
+        Line l = head("F2", "mprotect 1-2 ro, rel all");
+        l.ret("mp", rp);
+        prot_str(l, va, 4).c(' ');
+        l.ret("ret", sceKernelReleaseDirectMemory(pa, 4 * PG));
+        va_str(l, "va", va, pa, 4, 0x5A0F2000).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F3", "munmap page 1, rel all", &pa, 4, 0x5A0F3000)) {
+        const int32_t ru = sceKernelMunmap(va + PG, PG);
+        Line l = head("F3", "munmap page 1, rel all");
+        l.ret("unmap", ru).ret("ret", sceKernelReleaseDirectMemory(pa, 4 * PG));
+        va_str(l, "va", va, pa, 4, 0x5A0F3000).c(' ');
+        phys_str(l, pa, 4).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    {
+        int32_t r = 0;
+        pa = alloc(4, 3, &r);
+        uint8_t* v1 = pa >= 0 ? map(pa, 2, &r) : nullptr;
+        uint8_t* v2 = pa >= 0 ? map(pa + 2 * PG, 2, &r) : nullptr;
+        if (!v1 || !v2) {
+            setup_failed("F4", "two maps 0-1 / 2-3, rel 1-2", "alloc/map", r);
+        } else {
+            stamp(v1, 2, 0x5A0F4000);
+            stamp(v2, 2, 0x5A0F4002);
+            Line l = head("F4", "two maps 0-1 / 2-3, rel 1-2");
+            l.ret("ret", sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
+            va_str(l, "va1", v1, pa, 2, 0x5A0F4000).c(' ');
+            va_str(l, "va2", v2, pa + 2 * PG, 2, 0x5A0F4002).c(' ');
+            phys_str(l, pa, 4).end();
+        }
+        unmap_all(v1, 2);
+        unmap_all(v2, 2);
+        release_all(pa, 4);
+    }
+    {
+        int32_t r = 0;
+        pa = alloc(4, 3, &r);
+        uint8_t* v1 = pa >= 0 ? map(pa, 4, &r) : nullptr;
+        uint8_t* v2 = pa >= 0 ? map(pa, 4, &r) : nullptr;
+        if (!v1 || !v2) {
+            setup_failed("F5", "aliased twice, rel 1-2", "alloc/map", r);
+        } else {
+            stamp(v1, 4, 0x5A0F5000);
+            Line l = head("F5", "aliased twice, rel 1-2");
+            l.ret("ret", sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
+            va_str(l, "va1", v1, pa, 4, 0x5A0F5000).c(' ');
+            va_str(l, "va2", v2, pa, 4, 0x5A0F5000).c(' ');
+            phys_str(l, pa, 4).end();
+        }
+        unmap_all(v1, 4);
+        unmap_all(v2, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F6", "rel all, re-alloc same phys", &pa, 4, 0x5A0F6000)) {
+        sceKernelReleaseDirectMemory(pa, 4 * PG);
+        int32_t r = 0;
+        const long again = alloc_in(pa, pa + 4 * PG, 4, 3, &r);
+        Line l = head("F6", "rel all, re-alloc same phys");
+        l.ret("realloc", r).s("same=").c(again == pa ? '1' : '0').c(' ');
+        va_str(l, "oldva", va, pa, 4, 0x5A0F6000).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F7", "rel 1-2, munmap whole range", &pa, 4, 0x5A0F7000)) {
+        sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG);
+        Line l = head("F7", "rel 1-2, munmap whole range");
+        l.ret("unmap", sceKernelMunmap(va, 4 * PG));
+        va_str(l, "va", va, pa, 4, 0x5A0F7000).c(' ');
+        phys_str(l, pa, 4).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F8", "rel 1-2, mprotect released 1", &pa, 4, 0x5A0F8000)) {
+        sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG);
+        Line l = head("F8", "rel 1-2, mprotect released 1");
+        l.ret("mp", sceKernelMprotect(va + PG, PG, 0x1));
+        prot_str(l, va, 4).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+    if (uint8_t* va = f_setup("F9", "mtype released page 1", &pa, 4, 0x5A0F9000)) {
+        sceKernelReleaseDirectMemory(pa + (long)PG, PG);
+        Line l = head("F9", "mtype released page 1");
+        l.ret("mt", sceKernelMtypeprotect(va + PG, PG, 0, 0x3));
+        va_str(l, "va", va, pa, 4, 0x5A0F9000).end();
+        unmap_all(va, 4);
+        release_all(pa, 4);
+    }
+}
+
+// ---- P: memory pool --------------------------------------------------------------------------
+
+static void run_p() {
+    say("== P  memory pool, 64 KiB blocks");
+    const uint64_t blk = 0x10000;
+    uint64_t pp = 0;
+    const int32_t re = sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &pp);
+    {
+        Line l = head("P1", "pool expand 64K");
+        l.ret("ret", re).end();
+    }
+    if (re == 0) {
+        q_raw("P2", "query pooled block", (long)pp, 0, sizeof(DmemInfo), (long)pp);
+        q_raw("P3", "find-next from pooled block", (long)pp, 1, sizeof(DmemInfo), (long)pp);
+    }
+    void* va = 0;
+    const int32_t rr = sceKernelMemoryPoolReserve(0, blk, blk, 0, &va);
+    const int32_t rc = rr == 0 ? sceKernelMemoryPoolCommit(va, blk, 3, 0x3, 0) : -1;
+    {
+        Line l = head("P4", "reserve + commit 64K");
+        l.ret("res", rr).ret("commit", rc);
+        if (rc == 0) {
+            int32_t pr = 0;
+            l.s("prot=").c(mapped(va, &pr) ? (char)('0' + (pr & 7)) : '.');
+            if (mapped(va, &pr) && (pr & 1)) {
+                *(volatile uint32_t*)va = 0x5A0B0001;
+                l.s(" rw=").c(*(volatile uint32_t*)va == 0x5A0B0001 ? '1' : '0');
+            }
+        }
+        l.end();
+    }
+    if (rc == 0) {
+        const int32_t rd = sceKernelMemoryPoolDecommit(va, blk, 0);
+        int32_t pr = 0;
+        Line l = head("P5", "decommit 64K");
+        l.ret("ret", rd).s("va=").c(mapped(va, &pr) ? (char)('0' + (pr & 7)) : '.').end();
+    }
+    if (re == 0) {
+        Line l = head("P6", "rel  pooled block");
+        l.ret("ret", sceKernelReleaseDirectMemory((long)pp, blk));
+        l.end();
+        q_raw("P7", "query pooled block after rel", (long)pp, 0, sizeof(DmemInfo), (long)pp);
+    }
+    uint64_t pp2 = 0;
+    const int32_t re2 = sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &pp2);
+    if (re2 == 0) {
+        Line l = head("P8", "chk  pooled block");
+        l.ret("ret", sceKernelCheckedReleaseDirectMemory((long)pp2, blk));
+        l.end();
+        q_raw("P9", "query after chk", (long)pp2, 0, sizeof(DmemInfo), (long)pp2);
+    } else {
+        Line l = head("P8", "pool expand again");
+        l.ret("ret", re2).end();
+    }
+}
+
+// ---- R: positive oversized length on a real allocation ---------------------------------------
+
+static void run_r() {
+    say("== R  len 1<<62 (valid sign) from a real allocation; may free more than its own page");
+    int32_t r0 = 0, r1 = 0, r2 = 0;
+    const long lo = alloc(1, 3, &r0);
+    const long mid = alloc(1, 3, &r1);
+    const long hi = alloc(1, 3, &r2);
+    if (lo < 0 || mid < 0 || hi < 0) {
+        Line l = head("R1", "rel  own page, len 1<<62");
+        l.s("SKIP alloc ").ret("a", r0).ret("b", r1).ret("c", r2).end();
+    } else {
+        say("R1   starting");
+        const int32_t r = sceKernelReleaseDirectMemory(mid, 1ull << 62);
+        Line l = head("R1", "rel  own page, len 1<<62");
+        l.ret("ret", r);
+        l.s("first=").c(lo < mid ? '<' : '>').c(allocated(lo) ? 'A' : 'F');
+        l.s(" self=").c(allocated(mid) ? 'A' : 'F');
+        l.s(" third=").c(hi < mid ? '<' : '>').c(allocated(hi) ? 'A' : 'F').end();
+    }
+    release_all(lo, 1);
+    release_all(mid, 1);
+    release_all(hi, 1);
+}
+
 // ---- C: oversized length ---------------------------------------------------------------------
 
 static void run_c() {
@@ -840,7 +1328,14 @@ int main(void) {
         neighbours();
         run_a();
         run_b();
+        run_d();
+        run_q();
+        run_v();
+        run_e();
+        run_f();
+        run_p();
         run_c();
+        run_r();
     }
     say("===== DONE =====");
     for (;;)
