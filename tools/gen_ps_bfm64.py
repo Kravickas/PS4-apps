@@ -133,6 +133,34 @@ for w, o in LOOPS:
     row("G", "loop VCCZ w %d, o %d" % (w, o), w, o, ("LOOP_B",),
         "loop B: v_cmp_ne_u64 vcc, x, 0; s_cbranch_vccz; ff1; bitset0  (lo count, hi sum)")
 
+# H: one literal dword feeding several operands (SOPC, SOP2, VOP2 madak / madmk), and literal /
+# inline constant expansion for 64-bit operands
+Z = ["s_mov_b32 s28, 0", "s_mov_b32 s29, 0"]
+for op in ["s_cmp_eq_u32 0x61, 0x61", "s_cmp_lg_u32 0x61, 0x61", "s_cmp_lt_u32 0x61, 0x61",
+           "s_cmp_gt_u32 0x12c, 0x12c", "s_cmp_lt_i32 0xffffff00, 0xffffff00",
+           "s_bitcmp1_b32 0x80000005, 0x80000005", "s_bitcmp0_b32 0x80000005, 0x80000005",
+           "s_bitcmp1_b64 0x80000005, 0x80000005", "s_bitcmp1_b64 0x80000025, 0x80000025"]:
+    row("H", op.split()[0] + " lit, lit", 0, 0, [op, CAP] + Z, op)
+for op, scc in [("s_add_u32 s28, 0x12c, 0x12c", None), ("s_sub_u32 s28, 0x12c, 0x12c", None),
+                ("s_xor_b32 s28, 0x12c, 0x12c", None), ("s_cselect_b32 s28, 0x12c, 0x12c", 0),
+                ("s_cselect_b32 s28, 0x12c, 0x12c", 1), ("s_lshl_b32 s28, 0x61, 0x61", None),
+                ("s_mul_i32 s28, 0x12c, 0x12c", None), ("s_min_u32 s28, 0x12c, 0x12c", None),
+                ("s_max_i32 s28, 0xffffff00, 0xffffff00", None)]:
+    row("H", op.split()[0] + " lit, lit", 0, 0, [op, CAP, "s_mov_b32 s29, 0"], op, scc_in=scc)
+for op in ["s_and_b64 s[28:29], 0x80000005, 0x80000005",
+           "s_and_b64 s[28:29], 0x12345678, 0x12345678",
+           "s_lshl_b64 s[28:29], 0x80000005, 0x80000005", "s_mov_b64 s[28:29], 0x80000005",
+           "s_mov_b64 s[28:29], 0x12345678", "s_not_b64 s[28:29], 0x80000005",
+           "s_mov_b64 s[28:29], -1", "s_mov_b64 s[28:29], -16", "s_mov_b64 s[28:29], 1.0"]:
+    row("H", " ".join(op.split()[0:1] + op.split()[2:]), 0, 0, [op, CAP], op)
+for op, lab in [("v_madak_f32 v19, 0x40400000, v20, 0x40400000", "madak S0 = K = 3.0, v 2.0"),
+                ("v_madmk_f32 v19, 0x40400000, 0x40400000, v20", "madmk S0 = K = 3.0, v 2.0"),
+                ("v_madak_f32 v19, v21, v20, 0x40400000", "madak S0 v 3.0, K 3.0, v 2.0")]:
+    row("H", lab, 0x40000000, 0x40400000,
+        ["v_mov_b32 v20, s2", "v_mov_b32 v21, s3", op, "v_readfirstlane_b32 s28, v19", CAP,
+         "s_mov_b32 s29, 0"],
+        op + "; v_readfirstlane_b32 s28, v19")
+
 N = len(ROWS)
 MARK = 0xB6400000  # result marker base: dword 3 of row k = MARK + k
 
