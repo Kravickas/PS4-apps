@@ -4,10 +4,10 @@
 # ============================================================================
 
 # ---- Package identity (fixed) ----
-TITLE       := ShadCube4
+TITLE       := DmemTest
 VERSION     := 01.00
-TITLE_ID    := SHAD00004
-CONTENT_ID  := IV0000-SHAD00004_00-SHADCUBE40000000
+TITLE_ID    := SHAD00090
+CONTENT_ID  := IV0000-SHAD00090_00-SHADDMEMTEST0000
 
 EXTRAFLAGS  :=
 
@@ -32,7 +32,7 @@ CXX         := clang++
 LD          := ld.lld
 PKG         := $(TOOLCHAIN)/bin/linux
 
-# ---- Sources: any .c / .cpp / .s in src/ (shaders/ holds GPU code: headers only) ----
+# ---- Sources: any .c / .cpp / .s in src/ ----
 CFILES      := $(wildcard $(SRCDIR)/*.c)
 CPPFILES    := $(wildcard $(SRCDIR)/*.cpp)
 SFILES      := $(wildcard $(SRCDIR)/*.s)
@@ -44,15 +44,8 @@ OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
 LIBMODULES  := $(wildcard sce_module/*)
 
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) \
-               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -Ishaders
+               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
-# Model parsing (multi-GB text OBJ) is CPU-bound: optimise just the loaders.
-# The renderer (main.o) keeps its hardware-verified default codegen.
-# -fno-builtin: no implicit memset/memcpy calls from loop idioms (no libc dependency).
-$(INTDIR)/loaders.o: CFLAGS += -O2 -fno-strict-aliasing -fno-builtin
-# The atmosphere model (src/atmosphere.c): table lookups at run time; -fno-math-errno lets
-# __builtin_sqrt become sqrtsd (it must not call libm - the object has no undefined symbols).
-$(INTDIR)/atmosphere.o: CFLAGS += -O2 -fno-builtin -fno-math-errno
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
                $(TOOLCHAIN)/lib/crt1.o
