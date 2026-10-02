@@ -517,6 +517,52 @@ static void setup_failed(const char* id, const char* name, const char* what, int
 
 // ---- S: the probes themselves ---------------------------------------------------------------
 
+static void q_line(const char* id, const char* name, long at, long ref) {
+    DmemInfo q;
+    my_memset(&q, 0, sizeof(q));
+    const int32_t r = sceKernelDirectMemoryQuery(at, 0, &q, sizeof(q));
+    Line l = head(id, name);
+    l.ret("ret", r);
+    if (r == 0)
+        l.s("start=").shex((long long)(q.start - (uint64_t)ref)).s(" end=");
+    if (r == 0)
+        l.shex((long long)(q.end - (uint64_t)ref)).s(" mtype=").dec(q.mtype);
+    l.end();
+}
+
+// [E0 type0][A type3][B type3][D type3][E1 type0], 4 pages each; offsets relative to B.
+static void neighbours() {
+    say("== S3-S7 query extent, neighbours A|B|D type 3 between type-0 walls, rel to B (0..10000)");
+    int32_t r = 0;
+    const long c = alloc(20, 3, &r);
+    if (c < 0)
+        return setup_failed("S3", "neighbour layout", "alloc scratch", r);
+    sceKernelReleaseDirectMemory(c, 20 * PG);
+    const int types[5] = {0, 3, 3, 3, 0};
+    long blk[5];
+    bool ok = true;
+    for (int i = 0; i < 5; i++) {
+        blk[i] = alloc_in(c + i * 4 * PG, c + (i + 1) * 4 * PG, 4, types[i], &r);
+        ok = ok && blk[i] == (long)(c + i * 4 * PG);
+    }
+    if (ok) {
+        const long b = blk[2];
+        q_line("S3", "query B, all unmapped", b, b);
+        uint8_t* va_a = map(blk[1], 4, &r);
+        q_line("S4", "query B, A mapped", b, b);
+        uint8_t* va_d = map(blk[3], 4, &r);
+        q_line("S5", "query B, A and D mapped", b, b);
+        q_line("S6", "query A (mapped)", blk[1], b);
+        q_line("S7", "query D (mapped)", blk[3], b);
+        unmap_all(va_a, 4);
+        unmap_all(va_d, 4);
+    } else {
+        setup_failed("S3", "neighbour layout", "adjacent alloc", r);
+    }
+    for (int i = 0; i < 5; i++)
+        release_all(blk[i], 4);
+}
+
 static bool sanity() {
     int32_t r = 0;
     const long pa = alloc(2, 3, &r);
@@ -744,6 +790,18 @@ static void run_c() {
     a_raw("C5", "rel  last page, len 1<<63", REL, last, 0x8000000000000000ull);
     a_raw("C6", "rel  last page, end = 2^64-4000", REL, last, 0ull - 0x4000 - last);
     a_raw("C7", "rel  last page, end = 2^64 (wraps to 0)", REL, last, 0ull - last);
+    static const int ladder[] = {33, 34, 35, 36, 40, 48, 56, 62};
+    for (int i = 0; i < 8; i++) {
+        char id[4] = {'L', (char)('1' + i), 0, 0};
+        char name[32] = "rel  last page, len 1<<";
+        name[23] = (char)('0' + ladder[i] / 10);
+        name[24] = (char)('0' + ladder[i] % 10);
+        name[25] = 0;
+        a_raw(id, name, REL, last, 1ull << ladder[i]);
+    }
+    a_raw("C8", "rel  last page, len 7FFFFFFFFFFFC000", REL, last, 0x7FFFFFFFFFFFC000ull);
+    a_raw("C9", "rel  last page, end = 2^63-4000", REL, last, 0x7FFFFFFFFFFFC000ull - last);
+    a_raw("C10", "rel  last page, end = 2^63", REL, last, 0x8000000000000000ull - last);
 
     int32_t r0 = 0, r1 = 0, r2 = 0;
     const long lo = alloc(1, 3, &r0);
@@ -779,6 +837,7 @@ int main(void) {
     say("phys: A alloc F free | va: M ok m changed n no-read r backing freed . unmapped");
     say("== S  probes");
     if (sanity()) {
+        neighbours();
         run_a();
         run_b();
         run_c();
