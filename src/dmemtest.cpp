@@ -378,6 +378,13 @@ struct Line {
             c(t[--n]);
         return *this;
     }
+    Line& shex(long long v) {
+        if (v < 0) {
+            c('-');
+            return hex((uint64_t)-v);
+        }
+        return hex((uint64_t)v);
+    }
     Line& ret(const char* tag, int32_t r) {
         s(tag).c('=');
         const int start = p;
@@ -524,8 +531,9 @@ static bool sanity() {
     const int32_t r1 = sceKernelDirectMemoryQuery(pa + (long)PG, 0, &q1, sizeof(q1));
     {
         Line l = head("S1", "query start / mid of alloc");
-        l.ret("q0", r0).ret("q1", r1).s("end-start=").hex(q0.end - q0.start).s(" mtype=");
-        l.dec(q0.mtype).end();
+        l.ret("q0", r0).ret("q1", r1).s("start=").shex((long long)(q0.start - (uint64_t)pa));
+        l.s(" end=").shex((long long)(q0.end - (uint64_t)pa)).s(" (block is 0..8000)");
+        l.s(" mtype=").dec(q0.mtype).end();
     }
     const bool phys_ok = r0 == 0 && r1 == 0 && allocated(pa) && allocated(pa + PG);
     uint8_t* va = map(pa, 2, &r);
@@ -733,6 +741,9 @@ static void run_c() {
     a_raw("C1", "rel  last page, len BIG", REL, last, BIG);
     a_raw("C2", "chk  last page, len BIG", CHK, last, BIG);
     a_raw("C3", "rel  last page, len 1<<32", REL, last, 0x100000000ull);
+    a_raw("C5", "rel  last page, len 1<<63", REL, last, 0x8000000000000000ull);
+    a_raw("C6", "rel  last page, end = 2^64-4000", REL, last, 0ull - 0x4000 - last);
+    a_raw("C7", "rel  last page, end = 2^64 (wraps to 0)", REL, last, 0ull - last);
 
     int32_t r0 = 0, r1 = 0, r2 = 0;
     const long lo = alloc(1, 3, &r0);
