@@ -38,6 +38,12 @@
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
+/* OPCODE_TEST 6: the S_BFM_B64 hardware test (src/optest_bfm64.h) over the frame instead of
+   the panels; make EXTRAFLAGS=-DOPCODE_TEST=6. 0: off. */
+#ifndef OPCODE_TEST
+#define OPCODE_TEST 0
+#endif
+
 #include "atmosphere.h"
 #include "bgm.h"
 #include "dds_loader.h"
@@ -46,6 +52,9 @@
 #include "nid_resolve.h"
 #include "pm4.h"
 #include "shaders.h"
+#if OPCODE_TEST == 6
+#include "ps_bfm64.h"
+#endif
 
 // memset/memcpy declared in nid_resolve.h
 
@@ -1747,6 +1756,10 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
+#if OPCODE_TEST == 6
+#include "optest_bfm64.h"
+#endif
+
 /* HDR scene -> 6-level bloom chain -> composite into the sRGB display buffer.
    Order and tables as build_post_tables. */
 static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v) {
@@ -1776,6 +1789,9 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
     post_pass(b, g_frame, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_RGBA16F, g_ps_post_final_gpu,
               PS_POST_FINAL_RSRC1, t, bg_v);
+#if OPCODE_TEST == 6
+    opt_pass(b, bg_v);
+#endif
     /* Frost chain, then the UI pass (frame + frosted glass + UI, sRGB) to the display. */
     const uint32_t* f = g_post_tab + FROST_BLOCK * 32;
     for (int k = 0; k < 2; k++, f += 32)
@@ -2953,6 +2969,9 @@ int main(void) {
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
     g_ps_ui_gpu = ps_ui_gpu;
+#if OPCODE_TEST == 6
+    opt_init();
+#endif
     UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
     g_ps_clock_gpu = ps_clock_gpu;
     UPLOAD_SHADER(ps_clock_light_gpu, ps_clock_light_binary);
@@ -3431,6 +3450,9 @@ int main(void) {
         // Button edge detection (pressed this frame, not last)
         uint32_t pressed = pad.buttons & ~prev_buttons;
         prev_buttons = pad.buttons;
+#if OPCODE_TEST == 6
+        opt_input(pressed);
+#endif
 
         /* Controls (the on-screen list, src/ui.h, shows the same):
            Cross     freeze / unfreeze the cube
@@ -4176,7 +4198,11 @@ int main(void) {
                          : g_ts.source == TS_CONSOLE ? 2
                          : ts_net_valid()            ? 3
                                                      : 2;
+#if OPCODE_TEST == 6
+            opt_ui();
+#else
             ui_update(speed_pct, k_day_tenths[day_step], day_frozen, tod_txt, ts_dot);
+#endif
             ui_write_table(g_post_tab + UI_BLOCK * 32);
             if (g_clock_mode) {
                 const float lsun[3] = {sun_dx, sun_dy, sun_dz},
@@ -4588,6 +4614,9 @@ int main(void) {
         static uint64_t prev_t = 0;
         uint64_t dt = prev_t ? (now - prev_t) : 0; prev_t = now;
         /* ==== §15.14 Statistics: per-second trace lines ======================================= */
+#if OPCODE_TEST == 6
+        opt_log((long long)frame);
+#endif
         /* Frame statistics over EVERY frame: per 60 frames the worst dt, frames longer than one
            refresh (> 17.5 ms) and than 1.5 refreshes (> 25 ms), and flips completed vs vblanks
            elapsed in the window (equal = a new image on every refresh). */

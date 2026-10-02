@@ -48,5 +48,7 @@ SOURCE MAP
   src/ui.h, ui_atlas.h the panels: controls list, speeds, the time pill
   src/clock.h, clock_sdf.h, clock_light_norm.h   the glass clock (text, per-frame constants)
   src/logo_texture.h   the built-in logo texture (fallback when a texture is missing)
+  src/optest_bfm64.h   OPCODE_TEST 6 (make EXTRAFLAGS=-DOPCODE_TEST=6): S_BFM_B64 hardware test
+                       over the frame, touch pad pages, results table in the trace log
   shaders/             GCN shaders: *.s sources -> *.h binaries (shaders/README.txt)
   tools/               asset and code generators (tools/README.txt)
