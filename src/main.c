@@ -41,7 +41,7 @@
 /* OPCODE_TEST 6: the S_BFM_B64 hardware test (src/optest_bfm64.h) over the frame instead of
    the panels; make EXTRAFLAGS=-DOPCODE_TEST=6. 0: off. */
 #ifndef OPCODE_TEST
-#define OPCODE_TEST 0
+#define OPCODE_TEST 6
 #endif
 
 #include "atmosphere.h"
