@@ -5,7 +5,7 @@
    whole table to the trace once every row's marker is visible. */
 #pragma once
 
-#define OPT_BUILD "optest-6a"
+#define OPT_BUILD "optest-6b"
 #define OPT_X0 570 /* grid: left edge, top edge (px) */
 #define OPT_Y0 104
 #define OPT_CW 20 /* cell width, row pitch (px) */
@@ -33,7 +33,7 @@ static void opt_set_page(int page) {
 }
 
 static void opt_init(void) {
-    g_opt_tab = (uint32_t*)gpu_alloc_typed((16 + 2 * PS_BFM64_ROWS) * 4, 0x100, MEM_TYPE_ONION);
+    g_opt_tab = (uint32_t*)gpu_alloc_typed((32 + 2 * PS_BFM64_ROWS) * 4, 0x100, MEM_TYPE_ONION);
     g_opt_res = (uint32_t*)gpu_alloc_typed(PS_BFM64_ROWS * 16, 0x100, MEM_TYPE_ONION);
     g_ps_opt_gpu = gpu_alloc_typed(sizeof(ps_bfm64_binary) + 256, 0x1000, MEM_TYPE_ONION);
     if (!g_opt_tab || !g_opt_res || !g_ps_opt_gpu) {
@@ -43,7 +43,7 @@ static void opt_init(void) {
     }
     my_memcpy(g_ps_opt_gpu, ps_bfm64_binary, sizeof(ps_bfm64_binary));
     my_memset(g_opt_res, 0, PS_BFM64_ROWS * 16);
-    my_memset(g_opt_tab, 0, 16 * 4);
+    my_memset(g_opt_tab, 0, 32 * 4);
     float* f = (float*)g_opt_tab;
     f[0] = (float)OPT_X0;
     f[1] = (float)OPT_Y0;
@@ -54,9 +54,13 @@ static void opt_init(void) {
     build_vsharp(g_opt_tab + 8, g_opt_res, PS_BFM64_ROWS * 16);
     g_opt_tab[12] = PS_BFM64_MARK;
     for (int k = 0; k < PS_BFM64_ROWS; k++) {
-        g_opt_tab[16 + 2 * k] = ps_bfm64_rows[k].s2;
-        g_opt_tab[17 + 2 * k] = ps_bfm64_rows[k].s3;
+        g_opt_tab[32 + 2 * k] = ps_bfm64_rows[k].s2;
+        g_opt_tab[33 + 2 * k] = ps_bfm64_rows[k].s3;
     }
+    /* The labels' T# and S#: ps_ui's (the UI buffer, or the glare texture without the UI) until
+       opt_ui draws a page. */
+    if (g_post_tab)
+        my_memcpy(g_opt_tab + 16, g_post_tab + UI_BLOCK * 32 + 36, 12 * 4);
     opt_set_page(0);
 }
 
@@ -100,7 +104,7 @@ static int opt_hex8(char* o, uint32_t v) {
 static void opt_ui(void) {
     static const unsigned char white[3] = {255, 255, 255}, grey[3] = {190, 190, 196};
     g_clock_mode = 0;
-    if (!g_ui.ok || g_opt_ui_page == g_opt_page)
+    if (!g_ui.ok || !g_opt_tab || g_opt_ui_page == g_opt_page)
         return;
     int nb = (g_ui.cur + 1) % UI_BUFS;
     unsigned char* b = g_ui.buf[nb];
@@ -145,6 +149,9 @@ static void opt_ui(void) {
         g_ui.rect[i] = g_ui.pill[i] = -1e6f;
     g_ui.cur = nb;
     g_opt_ui_page = g_opt_page;
+    /* ps_ui composites the UI buffer inside the panels only: ps_bfm64 composites the labels */
+    build_tsharp(g_opt_tab + 16, g_ui.buf[nb], UI_W, UI_H);
+    build_ssharp_clamp(g_opt_tab + 24, 0);
 }
 
 /* From OPT_LOG_FRAME, every 60 frames until it succeeds (at most 10 tries): the whole table as a
