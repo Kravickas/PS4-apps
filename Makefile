@@ -32,13 +32,8 @@ CXX         := clang++
 LD          := ld.lld
 PKG         := $(TOOLCHAIN)/bin/linux
 
-# ---- Sources: any .c / .cpp / .s in src/ ----
-CFILES      := $(wildcard $(SRCDIR)/*.c)
-CPPFILES    := $(wildcard $(SRCDIR)/*.cpp)
-SFILES      := $(wildcard $(SRCDIR)/*.s)
-OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
-               $(patsubst $(SRCDIR)/%.cpp,$(INTDIR)/%.o,$(CPPFILES)) \
-               $(patsubst $(SRCDIR)/%.s,$(INTDIR)/%.o,$(SFILES))
+# ---- Sources: only the test, so other projects' files in src/ are never built ----
+OBJS        := $(INTDIR)/dmemtest.o
 
 # ---- Bundled .prx/.sprx modules (drop libc.prx / libSceFios2.prx here to ship them) ----
 LIBMODULES  := $(wildcard sce_module/*)
@@ -81,11 +76,8 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
-# ---- Packaged assets: every file under assets/ ships at /app0/assets/ (tools/build_assets.py).
-#      tools/make_gp4.py declares every directory (create-gp4's fixed tree breaks nested ones). ----
-ASSETS      := $(shell find assets -type f 2>/dev/null | LC_ALL=C sort)
-
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES) $(ASSETS)
+# ---- No assets: the test draws its own text. ----
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
 	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) $^
 
 $(CONTENT_ID).pkg: pkg.gp4
