@@ -20,14 +20,16 @@ SECTIONS
      mapped area and ends inside it; B8 maps two adjacent allocations of different types at once
   D  release edges: oversized checked lengths, start with bit 63 set, and ranges containing a free
      hole; pages of the block outside the released range must stay allocated
-  Q  query edges: find-next, a type-0 run, unaligned offset, info size, out-of-range offsets
+  Q  query edges: find-next around a hole, a type-0 run, unaligned offset, flags, out-of-range
+     offsets, and QS: bytes written per info size
   V  sceKernelAvailableDirectMemorySize over a known layout
   E  allocate / map argument validation
   F  release after mtypeprotect, mprotect, partial munmap, split mappings, aliases, re-allocation
   P  memory pool expand / commit / decommit, and releasing pooled memory
   C  oversized lengths from the last page, and C4 on a real allocation (rejected length)
-  R  R1 releases a real allocation with len 1<<62, which the length check accepts, and reports
-     the allocations below and above it. Runs last: on hardware it may free more than its page.
+  G  releases a 16 MiB, 2 MiB-aligned mapped block, CPU-only then GPU-visible
+  R  R1 releases a page above the framebuffer with len 1<<62, which the length check accepts, and
+     reports the pages below and above it. Runs last: it frees everything above that page.
 
 BUILD
   Needs OO_PS4_TOOLCHAIN and sce_sys/about/right.sprx (the CI stages it from the toolchain).

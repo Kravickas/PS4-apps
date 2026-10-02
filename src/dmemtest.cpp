@@ -176,6 +176,8 @@ static const unsigned char FONT[95][8] = {
 struct Screen {
     int handle, w, h, cur;
     bool ok;
+    long fb_phys;
+    unsigned long fb_len;
     long long flipid;
     uint32_t* fb[2];
     char lines[SCR_MAXLINES][SCR_COLS];
@@ -183,6 +185,8 @@ struct Screen {
 
     bool init() {
         ok = false;
+        fb_phys = -1;
+        fb_len = 0;
         cur = 0;
         flipid = 0;
         nlines = 0;
@@ -198,6 +202,8 @@ struct Screen {
         if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 3,
                                           &off) < 0)
             return false;
+        fb_phys = off;
+        fb_len = total;
         void* base = 0;
         if (sceKernelMapDirectMemory(&base, total, 0x33, 0, off, align) < 0)
             return false;
@@ -948,6 +954,25 @@ static void run_q() {
                 release_all(blk[i], 4);
         }
     }
+    {
+        // [A t3][8-page hole][B t3]; offsets relative to A
+        const int t[4] = {3, -1, -1, 3};
+        long blk[4];
+        const long c = build(4, t, blk, PG);
+        if (c < 0) {
+            say("Q12  SKIP layout");
+        } else {
+            const long hole = c + (long)(4 * PG);
+            q_raw("Q12", "find-next at hole start (A end)", hole, 1, sizeof(DmemInfo), c);
+            q_raw("Q13", "find-next at hole +4000", hole + (long)PG, 1, sizeof(DmemInfo), c);
+            q_raw("Q14", "find-next at hole +10000", hole + (long)(4 * PG), 1, sizeof(DmemInfo), c);
+            q_raw("Q15", "find-next at last hole page", hole + (long)(7 * PG), 1,
+                  sizeof(DmemInfo), c);
+            q_raw("Q16", "find-next at A end - 4000", hole - (long)PG, 1, sizeof(DmemInfo), c);
+            for (int i = 0; i < 4; i++)
+                release_all(blk[i], 4);
+        }
+    }
     int32_t r = 0;
     const long pa = alloc(2, 3, &r);
     if (pa < 0) {
@@ -960,6 +985,29 @@ static void run_q() {
     q_raw("Q9", "offset = dmem size", (long)g_dmem, 0, sizeof(DmemInfo), pa);
     q_raw("Q10", "find-next from last page", (long)(g_dmem - PG), 1, sizeof(DmemInfo), pa);
     q_raw("Q11", "flags 2", pa, 2, sizeof(DmemInfo), pa);
+    q_raw("Q17", "flags 3", pa, 3, sizeof(DmemInfo), pa);
+    q_raw("Q18", "flags -1", pa, -1, sizeof(DmemInfo), pa);
+    {
+        // Bytes written into a 0xCC-filled buffer for each info size.
+        static const uint32_t sizes[] = {0, 1, 4, 7, 8, 9, 0xF, 0x10, 0x11, 0x14, 0x18, 0x20, 0x40};
+        Line l = head("QS", "info size: bytes written");
+        for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+            unsigned char buf[0x48];
+            my_memset(buf, 0xCC, sizeof(buf));
+            const int32_t rq = sceKernelDirectMemoryQuery(pa, 0, buf, sizes[i]);
+            int last = 0;
+            for (int k = 0; k < 0x48; k++)
+                if (buf[k] != 0xCC)
+                    last = k + 1;
+            l.hex(sizes[i]).c(':');
+            if (rq != 0)
+                l.s("e");
+            else
+                l.hex((uint64_t)last);
+            l.c(' ');
+        }
+        l.end();
+    }
     release_all(pa, 2);
 }
 
@@ -1242,14 +1290,53 @@ static void run_p() {
     }
 }
 
+// ---- G: release under a large mapping ----------------------------------------------------------
+
+static void g_case(const char* id, const char* name, int prot) {
+    const int pages = 0x400;   // 16 MiB, like the framebuffer
+    int32_t r = 0;
+    const long pa = alloc_al(0, g_dmem, pages, 0x200000, 3, &r);
+    if (pa < 0)
+        return setup_failed(id, name, "alloc", r);
+    void* v = 0;
+    r = sceKernelMapDirectMemory(&v, pages * PG, prot, 0, pa, 0x200000);
+    uint8_t* va = r == 0 ? (uint8_t*)v : nullptr;
+    if (!va) {
+        setup_failed(id, name, "map", r);
+        return release_all(pa, pages);
+    }
+    stamp(va, pages, 0x5A060000);
+    {
+        Line l;
+        l.s(id).s("   starting").end();
+    }
+    const int32_t rr = sceKernelReleaseDirectMemory(pa, pages * PG);
+    int maps = 0, allocs = 0;
+    for (int i = 0; i < pages; i++) {
+        maps += mapped(va + i * PG, nullptr) ? 1 : 0;
+        allocs += allocated(pa + i * PG) ? 1 : 0;
+    }
+    Line l = head(id, name);
+    l.ret("ret", rr).s("mapped=").hex((uint64_t)maps).s(" allocated=").hex((uint64_t)allocs).end();
+    unmap_all(va, pages);
+    release_all(pa, pages);
+}
+
+static void run_g() {
+    say("== G  release all of a 16 MiB 2 MiB-aligned mapped block (pages 400)");
+    g_case("G1", "rel  16M, prot 3", 0x3);
+    g_case("G2", "rel  16M, prot 33 (GPU)", 0x33);
+}
+
 // ---- R: positive oversized length on a real allocation ---------------------------------------
 
 static void run_r() {
-    say("== R  len 1<<62 (valid sign) from a real allocation; may free more than its own page");
+    say("== R  len 1<<62 from a page above the framebuffer; frees everything above it");
+    const uint64_t floor = g_screen.fb_phys >= 0 ? g_screen.fb_phys + g_screen.fb_len : 0;
     int32_t r0 = 0, r1 = 0, r2 = 0;
-    const long lo = alloc(1, 3, &r0);
-    const long mid = alloc(1, 3, &r1);
-    const long hi = alloc(1, 3, &r2);
+    const long lo = alloc_in(floor, g_dmem, 1, 3, &r0);
+    const long mid = alloc_in(floor, g_dmem, 1, 3, &r1);
+    const long hi = alloc_in(floor, g_dmem, 1, 3, &r2);
     if (lo < 0 || mid < 0 || hi < 0) {
         Line l = head("R1", "rel  own page, len 1<<62");
         l.s("SKIP alloc ").ret("a", r0).ret("b", r1).ret("c", r2).end();
@@ -1335,6 +1422,7 @@ int main(void) {
         run_f();
         run_p();
         run_c();
+        run_g();
         run_r();
     }
     say("===== DONE =====");
