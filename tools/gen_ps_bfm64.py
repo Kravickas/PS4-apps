@@ -153,13 +153,81 @@ for op in ["s_and_b64 s[28:29], 0x80000005, 0x80000005",
            "s_mov_b64 s[28:29], 0x12345678", "s_not_b64 s[28:29], 0x80000005",
            "s_mov_b64 s[28:29], -1", "s_mov_b64 s[28:29], -16", "s_mov_b64 s[28:29], 1.0"]:
     row("H", " ".join(op.split()[0:1] + op.split()[2:]), 0, 0, [op, CAP], op)
-for op, lab in [("v_madak_f32 v19, 0x40400000, v20, 0x40400000", "madak S0 = K = 3.0, v 2.0"),
-                ("v_madmk_f32 v19, 0x40400000, 0x40400000, v20", "madmk S0 = K = 3.0, v 2.0"),
-                ("v_madak_f32 v19, v21, v20, 0x40400000", "madak S0 v 3.0, K 3.0, v 2.0")]:
+for op, lab in [("v_madak_f32 v19, 0x40400000, v34, 0x40400000", "madak S0 = K = 3.0, v 2.0"),
+                ("v_madmk_f32 v19, 0x40400000, 0x40400000, v34", "madmk S0 = K = 3.0, v 2.0"),
+                ("v_madak_f32 v19, v35, v34, 0x40400000", "madak S0 v 3.0, K 3.0, v 2.0")]:
     row("H", lab, 0x40000000, 0x40400000,
-        ["v_mov_b32 v20, s2", "v_mov_b32 v21, s3", op, "v_readfirstlane_b32 s28, v19", CAP,
+        ["v_mov_b32 v34, s2", "v_mov_b32 v35, s3", op, "v_readfirstlane_b32 s28, v19", CAP,
          "s_mov_b32 s29, 0"],
         op + "; v_readfirstlane_b32 s28, v19")
+
+# I: EXEC idioms. EXEC is forced to all 64 lanes and v19 = lane id, vcc = lane < s3, then the
+# idiom runs a VALU write (v34) under its EXEC; with EXEC back to all lanes, the result is the
+# mask of lanes that wrote (v34 == the value given). No loops: a wrong EXEC model cannot hang.
+ALL = ["s_mov_b32 s36, -1", "s_mov_b32 s37, -1", "s_mov_b64 exec, s[36:37]",
+       "v_mbcnt_lo_u32_b32_e64 v19, -1, 0", "v_mbcnt_hi_u32_b32_e32 v19, -1, v19",
+       "v_mov_b32 v34, 0", "v_cmp_gt_u32_e32 vcc, s3, v19"]
+
+
+def obs(value=None):
+    cmp = "v_cmp_ne_u32_e32 vcc, 0, v34" if value is None else \
+        "v_cmp_eq_u32_e32 vcc, %d, v34" % value
+    return [CAP, "s_mov_b64 exec, s[36:37]", cmp, "s_mov_b64 s[28:29], vcc",
+            "s_mov_b64 exec, s[32:33]"]
+
+
+W = "v_mov_b32 v34, 1"
+for lab, k, k2, idiom, value in [
+        ("exec all, write", 12, 0, [W], None),
+        ("s_and_saveexec_b64 vcc", 12, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", W, "s_mov_b64 exec, s[38:39]"], None),
+        ("s_and_saveexec_b64 vcc, none", 0, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", W, "s_mov_b64 exec, s[38:39]"], None),
+        ("s_and_saveexec_b64 vcc, lane < 48", 48, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", W, "s_mov_b64 exec, s[38:39]"], None),
+        ("s_mov_b64 exec, vcc", 12, 0, ["s_mov_b64 exec, vcc", W], None),
+        ("s_and_b64 exec, exec, vcc", 12, 0, ["s_and_b64 exec, exec, vcc", W], None),
+        ("s_andn2_b64 exec, exec, vcc", 12, 0, ["s_andn2_b64 exec, exec, vcc", W], None),
+        ("s_mov_b64 exec 0; s_or_b64 exec, vcc", 12, 0,
+         ["s_mov_b64 exec, 0", "s_or_b64 exec, exec, vcc", W], None),
+        ("s_xor_b64 exec, exec, vcc", 12, 0, ["s_xor_b64 exec, exec, vcc", W], None),
+        ("s_not_b64 exec, vcc", 12, 0, ["s_not_b64 exec, vcc", W], None),
+        ("v_cmpx_gt_u32 (lane < 12)", 12, 0, ["v_cmpx_gt_u32_e32 vcc, s3, v19", W], None),
+        ("and s, exec, vcc; scc0; mov exec", 12, 0,
+         ["s_and_b64 s[38:39], exec, vcc", "s_cbranch_scc0 skip_{K}",
+          "s_mov_b64 exec, s[38:39]", W, "skip_{K}:"], None),
+        ("and s, exec, vcc; scc0; none", 0, 0,
+         ["s_and_b64 s[38:39], exec, vcc", "s_cbranch_scc0 skip_{K}",
+          "s_mov_b64 exec, s[38:39]", W, "skip_{K}:"], None),
+        ("mov exec, vcc; execz", 12, 0,
+         ["s_mov_b64 exec, vcc", "s_cbranch_execz skip_{K}", W, "skip_{K}:"], None),
+        ("mov exec, vcc; execz; none", 0, 0,
+         ["s_mov_b64 exec, vcc", "s_cbranch_execz skip_{K}", W, "skip_{K}:"], None),
+        ("vccz branch, all lanes", 12, 0, ["s_cbranch_vccz skip_{K}", W, "skip_{K}:"], None),
+        ("vccnz branch, all lanes", 12, 0, ["s_cbranch_vccnz skip_{K}", W, "skip_{K}:"], None),
+        ("if/else: then lanes", 12, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", "s_xor_b64 s[38:39], exec, s[38:39]", W,
+          "s_mov_b64 exec, s[38:39]", "v_mov_b32 v34, 2"], 1),
+        ("if/else: else lanes", 12, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", "s_xor_b64 s[38:39], exec, s[38:39]", W,
+          "s_mov_b64 exec, s[38:39]", "v_mov_b32 v34, 2"], 2),
+        ("nested saveexec 20, 8", 20, 8,
+         ["s_and_saveexec_b64 s[38:39], vcc", "v_cmp_gt_u32_e32 vcc, s2, v19",
+          "s_and_saveexec_b64 s[40:41], vcc", W, "s_mov_b64 exec, s[40:41]",
+          "s_mov_b64 exec, s[38:39]"], None),
+        ("nested saveexec 8, 20", 8, 20,
+         ["s_and_saveexec_b64 s[38:39], vcc", "v_cmp_gt_u32_e32 vcc, s2, v19",
+          "s_and_saveexec_b64 s[40:41], vcc", W, "s_mov_b64 exec, s[40:41]",
+          "s_mov_b64 exec, s[38:39]"], None),
+        ("write after scope restore", 12, 0,
+         ["s_and_saveexec_b64 s[38:39], vcc", W, "s_mov_b64 exec, s[38:39]",
+          "v_mov_b32 v34, 2"], 2)]:
+    row("I", lab, k2, k, ALL + idiom + obs(value),
+        "exec ~0, vcc = lane < s3; " + "; ".join(i for i in idiom if not i.endswith(":")))
+row("I", "vcc from v_cmp under exec lane < 12", 0, 12,
+    ALL + ["s_and_saveexec_b64 s[38:39], vcc", "v_cmp_gt_u32_e32 vcc, 64, v19",
+           "s_mov_b64 s[28:29], vcc", CAP, "s_mov_b64 exec, s[32:33]"],
+    "exec = lane < s3 (saveexec); v_cmp_gt_u32 vcc, 64, lane  (vcc only active lanes)")
 
 N = len(ROWS)
 MARK = 0xB6400000  # result marker base: dword 3 of row k = MARK + k
@@ -228,7 +296,7 @@ for k, (g, lab, a, b, scc_in, body, text) in enumerate(ROWS):
         e(CAP)
     else:
         for ins in body:
-            e(ins)
+            e(ins.replace("{K}", str(k)))
         if CAP not in body:
             e(CAP)
     e("v_cmp_ne_u32_e32 vcc, %d, v17" % k if k <= 64 else "v_cmp_ne_u32_e32 vcc, 0x%x, v17" % k)
@@ -318,7 +386,7 @@ open(src_path, "w").write(text)
 HASH = 0xCAFE0601
 trailer = [0x5362724F, 0x00726468, (len(words) * 4) << 8, 0, 0xDEADBEEF, HASH, 0]
 allw = words + trailer
-vg = 32 + 1  # v0..v32
+vg = 35 + 1  # v0..v35
 sg = 51 + 1 + 2  # s0..s51 + VCC
 
 
@@ -357,7 +425,18 @@ for g, lab, a, b, scc_in, body, t in ROWS:
     ln = "    {'%s', %d, 0x%08Xu, 0x%08Xu, %s, %s}," % (g, scc_in, a, b, cstr(lab), cstr(t))
     if len(ln) > 100:
         o("    {'%s', %d, 0x%08Xu, 0x%08Xu, %s," % (g, scc_in, a, b, cstr(lab)))
-        ln = "     %s}," % cstr(t)
+        parts, cur = [], ""
+        for word in t.split(" "):
+            nxt = word if not cur else cur + " " + word
+            if len(cstr(nxt)) + 8 > 100:
+                parts.append(cur + " ")
+                cur = word
+            else:
+                cur = nxt
+        parts.append(cur)
+        for i, part in enumerate(parts):
+            o("     %s%s" % (cstr(part), "}," if i == len(parts) - 1 else ""))
+        continue
     o(ln)
 o("};")
 open(os.path.join(sh, "ps_bfm64.h"), "w").write("\n".join(out) + "\n")

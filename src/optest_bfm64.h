@@ -5,7 +5,7 @@
    whole table to the trace once every row's marker is visible. */
 #pragma once
 
-#define OPT_BUILD "optest-6c"
+#define OPT_BUILD "optest-6d"
 #define OPT_X0 570 /* grid: left edge, top edge (px) */
 #define OPT_Y0 104
 #define OPT_CW 20 /* cell width, row pitch (px) */
