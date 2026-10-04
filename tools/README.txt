@@ -27,8 +27,8 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
   gen_ps_clock.py    shaders/ps_clock.s (clock mode's glass)
   gen_optest5.py     src/optest5.h: the OPCODE_TEST 5 rows (every V_CVT_* of GCN2, edge-case inputs,
                      labels); run clang-format on the header afterwards
-  gen_ps_cvt.py      shaders/ps_cvt.s (without the V_CVT_* shadPS4 cannot translate) and ps_cvt_full.s
-                     (OPT5_FULL, PS4 only): the OPCODE_TEST 5 conversion pass
+  gen_ps_cvt.py      shaders/ps_cvt.s (without the V_CVT_* shadPS4 cannot translate): the OPCODE_TEST 5
+                     conversion pass
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
@@ -49,3 +49,4 @@ make_ui_atlas.py FONT: assets/ui/ui_atlas.bin + src/ui_atlas.h - glyphs of the l
 ui_icons/ (from a DS4 icon pack), used by the on-screen panels (src/ui.h). The font is not shipped;
 pass the OpenType build (URWGothic-Demi.otf, urw-base35) - the Type 1 build has other metrics and
 changes the atlas. Run clang-format on src/ui_atlas.h afterwards.
+gen_optest6.py      OPCODE_TEST 6 (VOP3 modifiers): writes src/optest6.h and shaders/ps_mod.s.
