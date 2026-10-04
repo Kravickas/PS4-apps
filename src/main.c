@@ -186,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-6"
+#define BUILD_TAG "optest-6a"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -336,7 +336,8 @@ static void* g_ps_ui_gpu = 0;
 #define OPT5_PASS_MAX 20                   /* OPCODE_TEST 5 / 6: passes, one a float mode */
 static void* g_o5_ps[OPT5_PASS_MAX] = {0}; /* ps_cvt (5) / ps_mod (6), one a float mode */
 #define OPT5_STRIDE (8 * OPT5_MODES)       /* result bytes a slot: lo, hi a float mode */
-#define OPT5_RT_W 512           /* the passes' target: one pixel per slot */
+#define OPT5_LINE (80 + 26 * OPT5_MODES)   /* log line: label <= 64, 26 a mode */
+#define OPT5_RT_W 512                      /* the passes' target: one pixel per slot */
 #define OPT5_MARK_A 0xC0DE5A00u /* written after the last slot by each pass */
 #define OPT5_MARK_B 0xC0DE5B00u
 #define OPT5_MARK(m) (OPT5_MARK_A + ((uint32_t)(m) << 8)) /* A..E: 0xC0DE5A00..0xC0DE5E00 */
@@ -1896,7 +1897,7 @@ static int o5_value(char* o, const volatile uint32_t* r, int wide) { /* 0xHI_LO 
 static void o5_log(void) {
     int n = g_ui.o5n;
     const volatile uint32_t* r = g_o5.res;
-    char line[256];
+    char line[OPT5_LINE];
     int k = 0;
     int marks_ok = 1;
     for (int m = 0; m < OPT5_MODES; m++)
