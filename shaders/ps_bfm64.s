@@ -3,8 +3,6 @@ s_mov_b32 vcc_hi, 0x101d
 s_load_dwordx8 s[4:11], s[0:1], 0x0
 s_load_dwordx4 s[12:15], s[0:1], 0x8
 s_load_dword s16, s[0:1], 0xc
-s_load_dwordx8 s[40:47], s[0:1], 0x10
-s_load_dwordx4 s[48:51], s[0:1], 0x18
 s_waitcnt lgkmcnt(0)
 s_mov_b64 s[32:33], exec
 v_subrev_f32 v4, s4, v2
@@ -7245,6 +7243,9 @@ v_cndmask_b32 v25, v25, v26, vcc
 v_cmp_lt_f32_e32 vcc, 0x3f400000, v11
 v_cndmask_b32 v25, v25, v26, vcc
 v_cndmask_b32_e64 v25, v26, v25, s[20:21]
+s_load_dwordx8 s[40:47], s[0:1], 0x10
+s_load_dwordx4 s[48:51], s[0:1], 0x18
+s_waitcnt lgkmcnt(0)
 v_mul_f32 v29, 0x3a088889, v2
 v_mul_f32 v30, 0x3a72b9d6, v3
 image_sample_lz v[29:32], v[29:30], s[40:47], s[48:51] dmask:0xf
@@ -7255,4 +7256,3 @@ v_add_f32 v25, v25, v29
 v_mov_b32 v27, 1.0
 exp mrt0, v25, v25, v25, v27 done vm
 s_endpgm
-s_nop 0
