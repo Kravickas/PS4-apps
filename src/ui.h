@@ -5,9 +5,10 @@
    flight keep reading theirs. ps_ui blurs the scene under the panel's rounded rect (frosted
    glass) and composites the texture after its sRGB encode. */
 #pragma once
-#include "optest5.h"
-#ifndef OPT5_FULL
-#define OPT5_FULL 0 /* main.c: 1 = also the instructions shadPS4 cannot translate */
+#if OPCODE_TEST == 6
+#include "optest6.h" /* VOP3 modifiers */
+#else
+#include "optest5.h" /* V_CVT_* */
 #endif
 #include "ui_atlas.h"
 
@@ -523,8 +524,6 @@ static void ui_o5_layout(void) {
     }
     int n = 0, prev = -1;
     for (int r = 0; r < OPT5_ROWS; r++) {
-        if (!OPT5_FULL && k_opt5_full_only[k_opt5_row[r][0]])
-            continue;
         if ((int)k_opt5_row[r][0] != prev)
             g_ui.o5slot[n++] = (int16_t)(-1 - (int)k_opt5_row[r][0]);
         prev = (int)k_opt5_row[r][0];
@@ -540,7 +539,7 @@ static void ui_o5_layout(void) {
         for (int i = a; i < b; i++) {
             int sl = g_ui.o5slot[i];
             if (sl < 0) {
-                int w = ui_text_width_s("V_CVT_") + ui_text_width_s(k_opt5_op[-1 - sl]);
+                int w = ui_text_width_s(k_opt5_op[-1 - sl]);
                 hw = w > hw ? w : hw;
             } else {
                 int w = ui_text_width_s(k_opt5_label[sl]);
@@ -580,12 +579,18 @@ static void ui_o5_draw(unsigned char* b) {
                                           "results not visible to the CPU (shadPS4: readbacksMode "
                                           "= Precise); the table is GPU-drawn"};
     int y = UI_Y0 + UI_FONT_ASCENT;
-    int x = ui_text(
-        b, UI_X0 + 8, y,
-        "V_CVT_* (GCN2)   A: FLOAT_MODE 0x00   B: 0xC0   (C 0x10, D 0x20, E 0x30: in the log)",
-        white);
-    x = ui_text_s(b, x + 30, y, g_ui.o5page ? "page 2/2 (touch pad)" : "page 1/2 (touch pad)",
-                  grey);
+    static const char hx[] = "0123456789ABCDEF";
+    char title[96] = OPT5_TITLE "   A: FLOAT_MODE 0x..   B: 0x..   (all modes in the log)";
+    char* p = title + sizeof(OPT5_TITLE) - 1 + 19;
+    for (int i = 0; i < 2; i++, p += 10) { /* the two modes drawn: passes 0 and 1 */
+        p[0] = hx[k_opt5_float_mode[i] >> 4];
+        p[1] = hx[k_opt5_float_mode[i] & 15];
+    }
+    int x = ui_text(b, UI_X0 + 8, y, title, white);
+    char page[24] = "page 1/1 (touch pad)";
+    page[5] = (char)('1' + g_ui.o5page);
+    page[7] = (char)('0' + g_ui.o5pages);
+    x = ui_text_s(b, x + 30, y, page, grey);
     ui_text_s(b, x + 24, y, status[g_ui.o5status], g_ui.o5status == 2 ? warn : grey);
     for (int k = 0; k < UI_O5_COLS * UI_O5_PAGES; k++) {
         if (g_ui.o5pg[k] != g_ui.o5page || !g_ui.o5ns[k])
@@ -601,8 +606,7 @@ static void ui_o5_draw(unsigned char* b) {
             int sl = g_ui.o5slot[g_ui.o5s0[k] + i];
             int by = UI_O5_Y0 + i * UI_O5_PITCH + (UI_O5_PITCH + UI_FONT_S_CAP) / 2;
             if (sl < 0)
-                ui_text_s(b, ui_text_s(b, g_ui.o5x[k], by, "V_CVT_", head), by, k_opt5_op[-1 - sl],
-                          head);
+                ui_text_s(b, g_ui.o5x[k], by, k_opt5_op[-1 - sl], head);
             else
                 ui_text_s(b, g_ui.o5xa[k] - UI_O5_GAP_L - ui_text_width_s(k_opt5_label[sl]), by,
                           k_opt5_label[sl], white);
@@ -682,7 +686,7 @@ static void ui_o5_update(void) {
 static void ui_update(int cam_pct, int day_mult, int day_frozen, const char* time_txt, int dot) {
     if (!g_ui.ok)
         return;
-    if (g_ui.topt == 5) {
+    if (g_ui.topt >= 5) {
         ui_o5_update();
         return;
     }

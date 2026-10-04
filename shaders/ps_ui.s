@@ -887,8 +887,8 @@ v_cndmask_b32 v17, v17, v39, vcc
 v_cndmask_b32 v18, v18, v40, vcc
 optest4_done:
 ; <<< opcode test 4
-; >>> opcode test 5 (main.c OPCODE_TEST 5): the V_CVT table - [52] on (0: off). The results of ps_cvt_a / ps_cvt_b
-;     ([132] V#: 48 bytes a slot, A lo, A hi, B lo, B hi first) as hex digits from the [136] T# strip ([144] S#; 16 cells of [151] px,
+; >>> opcode test 5 (main.c OPCODE_TEST 5): the V_CVT table - [52] on (0: off). The results of the passes (ps_cvt / ps_mod)
+;     ([132] V#: [176] bytes a slot, passes 0 and 1 first: lo, hi each) as hex digits from the [136] T# strip ([144] S#; 16 cells of [151] px,
 ;     white with coverage in alpha); slot ops from [128] V# (0xff: a heading, bit 8: a 64-bit result, 16 digits).
 ;     Rows from y [148], pitch [149] ([150] = 1 / pitch); [152] 1 / [151]; strip scale [153] u, [154] v; [155] gap
 ;     between the A and B fields; columns [156 + 4k] = A field x, B field x, first slot, slots (k = 0..4).
@@ -1064,11 +1064,11 @@ s_mov_b32 s86, s61
 s_mov_b32 s87, s62
 s_load_dwordx16 s[56:71], s[0:1], 0x80
 s_load_dwordx4 s[72:75], s[0:1], 0x90
+s_load_dword s76, s[0:1], 0xb0
 s_waitcnt lgkmcnt(0)
 v_cvt_u32_f32 v36, v34
+v_mul_u32_u24 v24, s76, v36
 v_lshlrev_b32 v36, 4, v36
-v_lshlrev_b32 v24, 1, v36
-v_add_i32 v24, vcc, v24, v36
 buffer_load_dword v37, v36, s[56:59], 0 offen
 buffer_load_dwordx4 v[38:41], v24, s[60:63], 0 offen
 s_waitcnt vmcnt(0)

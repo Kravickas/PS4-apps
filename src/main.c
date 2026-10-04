@@ -56,15 +56,15 @@
    S_BITSET0_B64, V_ASHR_I64 (high, low dword) and V_CMPX_EQ_U64 / NE_U64 / EQ_I64 (bits 0..5 EXEC
    after the compare, 8..13 VCC).
 
-   5 = every V_CVT_* of GCN2 (src/optest5.h, tools/gen_optest5.py) over the whole screen: ps_cvt_a /
-   ps_cvt_b compute each row in FLOAT_MODE 0x00 (A) and 0xC0 (B) into a buffer, ps_ui draws the
-   results as hex digits, and at frame 120 the CPU logs them as GitHub tables to the trace log. */
-#define OPCODE_TEST 5
+   5 = every V_CVT_* of GCN2 (src/optest5.h, tools/gen_optest5.py) over the whole screen: ps_cvt
+   computes each row in 5 float modes (FLOAT_MODE 0x00, 0xC0, 0x10, 0x20, 0x30), ps_ui draws two as
+   hex digits, and at frame 120 the CPU logs them as GitHub tables to the trace log.
 
-/* OPT5_FULL: 1 = test 5 with V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 too - PS4 only (shadPS4 has no
-   translator for them and its assert stops the shader); 0 = without them and their rows, for both.
- */
-#define OPT5_FULL 0
+   6 = VOP3 modifiers (src/optest6.h, shaders/ps_mod.s): omod (mul:2 / mul:4 / div:2) and clamp on
+   f32, f64, f16 and integer results, neg / abs on arithmetic and conversion sources, each row in 20
+   float modes (every f32 x f64/f16 denormal mode, f32 rounding +inf / -inf / zero, f64 rounding to
+   zero); the same page and log as test 5 (two modes on screen, all in the log). */
+#define OPCODE_TEST 6
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -74,6 +74,9 @@
 #include "nid_resolve.h"
 #include "pm4.h"
 #include "shaders.h"
+
+/* after shaders.h: the OPCODE_TEST 5 / 6 pass binaries it declares */
+#include "ps_opt5_set.h"
 
 // memset/memcpy declared in nid_resolve.h
 
@@ -183,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-5e"
+#define BUILD_TAG "optest-6"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -330,14 +333,9 @@ static void* g_ps_post_blur_gpu = 0;
 static void* g_ps_post_comp_gpu = 0;
 static void* g_ps_post_final_gpu = 0;
 static void* g_ps_ui_gpu = 0;
-static void* g_ps_cvt_a_gpu =
-    0; /* OPCODE_TEST 5: the conversion passes (ps_cvt, FLOAT_MODE A / B) */
-static void* g_ps_cvt_b_gpu = 0;
-static void* g_ps_cvt_c_gpu = 0; /* FLOAT_MODE 0x10, 0x20, 0x30 (f32 denormal modes 1..3) */
-static void* g_ps_cvt_d_gpu = 0;
-static void* g_ps_cvt_e_gpu = 0;
-#define OPT5_MODES 5
-#define OPT5_STRIDE 48          /* result bytes a slot: lo, hi for modes A..E */
+#define OPT5_PASS_MAX 20                   /* OPCODE_TEST 5 / 6: passes, one a float mode */
+static void* g_o5_ps[OPT5_PASS_MAX] = {0}; /* ps_cvt (5) / ps_mod (6), one a float mode */
+#define OPT5_STRIDE (8 * OPT5_MODES)       /* result bytes a slot: lo, hi a float mode */
 #define OPT5_RT_W 512           /* the passes' target: one pixel per slot */
 #define OPT5_MARK_A 0xC0DE5A00u /* written after the last slot by each pass */
 #define OPT5_MARK_B 0xC0DE5B00u
@@ -1541,7 +1539,8 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
 /* ==== §11 Modules: time sources, UI, glass clock ============================================== */
 #include "timesrc.h"
 #include "ui.h"
-_Static_assert(OPT5_ROWS + OPT5_OPS <= OPT5_RT_W, "OPCODE_TEST 5: a pixel per slot");
+_Static_assert(OPT5_ROWS + OPT5_OPS <= OPT5_RT_W, "OPCODE_TEST 5 / 6: a pixel per slot");
+_Static_assert(OPT5_MODES <= OPT5_PASS_MAX, "OPCODE_TEST 5 / 6: a pass per float mode");
 
 /* after timesrc.h / ui.h: the clock uses g_ts */
 #include "clock.h" /* glass clock: text, per-frame constants */
@@ -1791,13 +1790,6 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
 #define PS_POST_FINAL_RSRC1 ((7u << 6) | 9u) /* v36, s56 + VCC (lens flare) */
 #define PS_RESOLVE_RSRC1 ((10u << 6) | 23u)  /* v0-v95, s0-s79 + VCC */
 #define PS_UI_RSRC1 ((11u << 6) | 10u)       /* v43, s87 + VCC (frosted glass, UI, OPCODE_TEST) */
-#define PS_CVT_A_RSRC1                                                                             \
-    ((3u << 6) | 4u) /* v19, s23 + VCC; FLOAT_MODE 0x00 (all denormals flushed) */
-#define PS_CVT_B_RSRC1                                                                             \
-    (PS_CVT_A_RSRC1 | (0xC0u << 12))         /* FLOAT_MODE 0xC0: f64 / f16 denormals kept */
-#define PS_CVT_C_RSRC1 (PS_CVT_A_RSRC1 | (0x10u << 12)) /* f32 denorm: in kept, out flushed */
-#define PS_CVT_D_RSRC1 (PS_CVT_A_RSRC1 | (0x20u << 12)) /* f32 denorm: in flushed, out kept */
-#define PS_CVT_E_RSRC1 (PS_CVT_A_RSRC1 | (0x30u << 12)) /* f32 denorm: in and out kept */
 #define PS_CLOCK_RSRC1 ((9u << 6) | 17u)     /* v71, s76 incl. VCC */
 #define PS_CLOCK_LIGHT_RSRC1 ((4u << 6) | 4u) /* v16, s34 incl. VCC */
 
@@ -1857,16 +1849,10 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     } else {
         if (g_o5.ok) { /* OPCODE_TEST 5: every V_CVT row in FLOAT_MODE A and B, before ps_ui reads
                           them */
-            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_a_gpu,
-                      PS_CVT_A_RSRC1, g_o5.tab, bg_v);
-            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_b_gpu,
-                      PS_CVT_B_RSRC1, g_o5.tab + 16, bg_v);
-            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_c_gpu,
-                      PS_CVT_C_RSRC1, g_o5.tab + 32, bg_v);
-            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_d_gpu,
-                      PS_CVT_D_RSRC1, g_o5.tab + 48, bg_v);
-            post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_ps_cvt_e_gpu,
-                      PS_CVT_E_RSRC1, g_o5.tab + 64, bg_v);
+            for (int m = 0; m < OPT5_MODES; m++)
+                post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_o5_ps[m],
+                          OPT5_PASS_RSRC1 | ((uint32_t)k_opt5_float_mode[m] << 12),
+                          g_o5.tab + 16 * m, bg_v);
         }
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
                   PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
@@ -1876,6 +1862,19 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
 /* OPCODE_TEST 5: the results as GitHub tables in the trace log, one per instruction (B bold where
    it differs from A); without both markers the CPU does not see the GPU's writes (shadPS4:
    readbacks). */
+#define OPT5_STR_(x) #x
+#define OPT5_STR(x) OPT5_STR_(x)
+#define OPT5_TEST_STR OPT5_STR(OPCODE_TEST)
+/* "0x" and two hex digits of v: a float mode in the log's header. */
+static int o5_hex2(char* p, uint32_t v) {
+    static const char hx[] = "0123456789ABCDEF";
+    p[0] = '0';
+    p[1] = 'x';
+    p[2] = hx[(v >> 4) & 15];
+    p[3] = hx[v & 15];
+    return 4;
+}
+
 static int o5_hex(char* o, uint32_t v) {
     o[0] = '0';
     o[1] = 'x';
@@ -1919,28 +1918,38 @@ static void o5_log(void) {
         g_ui.o5status = 2;
         return;
     }
-    trace_msg(
-        "\n## V_CVT_* on GCN2 (OPCODE_TEST 5, build " BUILD_TAG
-        ")\n\nA: FLOAT_MODE 0x00 (denormals "
-        "flushed), B: FLOAT_MODE 0xC0 (f64 / f16 denormals kept), C: 0x10, D: 0x20, E: 0x30 (f32 "
-        "denormal inputs kept / outputs kept / both kept); bold where it differs from A.\n");
-    if (!OPT5_FULL)
-        trace_msg(
-            "Without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator; OPT5_FULL 1 "
-            "has them, PS4 only).\n");
+    trace_msg("\n## " OPT5_TITLE " (OPCODE_TEST " OPT5_TEST_STR ", build " BUILD_TAG
+              ")\n\nColumns: the pass's PGM_RSRC1 FLOAT_MODE ([7:6] f64/f16 denormals, [5:4] f32 "
+              "denormals, [3:2] f64 rounding, [1:0] f32 rounding); bold where it differs from the "
+              "first.\n");
     for (int i = 0; i < n; i++) {
         int sl = g_ui.o5slot[i];
         const char* m;
         k = 0;
         if (sl < 0) {
-            m = "\n### V_CVT_";
+            m = "\n### ";
             while (*m)
                 line[k++] = *m++;
             for (m = k_opt5_op[-1 - sl]; *m;)
                 line[k++] = *m++;
-            m = "\n\n| Input | A | B | C | D | E |\n|---|--:|--:|--:|--:|--:|\n";
+            m = "\n\n| Input |";
             while (*m)
                 line[k++] = *m++;
+            for (int md = 0; md < OPT5_MODES; md++) {
+                line[k++] = ' ';
+                k += o5_hex2(line + k, k_opt5_float_mode[md]);
+                line[k++] = ' ';
+                line[k++] = '|';
+            }
+            m = "\n|---|";
+            while (*m)
+                line[k++] = *m++;
+            for (int md = 0; md < OPT5_MODES; md++) {
+                m = "--:|";
+                while (*m)
+                    line[k++] = *m++;
+            }
+            line[k++] = '\n';
         } else {
             const volatile uint32_t* v = r + OPT5_STRIDE / 4 * i;
             int wide = ui_o5_wide(sl);
@@ -2726,8 +2735,8 @@ int main(void) {
     Tex glare_tex = load_tex(ASSET_DIR "images/flare/glare.dds", k_black, 9);
     /* On-screen panels (src/ui.h): atlas + triple-buffered UI texture. */
     int ui_err = ui_init();
-    g_ui.topt = OPCODE_TEST >= 3 && OPCODE_TEST <= 5 ? OPCODE_TEST : 0;
-    if (g_ui.topt == 5)
+    g_ui.topt = OPCODE_TEST >= 3 && OPCODE_TEST <= 6 ? OPCODE_TEST : 0;
+    if (g_ui.topt >= 5)
         ui_o5_layout();
     else if (g_ui.topt)
         ui_optest_layout();
@@ -3164,7 +3173,7 @@ int main(void) {
                tables, the hex digit strip (ui_glyph_s digits centred in o5dw px cells, baseline as
                the rows'). */
             uib[52] = 0;
-            if (OPCODE_TEST == 5 && g_ui.ok) {
+            if (OPCODE_TEST >= 5 && g_ui.ok) {
                 int n = g_ui.o5n, dw = g_ui.o5dw;
                 g_o5.slots = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
                 g_o5.res = (uint32_t*)gpu_alloc_typed(n * OPT5_STRIDE + 256, 256, MEM_TYPE_ONION);
@@ -3183,17 +3192,19 @@ int main(void) {
                     }
                     my_memset(g_o5.res, 0, n * OPT5_STRIDE + 256);
                     ui_o5_strip((unsigned char*)g_o5.strip);
-                    for (int h = 0; h < OPT5_MODES; h++) { /* ps_cvt_a..e: mode h at + 8 h */
+                    for (int h = 0; h < OPT5_MODES; h++) { /* pass h: float mode h at + 8 h */
                         uint32_t* t = g_o5.tab + 16 * h;
                         build_vsharp(t, g_o5.slots, n * 16);
                         build_vsharp(t + 4, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
                         t[8] = 8u * (uint32_t)h;
                         t[9] = (uint32_t)n;
                         t[10] = OPT5_MARK(h);
+                        t[11] = OPT5_STRIDE;
                         t[11] = 0;
                     }
                     build_vsharp(uib + 128, g_o5.slots, n * 16);
                     build_vsharp(uib + 132, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
+                    uib[176] = OPT5_STRIDE; /* ps_ui: result bytes a slot */
                     build_tsharp(uib + 136, g_o5.strip, 256, 16);
                     build_ssharp_clamp(uib + 144, 0);
                     f[84] = (float)UI_O5_Y0;
@@ -3274,25 +3285,10 @@ int main(void) {
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
-#if OPT5_FULL
-    UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_full_a_binary);
-    UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_full_b_binary);
-    UPLOAD_SHADER(ps_cvt_c_gpu, ps_cvt_full_c_binary);
-    UPLOAD_SHADER(ps_cvt_d_gpu, ps_cvt_full_d_binary);
-    UPLOAD_SHADER(ps_cvt_e_gpu, ps_cvt_full_e_binary);
-#else
-    UPLOAD_SHADER(ps_cvt_a_gpu, ps_cvt_a_binary);
-    UPLOAD_SHADER(ps_cvt_b_gpu, ps_cvt_b_binary);
-    UPLOAD_SHADER(ps_cvt_c_gpu, ps_cvt_c_binary);
-    UPLOAD_SHADER(ps_cvt_d_gpu, ps_cvt_d_binary);
-    UPLOAD_SHADER(ps_cvt_e_gpu, ps_cvt_e_binary);
-#endif
-    g_ps_ui_gpu = ps_ui_gpu;
-    g_ps_cvt_a_gpu = ps_cvt_a_gpu;
-    g_ps_cvt_b_gpu = ps_cvt_b_gpu;
-    g_ps_cvt_c_gpu = ps_cvt_c_gpu;
-    g_ps_cvt_d_gpu = ps_cvt_d_gpu;
-    g_ps_cvt_e_gpu = ps_cvt_e_gpu;
+    for (int m = 0; m < OPT5_MODES; m++) { /* OPCODE_TEST 5 / 6 passes */
+        g_o5_ps[m] = gpu_alloc_typed(k_opt5_pass_size[m] + 256, 0x1000, MEM_TYPE_ONION);
+        my_memcpy(g_o5_ps[m], k_opt5_pass[m], k_opt5_pass_size[m]);
+    }
     UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
     g_ps_clock_gpu = ps_clock_gpu;
     UPLOAD_SHADER(ps_clock_light_gpu, ps_clock_light_binary);

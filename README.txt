@@ -44,14 +44,16 @@ SHADPS4 OPCODE TEST (main.c OPCODE_TEST; 0 = off)
   4 = the same labelled bit grid for 35 rows: V_CVT_PK_U16_U32, V_CVT_PK_I16_I32, V_CVT_PKNORM_U16_F32,
   V_CVT_PKNORM_I16_F32, S_BITSET1_B64 / S_BITSET0_B64, V_ASHR_I64 (high, low dword) and V_CMPX_EQ_U64 /
   NE_U64 / EQ_I64 (bits 0..5 EXEC after the compare, 8..13 VCC).
-  5 = every V_CVT_* of GCN2 (429 rows incl. VOP3 neg / abs / clamp / omod, src/optest5.h): computed in
+  5 = every V_CVT_* of GCN2 (389 rows incl. VOP3 neg / abs / clamp / omod, src/optest5.h): computed in
   FLOAT_MODE A 0x00, B 0xC0, C 0x10, D 0x20, E 0x30; A and B drawn as hex by the GPU over the whole screen
-  (two pages: touch pad), all five in the trace log as GitHub tables at frame 120. shadPS4 needs readbacksMode = Precise for the log (the
-  screen does not need it; the status line says when the CPU cannot see the results).
-  Built without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator: its assert stops the
-  shader); OPT5_FULL 1 adds them, for the PS4 only.
-  V_CVT_OFF_F32_I4 runs on immediate operands (one instruction per tested value): shadPS4 asserts on
-  a register operand.
+  (two pages: touch pad), all five in the trace log as GitHub tables at frame 120. shadPS4 needs
+  readbacksMode = Precise for the log (the screen does not need it; the status line says when the CPU
+  cannot see the results). Without V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator; not
+  tested). V_CVT_OFF_F32_I4 runs on immediate operands (one instruction per tested value): shadPS4
+  asserts on a register operand.
+  6 = VOP3 modifiers (168 rows, src/optest6.h): omod mul:2 / mul:4 / div:2 and clamp on f32, f64, f16 and
+  integer results, neg / abs on sources, in 20 float modes (all f32 x f64/f16 denormal modes, f32
+  rounding +inf / -inf / zero, f64 rounding to zero); modes 0x00 and 0x20 on screen, all in the log.
 
 TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading

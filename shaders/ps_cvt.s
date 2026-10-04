@@ -1,5 +1,5 @@
-; OPCODE_TEST 5 conversion pass: one pixel per table slot (a 384 x 1 target, x = slot). Table (s[0:1]):
-; [0..3] V# of the slots {op, a, b, c} (op bits 7..0; 0xff: a heading), [4..7] V# of the results (48 bytes a
+; OPCODE_TEST 5 conversion pass: one pixel per table slot (x = slot). Table (s[0:1]):
+; [0..3] V# of the slots {op, a, b, c} (op bits 7..0; 0xff: a heading), [4..7] V# of the results ([11] bytes a
 ; slot: lo, hi for float modes A..E), [8] this pass's byte offset in a result (mode * 8), [9] slot count,
 ; [10] marker. Runs the V_CVT_* on the
 ; slot's operands and keeps the slot's op (a, b = an f64 source; c = PK_U8's S2, PKACCUM's destination);
@@ -226,16 +226,13 @@ v_cndmask_b32 v12, v12, v14, vcc
 v_cvt_f32_f64_e64 v14, -v[9:10]
 v_cmp_eq_u32 vcc, 34, v8
 v_cndmask_b32 v12, v12, v14, vcc
-v_lshlrev_b32 v6, 1, v5
-v_add_i32 v6, vcc, v6, v5
+v_mul_u32_u24 v6, s15, v4
 v_add_i32 v6, vcc, s12, v6
 buffer_store_dwordx2 v[12:13], v6, s[8:11], 0 offen
 v_cmp_eq_u32 vcc, 0, v4
 s_and_saveexec_b64 s[18:19], vcc
 s_cbranch_execz cvt_nomark
-s_lshl_b32 s20, s13, 5
-s_lshl_b32 s21, s13, 4
-s_add_u32 s20, s20, s21
+s_mul_i32 s20, s13, s15
 s_lshr_b32 s21, s12, 1
 s_add_u32 s20, s20, s21
 v_mov_b32 v7, s20
