@@ -186,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-6c"
+#define BUILD_TAG "optest-6d"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -461,15 +461,26 @@ static void trace_line(const char *buf, unsigned long n);
    instead of a write + fsync per marker. */
 static char g_ph_buf[1024];
 static int  g_ph_len = 0;
+static int g_ph_direct =
+    0; /* OPCODE_TEST 5 / 6 bisection frames: each phase to the trace at once */
 static void phase(const char *tag){
-    if (g_batch < 500 || g_batch > 580) return;
-    if (g_ph_len > (int)sizeof(g_ph_buf) - 64) return;   /* never overrun */
-    char *L = g_ph_buf + g_ph_len; int p=0;
+    if (!g_ph_direct && (g_batch < 500 || g_batch > 580))
+        return;
+    if (!g_ph_direct && g_ph_len > (int)sizeof(g_ph_buf) - 64)
+        return; /* never overrun */
+    char D[96];
+    char* L = g_ph_direct ? D : g_ph_buf + g_ph_len;
+    int p = 0;
     const char *m="PH "; while(*m) L[p++]=*m++;
     p+=lg_i64(L+p,(long long)g_batch);
     L[p++]=' ';
-    while(*tag) L[p++]=*tag++;
+    while (*tag && p < 90)
+        L[p++] = *tag++;
     L[p++]='\n';
+    if (g_ph_direct) {
+        trace_line(D, (unsigned long)p);
+        return;
+    }
     g_ph_len += p;
 }
 static void phase_flush(void){
@@ -1901,6 +1912,7 @@ static int o5_value(char* o, const volatile uint32_t* r, int wide) { /* 0xHI_LO 
  */
 static void o5_bisect(long long frame) {
     int lim = OPT5_OPS, passes = OPT5_MODES;
+    g_ph_direct = frame < OPT5_OPS + OPT5_MODES; /* phases straight to the trace meanwhile */
     if (frame <= OPT5_OPS) {
         lim = (int)frame;
         passes = 1;
@@ -4662,6 +4674,7 @@ int main(void) {
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
                               fb[bi],depth,0,fence,fv+batch_pos,
                               (FORCE_NO_FLIP || CPU_FLIP || g_display_stalled) /* 1 = no marker, EOP only */);
+        phase("dcb-built");
         batch_pos++;
         if (batch_pos < BATCH_FRAMES) { frame++; continue; }  /* keep accumulating */
         batch_pos = 0;
@@ -4717,6 +4730,24 @@ int main(void) {
                 g_last_fv = fv + BATCH_FRAMES - 1;
             }
             t_saf = tstamp();
+            if (g_ph_direct) { /* OPCODE_TEST 5 / 6 bisection: the submit's result */
+                char D[96];
+                int p = 0;
+                const char* m = "PH submit ret=";
+                while (*m)
+                    D[p++] = *m++;
+                p += lg_i64(D + p, (long long)saf_ret);
+                m = " size_bytes=";
+                while (*m)
+                    D[p++] = *m++;
+                p += lg_i64(D + p, (long long)sz);
+                m = " overflow=";
+                while (*m)
+                    D[p++] = *m++;
+                p += lg_i64(D + p, (long long)pm4.overflow);
+                D[p++] = '\n';
+                trace_line(D, (unsigned long)p);
+            }
             asa = sceGnmAreSubmitsAllowed();
             ifa = gnm_inflight_count();             /* raw in-flight count after submit */
             t_done0 = tstamp();
