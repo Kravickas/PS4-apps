@@ -33,6 +33,8 @@ int32_t sceKernelMemoryPoolReserve(void* addr_in, uint64_t len, uint64_t alignme
 int32_t sceKernelMemoryPoolCommit(void* addr, uint64_t len, int32_t type, int32_t prot,
                                   int32_t flags);
 int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
+// libkernel 0x19e80: ioctl 0x4010a802 into 16 bytes, copies min(size, 0x10); no null check.
+int32_t sceKernelMemoryPoolGetBlockStats(void* stats, size_t size);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -1328,6 +1330,202 @@ static void run_g() {
     g_case("G2", "rel  16M, prot 33 (GPU)", 0x33);
 }
 
+// ---- H: ladders over values that were tested at one point only -------------------------------
+
+static char code(int32_t r) {
+    switch ((uint32_t)r) {
+    case 0:
+        return 'o';
+    case 0x80020016:
+        return 'I';
+    case 0x8002000C:
+        return 'M';
+    case 0x8002000D:
+        return 'A';
+    case 0x80020002:
+        return 'N';
+    default:
+        return '?';
+    }
+}
+
+static void run_h() {
+    say("== H  ladders; codes: o ok, I EINVAL, M ENOMEM, A EACCES, N ENOENT, ? other");
+    static const uint64_t starts[] = {1ull << 33, 1ull << 40, 1ull << 62, 0x7FFFFFFFFFFFC000ull,
+                                      0x8000000000000000ull};
+    {
+        Line l = head("H1", "start: rel/chk (1<<33,40,62,7F..,63)");
+        for (uint64_t st : starts) {
+            l.c(code(sceKernelReleaseDirectMemory((long)st, PG)));
+            l.c(code(sceKernelCheckedReleaseDirectMemory((long)st, PG))).c(' ');
+        }
+        l.end();
+    }
+    int32_t r = 0;
+    const long pa = alloc(2, 3, &r);
+    if (pa < 0)
+        return setup_failed("H2", "ladders", "alloc", r);
+    {
+        Line l = head("H2", "query flags 1<<31 .. 1<<0");
+        for (int b = 31; b >= 0; b--) {
+            DmemInfo q;
+            l.c(code(sceKernelDirectMemoryQuery(pa, (int32_t)(1u << b), &q, sizeof(q))));
+        }
+        l.end();
+    }
+    {
+        Line l = head("H3", "alloc memory type -2 .. 12");
+        for (int t = -2; t <= 12; t++) {
+            long ph = -1;
+            const int32_t ra = sceKernelAllocateDirectMemory(0, (long)g_dmem, PG, PG, t, &ph);
+            l.c(code(ra));
+            if (ra == 0)
+                sceKernelReleaseDirectMemory(ph, PG);
+        }
+        l.end();
+    }
+    {
+        static const uint64_t al[] = {0,      0x1000,   0x2000,     0x3000,     0x4000,   0x6000,
+                                      0x8000, 0x10000,  0x200000,   1ull << 31, 1ull << 32,
+                                      1ull << 40};
+        Line l = head("H4", "available align 0,1000..1<<40");
+        for (uint64_t a1 : al) {
+            long ph = -1;
+            size_t sz = 0;
+            l.c(code(sceKernelAvailableDirectMemorySize(0, (long)g_dmem, a1, &ph, &sz)));
+        }
+        l.end();
+    }
+    {
+        Line l = head("H5", "available, null outputs");
+        l.ret("ret", sceKernelAvailableDirectMemorySize(0, (long)g_dmem, PG, nullptr, nullptr));
+        l.end();
+    }
+    {
+        // bytes written by a failing query, and by find-next past the end
+        unsigned char buf[0x48];
+        Line l = head("H6", "bytes written by failing query");
+        for (int pass = 0; pass < 2; pass++) {
+            my_memset(buf, 0xCC, sizeof(buf));
+            const long at = pass == 0 ? pa + (long)(2 * PG) : (long)(g_dmem - PG);
+            const int32_t rq = sceKernelDirectMemoryQuery(at, pass, buf, 0x18);
+            int last = 0;
+            for (int k = 0; k < 0x48; k++)
+                if (buf[k] != 0xCC)
+                    last = k + 1;
+            l.c(code(rq)).c(':').hex((uint64_t)last).c(' ');
+        }
+        l.end();
+    }
+    release_all(pa, 2);
+}
+
+// ---- P2: memory pool with a 2 MiB reservation ---------------------------------------------------
+
+struct PoolStats {
+    int32_t avail_flushed, avail_cached, alloc_flushed, alloc_cached;
+};
+
+static Line& stats(Line& l) {
+    PoolStats st;
+    my_memset(&st, 0, sizeof(st));
+    const int32_t r = sceKernelMemoryPoolGetBlockStats(&st, sizeof(st));
+    l.s("stats=");
+    if (r != 0)
+        return l.s("err");
+    return l.hex((uint32_t)st.avail_flushed).c('/').hex((uint32_t)st.avail_cached).c('/')
+        .hex((uint32_t)st.alloc_flushed).c('/').hex((uint32_t)st.alloc_cached);
+}
+
+static void run_p2() {
+    say("== P2 pool with 2 MiB reserve; stats = avail flushed/cached, alloc flushed/cached");
+    const uint64_t blk = 0x10000;
+    {
+        Line l = head("P20", "stats before");
+        stats(l).end();
+    }
+    // [pool block 0-3][hole 4-7][B 8-11], 64 KiB aligned
+    int32_t r = 0;
+    const long c = alloc_al(0, g_dmem, 12, blk, 3, &r);
+    if (c < 0)
+        return setup_failed("P21", "pool layout", "alloc", r);
+    sceKernelReleaseDirectMemory(c, 12 * PG);
+    uint64_t pp = 0;
+    const int32_t re = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &pp);
+    const long b = alloc_in(c + 8 * PG, c + 12 * PG, 4, 3, &r);
+    {
+        Line l = head("P21", "expand at base, B at +20000");
+        l.ret("ret", re).s("at_base=").c(re == 0 && pp == (uint64_t)c ? '1' : '0');
+        l.s(" B=").c(b == (long)(c + 8 * PG) ? '1' : '0').c(' ');
+        stats(l).end();
+    }
+    if (re == 0 && pp == (uint64_t)c && b == (long)(c + 8 * PG)) {
+        q_raw("P22", "find-next at pool end (hole start)", c + (long)(4 * PG), 1,
+              sizeof(DmemInfo), c);
+        q_raw("P23", "find-next inside hole", c + (long)(5 * PG), 1, sizeof(DmemInfo), c);
+        e_map("P24", "map pooled block", c, blk, 0x3);
+    }
+    {
+        // search window smaller than the length
+        uint64_t px = 0;
+        const uint64_t w = (uint64_t)c + 0x40000;
+        const int32_t rx = sceKernelMemoryPoolExpand(w, w + 0x4000, blk, blk, &px);
+        Line l = head("P25", "expand, window 4000 < len 10000");
+        l.ret("ret", rx);
+        if (rx == 0)
+            l.s("inside=").c(px >= w && px + blk <= w + 0x4000 ? '1' : '0');
+        l.end();
+    }
+    void* va = 0;
+    const int32_t rr = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &va);
+    int32_t rc3 = -1, rc0 = -1;
+    if (rr == 0) {
+        rc3 = sceKernelMemoryPoolCommit(va, blk, 3, 0x3, 0);
+        if (rc3 != 0)
+            rc0 = sceKernelMemoryPoolCommit(va, blk, 0, 0x3, 0);
+    }
+    const bool committed = rc3 == 0 || rc0 == 0;
+    {
+        Line l = head("P26", "reserve 2M, commit 64K");
+        l.ret("res", rr).ret("c3", rc3).ret("c0", rc0);
+        if (committed) {
+            *(volatile uint32_t*)va = 0x5A0C0001;
+            l.s("rw=").c(*(volatile uint32_t*)va == 0x5A0C0001 ? '1' : '0').c(' ');
+        }
+        stats(l).end();
+    }
+    if (committed && re == 0 && pp == (uint64_t)c) {
+        q_raw("P27", "exact query of pool block", c, 0, sizeof(DmemInfo), c);
+        {
+            Line l = head("P28", "chk  pool block, committed");
+            l.ret("ret", sceKernelCheckedReleaseDirectMemory(c, blk));
+            int32_t pr = 0;
+            l.s("va=").c(mapped(va, &pr) ? 'M' : '.').c(' ');
+            stats(l).end();
+        }
+        {
+            Line l = head("P29", "rel  pool block, committed");
+            l.ret("ret", sceKernelReleaseDirectMemory(c, blk));
+            int32_t pr = 0;
+            l.s("va=").c(mapped(va, &pr) ? 'M' : '.').c(' ');
+            stats(l).end();
+        }
+    }
+    if (committed) {
+        Line l = head("P30", "decommit 64K");
+        l.ret("ret", sceKernelMemoryPoolDecommit(va, blk, 0));
+        int32_t pr = 0;
+        l.s("va=").c(mapped(va, &pr) ? 'M' : '.').c(' ');
+        stats(l).end();
+    }
+    if (re == 0) {
+        Line l = head("P31", "rel  pool block, decommitted");
+        l.ret("ret", sceKernelReleaseDirectMemory((long)pp, blk)).c(' ');
+        stats(l).end();
+    }
+    release_all(b, 4);
+}
+
 // ---- R: positive oversized length on a real allocation ---------------------------------------
 
 static void run_r() {
@@ -1420,7 +1618,9 @@ int main(void) {
         run_v();
         run_e();
         run_f();
+        run_h();
         run_p();
+        run_p2();
         run_c();
         run_g();
         run_r();

@@ -26,6 +26,11 @@ SECTIONS
   E  allocate / map argument validation
   F  release after mtypeprotect, mprotect, partial munmap, split mappings, aliases, re-allocation
   P  memory pool expand / commit / decommit, and releasing pooled memory
+  H  ladders: release start values, every single-bit query flag, memory types -2..12,
+     available-size alignments, null outputs, bytes written by a failing query
+  P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
+     release of committed and decommitted pool memory, find-next and map around a pool block,
+     expand with a search window smaller than the length
   C  oversized lengths from the last page, and C4 on a real allocation (rejected length)
   G  releases a 16 MiB, 2 MiB-aligned mapped block, CPU-only then GPU-visible
   R  R1 releases a page above the framebuffer with len 1<<62, which the length check accepts, and
