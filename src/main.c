@@ -186,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-6d"
+#define BUILD_TAG "optest-6e"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -3347,9 +3347,25 @@ int main(void) {
     g_ps_post_comp_gpu = ps_post_comp_gpu;
     g_ps_post_final_gpu = ps_post_final_gpu;
     UPLOAD_SHADER(ps_ui_gpu, ps_ui_binary);
+    g_ps_ui_gpu = ps_ui_gpu;
     for (int m = 0; m < OPT5_MODES; m++) { /* OPCODE_TEST 5 / 6 passes */
         g_o5_ps[m] = gpu_alloc_typed(k_opt5_pass_size[m] + 256, 0x1000, MEM_TYPE_ONION);
         my_memcpy(g_o5_ps[m], k_opt5_pass[m], k_opt5_pass_size[m]);
+    }
+    { /* a frame never draws with a shader that is not there: say which */
+        static const char* const name[] = {"ps_ui", "ps_post_final", "ps_post_down",
+                                           "ps_post_blur"};
+        void* const ptr[] = {g_ps_ui_gpu, g_ps_post_final_gpu, g_ps_post_down_gpu,
+                             g_ps_post_blur_gpu};
+        for (int i = 0; i < 4; i++)
+            if (!ptr[i]) {
+                trace_msg("shader missing: ");
+                trace_msg(name[i]);
+                trace_msg("\n");
+            }
+        for (int m = 0; m < OPT5_MODES; m++)
+            if (!g_o5_ps[m])
+                trace_msg("shader missing: an OPCODE_TEST pass\n");
     }
     UPLOAD_SHADER(ps_clock_gpu, ps_clock_binary);
     g_ps_clock_gpu = ps_clock_gpu;
