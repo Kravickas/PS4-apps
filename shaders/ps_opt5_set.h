@@ -3,7 +3,7 @@
    << 12). */
 #pragma once
 #if OPCODE_TEST == 6
-#define OPT5_PASS_RSRC1 0x84u
+#define OPT5_PASS_RSRC1 0xC4u
 static const uint32_t* const k_opt5_pass[20] = {
     ps_mod_0_binary,  ps_mod_1_binary,  ps_mod_2_binary,  ps_mod_3_binary,  ps_mod_4_binary,
     ps_mod_5_binary,  ps_mod_6_binary,  ps_mod_7_binary,  ps_mod_8_binary,  ps_mod_9_binary,

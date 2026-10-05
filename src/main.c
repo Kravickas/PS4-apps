@@ -186,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-6b"
+#define BUILD_TAG "optest-6c"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -346,6 +346,7 @@ static struct {
     uint32_t *slots, *res,
         *tab;         /* slot table {op, a, b, c}, results {A lo, A hi, B lo, B hi}, pass tables */
     void *rt, *strip; /* the passes' target, the hex digit strip (256 x 16 RGBA8) */
+    int lim, passes;  /* this frame: instruction limit (its tables), passes run (o5_bisect) */
 } g_o5;
 static void* g_ps_clock_gpu = 0;       /* clock mode's UI pass (ps_clock) */
 static void* g_ps_clock_light_gpu = 0; /* its internal light (ps_clock_light) */
@@ -1850,10 +1851,10 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
     } else {
         if (g_o5.ok) { /* OPCODE_TEST 5: every V_CVT row in FLOAT_MODE A and B, before ps_ui reads
                           them */
-            for (int m = 0; m < OPT5_MODES; m++)
+            for (int m = 0; m < g_o5.passes; m++)
                 post_pass(b, g_o5.rt, OPT5_RT_W, OPT5_RT_W, 1, CB_INFO_DISPLAY_UNORM, g_o5_ps[m],
                           OPT5_PASS_RSRC1 | ((uint32_t)k_opt5_float_mode[m] << 12),
-                          g_o5.tab + 16 * m, bg_v);
+                          g_o5.tab + 16 * (g_o5.lim * OPT5_MODES + m), bg_v);
         }
         post_pass(b, display, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_DISPLAY_UNORM, g_ps_ui_gpu,
                   PS_UI_RSRC1, g_post_tab + UI_BLOCK * 32, bg_v);
@@ -1892,6 +1893,49 @@ static int o5_value(char* o, const volatile uint32_t* r, int wide) { /* 0xHI_LO 
     for (int i = 0; i < 8; i++)
         o[n++] = "0123456789ABCDEF"[(r[0] >> (28 - 4 * i)) & 15];
     return n;
+}
+
+/* Start-up bisection: frames 0..OPT5_OPS run pass 0 with instructions < frame (ps_mod skips the
+   rest; 0 = none), the next OPT5_MODES - 1 frames add a float mode a frame. Each such frame is
+   traced before it is built, so the first frame without its "f=" line names what stopped the GPU.
+ */
+static void o5_bisect(long long frame) {
+    int lim = OPT5_OPS, passes = OPT5_MODES;
+    if (frame <= OPT5_OPS) {
+        lim = (int)frame;
+        passes = 1;
+    } else if (frame < OPT5_OPS + OPT5_MODES)
+        passes = (int)(frame - OPT5_OPS) + 1;
+    g_o5.lim = lim;
+    g_o5.passes = passes;
+    if (frame >= OPT5_OPS + OPT5_MODES)
+        return;
+    char L[160];
+    int k = 0;
+    const char* m = "o5 bisect f=";
+    while (*m)
+        L[k++] = *m++;
+    k += lg_i64(L + k, frame);
+    m = " instructions<";
+    while (*m)
+        L[k++] = *m++;
+    k += lg_i64(L + k, lim);
+    m = lim ? " (newest " : " (none";
+    while (*m)
+        L[k++] = *m++;
+    for (m = lim ? k_opt5_op[lim - 1] : ""; *m && k < 120;)
+        L[k++] = *m++;
+    m = ") passes=";
+    while (*m)
+        L[k++] = *m++;
+    k += lg_i64(L + k, passes);
+    m = " (newest FLOAT_MODE ";
+    while (*m)
+        L[k++] = *m++;
+    k += o5_hex2(L + k, k_opt5_float_mode[passes - 1]);
+    L[k++] = ')';
+    L[k++] = '\n';
+    trace_line(L, (unsigned long)k);
 }
 
 static void o5_log(void) {
@@ -3178,7 +3222,9 @@ int main(void) {
                 int n = g_ui.o5n, dw = g_ui.o5dw;
                 g_o5.slots = (uint32_t*)gpu_alloc_typed(n * 16 + 256, 256, MEM_TYPE_ONION);
                 g_o5.res = (uint32_t*)gpu_alloc_typed(n * OPT5_STRIDE + 256, 256, MEM_TYPE_ONION);
-                g_o5.tab = (uint32_t*)gpu_alloc_typed(16 * 4 * OPT5_MODES, 256, MEM_TYPE_ONION);
+                g_o5.tab =
+                    (uint32_t*)gpu_alloc_typed(16 * 4 * OPT5_MODES * (OPT5_OPS + 1), 256,
+                                               MEM_TYPE_ONION); /* a set per limit 0..OPT5_OPS */
                 g_o5.rt = gpu_alloc_typed(OPT5_RT_W * 4, 256, MEM_TYPE_GARLIC);
                 g_o5.strip = gpu_alloc_typed(256 * 16 * 4, 256, MEM_TYPE_ONION);
                 if (g_o5.slots && g_o5.res && g_o5.tab && g_o5.rt && g_o5.strip) {
@@ -3193,14 +3239,16 @@ int main(void) {
                     }
                     my_memset(g_o5.res, 0, n * OPT5_STRIDE + 256);
                     ui_o5_strip((unsigned char*)g_o5.strip);
-                    for (int h = 0; h < OPT5_MODES; h++) { /* pass h: float mode h at + 8 h */
-                        uint32_t* t = g_o5.tab + 16 * h;
+                    for (int h = 0; h < OPT5_MODES * (OPT5_OPS + 1); h++) { /* limit h / modes */
+                        uint32_t* t =
+                            g_o5.tab + 16 * h; /* pass h % OPT5_MODES: mode at + 8 * that */
                         build_vsharp(t, g_o5.slots, n * 16);
                         build_vsharp(t + 4, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
-                        t[8] = 8u * (uint32_t)h;
+                        t[8] = 8u * (uint32_t)(h % OPT5_MODES);
                         t[9] = (uint32_t)n;
-                        t[10] = OPT5_MARK(h);
+                        t[10] = OPT5_MARK(h % OPT5_MODES);
                         t[11] = OPT5_STRIDE;
+                        t[12] = (uint32_t)(h / OPT5_MODES); /* instruction limit (ps_mod) */
                     }
                     build_vsharp(uib + 128, g_o5.slots, n * 16);
                     build_vsharp(uib + 132, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
@@ -3217,6 +3265,8 @@ int main(void) {
                     f[91] = (float)UI_O5_GAP_AB;
                     ui_o5_cols(f);
                     uib[52] = 1;
+                    g_o5.lim = OPT5_OPS;
+                    g_o5.passes = OPT5_MODES;
                     g_o5.ok = 1;
                 }
             }
@@ -4605,6 +4655,8 @@ int main(void) {
         }
         if (g_gpu_ts) pm4_gpu_timestamp(&pm4, &g_gpu_ts[1]);
 
+        if (g_o5.ok)
+            o5_bisect(frame); /* OPCODE_TEST 5 / 6: this frame's instruction limit and passes */
         uint32_t sz=build_dcb(&pm4,vs,ps,ps_dark_gpu,0,ps_floor_gpu,
                               vb_v,bg_v,0,floor_v,
                               vb,desc,model_verts,g_vb_total,g_ib,g_num_idx,g_indexed,
