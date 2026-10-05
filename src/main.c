@@ -186,7 +186,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-6a"
+#define BUILD_TAG "optest-6b"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -3201,7 +3201,6 @@ int main(void) {
                         t[9] = (uint32_t)n;
                         t[10] = OPT5_MARK(h);
                         t[11] = OPT5_STRIDE;
-                        t[11] = 0;
                     }
                     build_vsharp(uib + 128, g_o5.slots, n * 16);
                     build_vsharp(uib + 132, g_o5.res, n * OPT5_STRIDE + 4 * OPT5_MODES);
