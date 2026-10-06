@@ -34,10 +34,10 @@ TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
   times per step ("load ms:"), time sources and zones ("tz", "tz_net", "tz_http"), and frame
   statistics every 60 frames.
-  ORDCNT_TEST (src/main.c, on): /user/data/ShadCube4/ShadCube4 ordcnt.log, the DS_ORDERED_COUNT
-  test, run before the main loop. After a GPU hang close the app and launch it again: it logs the
-  hung test and continues (state: ordcnt.state there). Once finished it does not run again until
-  ordcnt.state is deleted.
+  ORDCNT_TEST (src/main.c, on): ShadCube4 ordcnt.log in the trace log's folder, the
+  DS_ORDERED_COUNT test, run before the main loop. After a GPU hang close the app and launch it
+  again: it logs the hung test and continues (state: ordcnt.state there). Once finished it does
+  not run again until ordcnt.state is deleted.
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top

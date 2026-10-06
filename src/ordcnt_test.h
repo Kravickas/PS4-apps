@@ -9,7 +9,7 @@
  * in group, M0, s_memtime around each op, a GDS ticket after each op (plain ds_add_rtn, global
  * completion order), HW_ID, and the op1 / op2 return VGPR of all 64 lanes.
  *
- * Results: /user/data/ShadCube4/ShadCube4 ordcnt.log (appended). A hang (fence timeout) ends the
+ * Results: ShadCube4 ordcnt.log next to the trace log (appended). A hang (fence timeout) ends the
  * run; the state file ordcnt.state makes the next launch log it and continue after it. If T01
  * (A01) hangs, the other tests of that queue are skipped and the risky ones use the other. Risky
  * tests (R*) can hang or desync the ordered wave IDs; each is followed by a probe (P*). A new
@@ -22,9 +22,7 @@ extern int sceGnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t tgx, uint
 extern int sceGnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size);
 extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 
-#define OC_BUILD "ordcnt-1"
-#define OC_LOG "/user/data/ShadCube4/ShadCube4 ordcnt.log"
-#define OC_STATE "/user/data/ShadCube4/ordcnt.state"
+#define OC_BUILD "ordcnt-2"
 #define OC_TIMEOUT_US 2000000u
 
 #define OC_OUT_SIZE 0x400000u /* params, GDS images, records */
@@ -36,6 +34,7 @@ extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 #define OC_MAX_WAVES ((OC_OUT_SIZE - OC_REC_OFF) / OC_REC_BYTES)
 #define OC_TICKET 0x3F0u
 #define OC_RING_DW 0x4000u
+#define OC_BUF_SIZE 0x80000u /* log text, flushed per test */
 
 /* CP_COHER_CNTL (gfx_7_2_sh_mask.h) */
 #define OC_COHER_TC_WB (1u << 18)
@@ -196,9 +195,41 @@ static const struct OcTest k_oc_tests[] = {
 
 /* ---- log ---- */
 static int g_oc_fd = -1;
-static char* g_oc_buf;
+static char g_oc_buf[OC_BUF_SIZE];
+/* The log and the state file sit next to the trace log (trace_init's path). */
+static char g_oc_log_path[160], g_oc_state_path[160];
+static void oc_paths(void) {
+    const char* t = g_trace_path ? g_trace_path : "";
+    int dir = 0;
+    for (int i = 0; t[i] && i < 120; i++)
+        if (t[i] == '/')
+            dir = i + 1;
+    static const char log_name[] = "ShadCube4 ordcnt.log", state_name[] = "ordcnt.state";
+    for (int i = 0; i < dir; i++)
+        g_oc_log_path[i] = g_oc_state_path[i] = t[i];
+    for (int i = 0; i < (int)sizeof(log_name); i++)
+        g_oc_log_path[dir + i] = log_name[i];
+    for (int i = 0; i < (int)sizeof(state_name); i++)
+        g_oc_state_path[dir + i] = state_name[i];
+}
+/* trace: "ordcnt: <what> <path> ret <code>" */
+static void oc_trace_ret(const char* what, const char* path, long long ret) {
+    char L[256];
+    int p = 0;
+    for (const char* q = "ordcnt: "; *q; q++)
+        L[p++] = *q;
+    for (const char* q = what; *q && p < 60; q++)
+        L[p++] = *q;
+    L[p++] = ' ';
+    for (const char* q = path; *q && p < 220; q++)
+        L[p++] = *q;
+    for (const char* q = " ret "; *q; q++)
+        L[p++] = *q;
+    p += lg_hex(L + p, (unsigned long long)(uint32_t)ret);
+    L[p++] = '\n';
+    trace_line(L, (unsigned long)p);
+}
 static unsigned g_oc_len;
-#define OC_BUF_SIZE 0x80000u
 
 static void oc_flush(void) {
     if (g_oc_fd >= 0 && g_oc_len) {
@@ -242,15 +273,17 @@ struct OcState {
     int32_t next, inflight, bad[2];
 };
 static void oc_state_save(const struct OcState* st) {
-    int fd = sceKernelOpen(OC_STATE, 0x601, 0x1FF);
-    if (fd < 0)
+    int fd = sceKernelOpen(g_oc_state_path, 0x601, 0x1FF);
+    if (fd < 0) {
+        oc_trace_ret("state open", g_oc_state_path, fd);
         return;
+    }
     sceKernelWrite(fd, st, sizeof(*st));
     sceKernelFsync(fd);
     sceKernelClose(fd);
 }
 static int oc_state_load(struct OcState* st) {
-    int fd = sceKernelOpen(OC_STATE, 0, 0);
+    int fd = sceKernelOpen(g_oc_state_path, 0, 0);
     if (fd < 0)
         return 0;
     long n = sceKernelRead(fd, st, sizeof(*st));
@@ -606,7 +639,7 @@ static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t u
 
 /* Runs the remaining tests. Returns 0, or -1 after a fence timeout (the GPU is hung). */
 static int ordcnt_run(void) {
-    g_oc_buf = (char*)cpu_alloc(OC_BUF_SIZE, 0x4000);
+    oc_paths();
     struct OcState st;
     int resumed = oc_state_load(&st);
     if (resumed && st.next >= OC_NTESTS && st.inflight < 0) {
@@ -620,11 +653,10 @@ static int ordcnt_run(void) {
         st.inflight = -1;
         resumed = 0;
     }
-    g_oc_fd = sceKernelOpen(OC_LOG, resumed ? 0x209 : 0x601, 0x1FF);
-    if (!g_oc_buf || g_oc_fd < 0) {
-        trace_msg("ordcnt: log or buffer unavailable\n");
+    g_oc_fd = sceKernelOpen(g_oc_log_path, resumed ? 0x209 : 0x601, 0x1FF);
+    oc_trace_ret("open", g_oc_log_path, g_oc_fd);
+    if (g_oc_fd < 0)
         return 0;
-    }
     oc_s(resumed ? "\n## resumed at "
                  : "# DS_ORDERED_COUNT on PS4 hardware, build " OC_BUILD "\n\n## start at ");
     oc_s(k_oc_tests[st.next].id);

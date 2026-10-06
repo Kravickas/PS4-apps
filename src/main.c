@@ -39,7 +39,7 @@
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
 /* ORDCNT_TEST: the DS_ORDERED_COUNT hardware test (src/ordcnt_test.h) once before the main
-   loop; results in /user/data/ShadCube4/ShadCube4 ordcnt.log. 0: off. */
+   loop; results in ShadCube4 ordcnt.log next to the trace log. 0: off. */
 #ifndef ORDCNT_TEST
 #define ORDCNT_TEST 1
 #endif
@@ -510,6 +510,9 @@ static int lg_hex(char *o, unsigned long long v){
    an existing one only returns an error), opened once (WRONLY|CREAT|TRUNC = 0x601) and kept open;
    the other paths only if that fails. */
 extern int sceKernelMkdir(const char*, unsigned short);
+#if ORDCNT_TEST
+static const char* g_trace_path; /* the path trace_init opened */
+#endif
 static void trace_init(void){
     sceKernelMkdir("/user/data/ShadCube4", 0777);
     const char* paths[] = {"/user/data/ShadCube4/ShadCube4 trace.log",
@@ -520,7 +523,13 @@ static void trace_init(void){
                            0};
     for (int i=0; paths[i]; i++){
         int fd = sceKernelOpen(paths[i], 0x601, 0x1FF);
-        if (fd >= 0){ g_log_fd = fd; return; }
+        if (fd >= 0) {
+            g_log_fd = fd;
+#if ORDCNT_TEST
+            g_trace_path = paths[i];
+#endif
+            return;
+        }
     }
 }
 /* trace_line: write one already-built line and fsync immediately. */
