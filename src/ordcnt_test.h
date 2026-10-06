@@ -9,7 +9,9 @@
  * Every wave writes a 768-byte record (tools/gen_cs_ordcnt.py HEADER): TG_SIZE, TGID, wave in
  * group, M0, s_memtime around each op, a GDS ticket after each op (plain ds_add_rtn_u32 gds with
  * M0 = the test's m0plain; valid only where the G tests show that M0 works), HW_ID, and the
- * op1 / op2 return VGPR of all 64 lanes.
+ * op1 / op2 / op3 return VGPR of all 64 lanes. The window shaders (gdump / gfill) instead read or
+ * fill GDS 0..0xFFFF through 64 M0 windows; register tests copy GDS registers to memory with
+ * COPY_DATA.
  *
  * Results: ShadCube4 ordcnt.log next to the trace log (appended). A hang (fence timeout) ends the
  * run; the state file ordcnt.state makes the next launch log it and continue after it. If a gate
@@ -24,15 +26,17 @@ extern int sceGnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t tgx, uint
 extern int sceGnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size);
 extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 
-#define OC_BUILD "ordcnt-3"
+#define OC_BUILD "ordcnt-5"
 #define OC_TIMEOUT_US 2000000u
 
 #define OC_OUT_SIZE 0x400000u /* params, GDS images, records */
 #define OC_GDS_INIT 0x1000u   /* GDS init image (CPU-written, copied to GDS) */
 #define OC_GDS_DUMP 0x1400u   /* GDS after the dispatches */
+#define OC_REG_PRE 0x1800u    /* registers (COPY_DATA) before the dispatches */
+#define OC_REG_POST 0x1C00u   /* registers after them */
 #define OC_GDS_BYTES 0x400u
 #define OC_REC_OFF 0x2000u
-#define OC_REC_BYTES 0x300u
+#define OC_REC_BYTES 0x400u
 #define OC_MAX_WAVES ((OC_OUT_SIZE - OC_REC_OFF) / OC_REC_BYTES)
 #define OC_TICKET 0x3F0u
 #define OC_RING_DW 0x4000u
@@ -69,6 +73,10 @@ enum {
     OC_P_ALT,
     OC_P_PRE_FWD,  /* 0: pre-delay (waves - 1 - slot) * PRE_DELAY, 1: slot * PRE_DELAY */
     OC_P_M0_PLAIN, /* M0 of the plain GDS op and of the tickets */
+    OC_P_MID2,     /* sleep iterations before op3 ... */
+    OC_P_MID2_SEL, /* ... for waves with (slot & [15:0]) == [31:16] */
+    OC_P_ADDR3,
+    OC_P_VAL3,
 };
 
 /* Record header dwords (gen_cs_ordcnt.py HEADER). */
@@ -93,6 +101,10 @@ enum {
     OC_H_EXLO,
     OC_H_EXHI,
     OC_H_SKIP,
+    OC_H_TB3,
+    OC_H_TA3 = 27,
+    OC_H_TK3 = 29,
+    OC_H_M0C,
 };
 
 struct OcTest {
@@ -101,7 +113,11 @@ struct OcTest {
     uint8_t variant, queue, flags, kind; /* kind: 0 safe, 1 risky, 2 probe */
     uint8_t gate; /* a hang here means the queue cannot run ordered dispatches: skip its others */
     uint8_t pre_fwd;
-    uint32_t m0plain;
+    uint8_t nogds;      /* no CP DMA of GDS 0..0x3FF before / after */
+    uint8_t nregs;      /* registers read with COPY_DATA before the dispatches ... */
+    uint8_t regs_after; /* ... and after them */
+    const uint16_t* regs;
+    uint32_t m0plain, mid2, mid2_sel, addr3, val3;
     uint16_t gx, gy;
     uint8_t wpt, ndisp, gds_init, lanes, m0mode, skip_odd;
     uint32_t gds_val, addr1, addr2, ystride1, pre_delay, mid_delay, val1, lane_mul, slot_mul, val2,
@@ -112,64 +128,109 @@ struct OcTest {
 #define OC_T(...)                                                                                  \
     {                                                                                              \
         .gx = 4, .gy = 2, .wpt = 2, .ndisp = 1, .flags = 0x08, .variant = CS_OC_A, .val1 = 1,      \
-        .val2 = 1, .exec = 1, .m0plain = 0x0000FFFFu, __VA_ARGS__                                  \
+        .val2 = 1, .val3 = 1, .exec = 1, .m0plain = 0x00000400u, __VA_ARGS__                       \
     }
 #define OC_PROBE(n) OC_T(.id = n, .what = "probe: idx0, 16 waves, no delay", .kind = 2)
+
+static const uint16_t k_oc_rg_maxwave[] = {0x3348};
+static const uint16_t k_oc_rg_vmid[] = {
+    0x3300, 0x3301, 0x3302, 0x3303, 0x3304, 0x3305, 0x3306, 0x3307, 0x3308, 0x3309, 0x330A,
+    0x330B, 0x330C, 0x330D, 0x330E, 0x330F, 0x3310, 0x3311, 0x3312, 0x3313, 0x3314, 0x3315,
+    0x3316, 0x3317, 0x3318, 0x3319, 0x331A, 0x331B, 0x331C, 0x331D, 0x331E, 0x331F};
+static const uint16_t k_oc_rg_gws_oa[] = {
+    0x3320, 0x3321, 0x3322, 0x3323, 0x3324, 0x3325, 0x3326, 0x3327, 0x3328, 0x3329, 0x332A,
+    0x332B, 0x332C, 0x332D, 0x332E, 0x332F, 0x3330, 0x3331, 0x3332, 0x3333, 0x3334, 0x3335,
+    0x3336, 0x3337, 0x3338, 0x3339, 0x333A, 0x333B, 0x333C, 0x333D, 0x333E, 0x333F};
+static const uint16_t k_oc_rg_oa[] = {0xC41A, 0xC41B, 0xC41C, 0xC41D, 0xC41E,
+                                      0xC41F, 0xC420, 0xC421, 0x3348};
+static const uint16_t k_oc_rg_cfg[] = {0x25C0, 0x25C1, 0x25C2, 0x25C3, 0x25C4,
+                                       0x25C5, 0x25C6, 0x25C7, 0x25C8, 0x25C9};
+#define OC_REGS(a) .regs = a, .nregs = sizeof(a) / sizeof(a[0])
 
 /* OC_T defaults, then the test's own fields: later designated initializers win (C11 6.7.9). */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winitializer-overrides"
 static const struct OcTest k_oc_tests[] = {
-    /* Plain DS_ADD_RTN_U32 gds at VGPR address 0x40, no ordered append: which M0 works. */
-    OC_T(.id = "G00", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x0000FFFFu,
-         .what = "plain ds_add_rtn_u32 gds, M0 0x0000ffff"),
-    OC_T(.id = "G01", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0xFFFF0000u,
-         .what = "plain ds_add_rtn_u32 gds, M0 0xffff0000"),
-    OC_T(.id = "G02", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0xFFFFFFFFu,
-         .what = "plain ds_add_rtn_u32 gds, M0 0xffffffff"),
-    OC_T(.id = "G03", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0,
-         .what = "plain ds_add_rtn_u32 gds, M0 0"),
-    OC_T(.id = "G04", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x04000000u,
-         .what = "plain ds_add_rtn_u32 gds, M0 0x04000000"),
-    OC_T(.id = "G05", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x00000400u,
-         .what = "plain ds_add_rtn_u32 gds, M0 0x00000400"),
-    OC_T(.id = "G06", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x00400400u,
-         .what = "plain ds_add_rtn_u32 gds, M0 0x00400400"),
-    /* frodo's case: one index, a GDS address per TGID.y; waves arrive in reverse order. */
-    OC_T(.id = "Y01", .gy = 4, .wpt = 1, .addr1 = 0x20, .ystride1 = 0x10, .pre_delay = 40,
-         .what = "idx0, M0 address 0x20 + TGID.y * 0x10, later waves arrive first"),
-    OC_T(.id = "Y02", .gy = 4, .wpt = 1, .addr1 = 0x20, .pre_delay = 40,
-         .what = "control: idx0, one address for all rows, later waves arrive first"),
-    /* Waves arrive in slot order (slot * delay): can wave 0's op2 run before late waves' op1? */
-    OC_T(.id = "F01", .variant = CS_OC_R2, .pre_delay = 40, .pre_fwd = 1,
-         .what = "2 ops both idx0 release, waves arrive in slot order"),
-    OC_T(.id = "F02", .variant = CS_OC_B, .pre_delay = 40, .pre_fwd = 1,
-         .what = "2 ops idx0 / idx1, waves arrive in slot order"),
-    OC_T(.id = "F03", .variant = CS_OC_H4, .pre_delay = 40, .pre_fwd = 1,
-         .what = "2 ops idx0 / idx4, waves arrive in slot order"),
-    /* Wave-ID sequences of compute queues: per queue or per pipe. */
-    OC_T(.id = "Q01", .queue = 1, .gate = 1, .what = "compute queue 1, 16 waves"),
-    OC_T(.id = "Q02", .queue = 2, .gate = 1, .what = "compute queue 2 (same pipe), 16 waves"),
-    OC_T(.id = "Q03", .queue = 1, .what = "compute queue 1 again"),
-    OC_T(.id = "Q04", .queue = 3, .gate = 1, .what = "compute queue 3 (pipe 1), 16 waves"),
-    OC_T(.id = "Q05", .queue = 2, .what = "compute queue 2 again"),
+/* Plain DS_ADD_RTN_U32 gds at VGPR address 0x40: the largest M0 size that works. */
+#define OC_G(n, m0)                                                                                \
+    OC_T(.id = n, .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1, .gds_init = 1, \
+         .addr1 = 0x40, .lanes = 0, .m0plain = m0, .what = "plain gds op, M0 " #m0)
+    OC_G("G10", 0x00000800u),
+    OC_G("G11", 0x00001000u),
+    OC_G("G12", 0x00002000u),
+    OC_G("G13", 0x00004000u),
+    OC_G("G14", 0x00008000u),
+    OC_G("G15", 0x0000C000u),
+    OC_G("G16", 0x0000FFFCu),
+    OC_G("G17", 0x0000FFFEu),
+#undef OC_G
+/* op1 idx A no release; op2 idx B release; wave 0 sleeps; op3 idx A release done. When wave 1's
+   op1 returns (after wave 0's op2, or after its op3) shows whether B releases A's hold. */
+#define OC_K(n, v, w)                                                                              \
+    OC_T(.id = n, .variant = v, .addr2 = 0x100, .addr3 = 0x200, .mid2 = 200, .mid2_sel = 0xFFFF,   \
+         .what = w)
+    OC_K("K00", CS_OC_K0_0, "hold idx0; release idx0; wave 0 sleeps; idx0 release done"),
+    OC_K("K01", CS_OC_K0_1, "hold idx0; release idx1; wave 0 sleeps; idx0 release done"),
+    OC_K("K02", CS_OC_K0_2, "hold idx0; release idx2; wave 0 sleeps; idx0 release done"),
+    OC_K("K03", CS_OC_K0_3, "hold idx0; release idx3; wave 0 sleeps; idx0 release done"),
+    OC_K("K04", CS_OC_K0_4, "hold idx0; release idx4; wave 0 sleeps; idx0 release done"),
+    OC_K("K08", CS_OC_K0_8, "hold idx0; release idx8; wave 0 sleeps; idx0 release done"),
+    OC_K("K16", CS_OC_K0_16, "hold idx0; release idx16; wave 0 sleeps; idx0 release done"),
+    OC_K("K32", CS_OC_K0_32, "hold idx0; release idx32; wave 0 sleeps; idx0 release done"),
+    OC_K("K63", CS_OC_K0_63, "hold idx0; release idx63; wave 0 sleeps; idx0 release done"),
+    OC_K("K15", CS_OC_K1_5, "hold idx1; release idx5; wave 0 sleeps; idx1 release done"),
+#undef OC_K
+/* GDS 0..0xFFFF read through 64 windows before and after ordered dispatches: any dword
+   that changes besides the targets (0x000) and the ticket (0x3F0) is state kept in GDS. */
+#define OC_W(n, v, w)                                                                              \
+    OC_T(.id = n, .variant = v, .flags = 0, .gx = 64, .gy = 1, .wpt = 1, .nogds = 1, .what = w)
+    OC_W("W00", CS_OC_GDUMP, "read GDS 0..0xFFFF"),
+    OC_T(.id = "W01", .nogds = 1, .what = "idx0, 16 waves, no GDS init"),
+    OC_W("W02", CS_OC_GDUMP, "read GDS 0..0xFFFF"),
+    OC_T(.id = "W03", .nogds = 1, .variant = CS_OC_B, .addr2 = 0x100,
+         .what = "idx0 / idx1, 16 waves, no GDS init"),
+    OC_W("W04", CS_OC_GDUMP, "read GDS 0..0xFFFF"),
+    /* Three ops on idx0, each releasing; wave 0 sleeps before op3. */
+    OC_T(.id = "N01", .variant = CS_OC_N3, .addr2 = 0x100, .addr3 = 0x200, .mid2 = 200,
+         .mid2_sel = 0xFFFF, .what = "3 ops idx0 each release; wave 0 sleeps before op3"),
+    /* Two ordered dispatches in one command buffer, waves of each arriving in reverse order. */
+    OC_T(.id = "X01", .ndisp = 2, .pre_delay = 40,
+         .what = "2 dispatches, later waves of each arrive first"),
+    /* Risky: GDS registers read by the CP (the kernel may not allow it). */
+    OC_T(.id = "RG1", .kind = 1, .ndisp = 0, OC_REGS(k_oc_rg_maxwave),
+         .what = "read GDS_COMPUTE_MAX_WAVE_ID"),
+    OC_T(.id = "RG2", .kind = 1, .ndisp = 0, OC_REGS(k_oc_rg_vmid),
+         .what = "read GDS_VMID0..15_BASE / SIZE"),
+    OC_T(.id = "RG3", .kind = 1, .ndisp = 0, OC_REGS(k_oc_rg_gws_oa),
+         .what = "read GDS_GWS_VMID0..15, GDS_OA_VMID0..15"),
+    OC_T(.id = "RG4", .kind = 1, OC_REGS(k_oc_rg_oa), .regs_after = 1,
+         .what = "read GDS_GWS_RESOURCE*, GDS_OA_*, MAX_WAVE_ID around an ordered dispatch"),
+    OC_T(.id = "RG5", .kind = 1, .ndisp = 0, OC_REGS(k_oc_rg_cfg),
+         .what = "read GDS_CONFIG .. GDS_DEBUG_DATA"),
+    OC_PROBE("P00"),
     /* Risky. */
-    OC_T(.id = "M01", .kind = 1, .flags = 0x18, .skip_odd = 1,
-         .what = "flags 0x18, 2-wave threadgroups, only wave 0 of each group issues the op"),
+    OC_T(.id = "S01", .kind = 1, .variant = CS_OC_SP, .what = "even waves idx0, odd waves idx1"),
     OC_PROBE("P01"),
-    OC_T(.id = "C01", .kind = 1, .variant = CS_OC_C1, .mid_delay = 200,
-         .what = "op1 idx0 no release, op2 idx1 release done"),
+    OC_T(.id = "U01", .kind = 1, .variant = CS_OC_UN, .what = "even waves 2 ops on idx0, odd 1"),
     OC_PROBE("P02"),
-    OC_T(.id = "C02", .kind = 1, .variant = CS_OC_C4, .mid_delay = 200,
-         .what = "op1 idx0 no release, op2 idx4 release done"),
+    OC_T(.id = "D01", .kind = 1, .variant = CS_OC_DN, .what = "1 op idx0 done without release"),
     OC_PROBE("P03"),
+    OC_T(.id = "D02", .kind = 1, .variant = CS_OC_DD, .addr2 = 0x100,
+         .what = "op1 idx0 release done, op2 idx1 release done"),
+    OC_PROBE("P04"),
+    OC_T(.id = "D03", .kind = 1, .variant = CS_OC_AD, .addr2 = 0x100,
+         .what = "op1 idx0 release done, op2 idx0 release done"),
+    OC_PROBE("P05"),
+    /* Risky: overwrite all of GDS this process can write, then order again. */
+    OC_T(.id = "CL1", .kind = 1, .variant = CS_OC_GFILL, .flags = 0, .gx = 64, .gy = 1, .wpt = 1,
+         .nogds = 1, .val1 = 0, .what = "fill GDS 0..0xFFFF with 0, read back"),
+    OC_PROBE("P06"),
+    OC_W("CW1", CS_OC_GDUMP, "read GDS 0..0xFFFF"),
+    OC_T(.id = "CL2", .kind = 1, .variant = CS_OC_GFILL, .flags = 0, .gx = 64, .gy = 1, .wpt = 1,
+         .nogds = 1, .val1 = 0xFFFFFFFFu, .what = "fill GDS 0..0xFFFF with 0xffffffff, read back"),
+    OC_PROBE("P07"),
+    OC_W("CW2", CS_OC_GDUMP, "read GDS 0..0xFFFF"),
+#undef OC_W
 };
 #pragma clang diagnostic pop
 #define OC_NTESTS ((int)(sizeof(k_oc_tests) / sizeof(k_oc_tests[0])))
@@ -304,6 +365,16 @@ static void oc_acquire(struct PM4Builder* b, uint32_t cntl) {
     pm4_emit(b, 0);
     pm4_emit(b, 10);
 }
+/* COPY_DATA (gfx_v8_0 ring_emit_rreg): src_sel 0 register, dst_sel 5 memory, write confirm. */
+static void oc_copy_reg(struct PM4Builder* b, uint32_t reg, void* dst) {
+    uint64_t a = (uint64_t)(uintptr_t)dst;
+    pm4_emit(b, pm4_type3(0x40, 5));
+    pm4_emit(b, (5u << 8) | (1u << 20));
+    pm4_emit(b, reg);
+    pm4_emit(b, 0);
+    pm4_emit(b, (uint32_t)a);
+    pm4_emit(b, (uint32_t)(a >> 32));
+}
 /* RELEASE_MEM (gfx_v7_0_ring_emit_fence_compute): TCL1 + TC action, CACHE_FLUSH_AND_INV_TS
    (0x14), event index 5, DATA_SEL 1 (32-bit), no interrupt. */
 static void oc_release_mem(struct PM4Builder* b, volatile uint32_t* addr, uint32_t value) {
@@ -345,7 +416,10 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
     if (w > 0)
         b->off += (uint32_t)w;
     oc_acquire(b, OC_COHER_ICACHE | OC_COHER_KCACHE | OC_COHER_TCL1 | OC_COHER_TC);
-    oc_dma(b, 0, (uint64_t)(uintptr_t)(c->out + OC_GDS_INIT), 1, 0, OC_GDS_BYTES);
+    if (!t->nogds)
+        oc_dma(b, 0, (uint64_t)(uintptr_t)(c->out + OC_GDS_INIT), 1, 0, OC_GDS_BYTES);
+    for (int i = 0; i < t->nregs; i++)
+        oc_copy_reg(b, t->regs[i], c->out + OC_REG_PRE + i * 4);
     uint64_t sa = (uint64_t)(uintptr_t)c->sh[t->variant];
     uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt;
     for (int d = 0; d < t->ndisp; d++) {
@@ -375,7 +449,10 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
     }
     pm4_emit(b, pm4_type3(0x46, 1));
     pm4_emit(b, 0x07u | (4u << 8)); /* EVENT_WRITE CS_PARTIAL_FLUSH */
-    oc_dma(b, 1, 0, 0, (uint64_t)(uintptr_t)(c->out + OC_GDS_DUMP), OC_GDS_BYTES);
+    for (int i = 0; t->regs_after && i < t->nregs; i++)
+        oc_copy_reg(b, t->regs[i], c->out + OC_REG_POST + i * 4);
+    if (!t->nogds)
+        oc_dma(b, 1, 0, 0, (uint64_t)(uintptr_t)(c->out + OC_GDS_DUMP), OC_GDS_BYTES);
     oc_acquire(b, OC_COHER_TC_WB | OC_COHER_TC | OC_COHER_TCL1);
     c->fv++;
     if (q)
@@ -414,6 +491,10 @@ static void oc_params(struct OcCtx* c, const struct OcTest* t) {
         p[OC_P_ALT] = t->alt;
         p[OC_P_PRE_FWD] = t->pre_fwd;
         p[OC_P_M0_PLAIN] = t->m0plain;
+        p[OC_P_MID2] = t->mid2;
+        p[OC_P_MID2_SEL] = t->mid2_sel;
+        p[OC_P_ADDR3] = t->addr3;
+        p[OC_P_VAL3] = t->val3;
     }
 }
 
@@ -519,8 +600,82 @@ static void oc_order(struct OcCtx* c, uint32_t waves, uint32_t col, const char* 
 }
 
 /* Logs one finished test: GDS changes, the wave table, lane dumps, order summary. */
+/* GDS as read by the window shaders (64 windows of 0x400 bytes): nonzero dwords, and the dwords
+   that differ from the previous window read in this launch. */
+static uint32_t g_oc_snap[0x4000];
+static int g_oc_snap_ok;
+static void oc_windows(struct OcCtx* c) {
+    const uint32_t* g = (const uint32_t*)(c->out + OC_REC_OFF);
+    uint32_t nz = 0, nd = 0;
+    oc_s("GDS 0x0000..0xFFFF as read (byte offset: value), nonzero:");
+    for (uint32_t i = 0; i < 0x4000; i++)
+        if (g[i]) {
+            if (nz < 256) {
+                oc_s(nz % 6 ? "  " : "\n");
+                oc_x(i * 4, 4);
+                oc_s(": ");
+                oc_x(g[i], 8);
+            }
+            nz++;
+        }
+    oc_s("\nnonzero dwords: ");
+    oc_u(nz);
+    if (g_oc_snap_ok) {
+        oc_s("\nchanged since the previous read (byte offset: before -> after):");
+        for (uint32_t i = 0; i < 0x4000; i++)
+            if (g[i] != g_oc_snap[i]) {
+                if (nd < 256) {
+                    oc_s(nd % 4 ? "  " : "\n");
+                    oc_x(i * 4, 4);
+                    oc_s(": ");
+                    oc_x(g_oc_snap[i], 8);
+                    oc_s(" -> ");
+                    oc_x(g[i], 8);
+                }
+                nd++;
+            }
+        oc_s("\nchanged dwords: ");
+        oc_u(nd);
+    } else {
+        oc_s("\n(no previous read in this launch)");
+    }
+    oc_s("\n\n");
+    my_memcpy(g_oc_snap, g, sizeof(g_oc_snap));
+    g_oc_snap_ok = 1;
+}
+
 static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t us) {
     uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt * t->ndisp;
+    if (t->nregs) {
+        const uint32_t* r0 = (const uint32_t*)(c->out + OC_REG_PRE);
+        const uint32_t* r1 = (const uint32_t*)(c->out + OC_REG_POST);
+        oc_s("registers (dword offset: before");
+        oc_s(t->regs_after ? " / after the dispatch):" : "):");
+        for (int i = 0; i < t->nregs; i++) {
+            oc_s(i % 4 ? "  " : "\n");
+            oc_x(t->regs[i], 4);
+            oc_s(": ");
+            oc_x(r0[i], 8);
+            if (t->regs_after) {
+                oc_s(" / ");
+                oc_x(r1[i], 8);
+            }
+        }
+        oc_s("\n");
+    }
+    if (t->variant == CS_OC_GDUMP || t->variant == CS_OC_GFILL) {
+        oc_s("done in ");
+        oc_u(us);
+        oc_s(" us\n");
+        oc_windows(c);
+        return;
+    }
+    if (!t->ndisp) {
+        oc_s("done in ");
+        oc_u(us);
+        oc_s(" us\n\n");
+        return;
+    }
     const uint32_t* gi = (const uint32_t*)(c->out + OC_GDS_INIT);
     const uint32_t* gd = (const uint32_t*)(c->out + OC_GDS_DUMP);
     oc_s("done in ");
@@ -558,17 +713,18 @@ static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t u
             t0 = h[OC_H_T0];
     }
     oc_s("| slot | tgid x,y | wave | TG_SIZE | M0 op1 | M0 op2 | ret1 | ret2 | tk1 | tk2 | t op1 "
-         "| t ret1 | t op2 | t ret2 | HW_ID |\n");
-    oc_s("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+         "| t ret1 | t op2 | t ret2 | HW_ID | M0 op3 | ret3 | tk3 | t op3 | t ret3 |\n");
+    oc_s("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     uint32_t rows = waves > 128 ? 128 : waves;
     for (uint32_t s = 0; s < rows; s++) {
         const uint32_t* h = (const uint32_t*)(c->out + OC_REC_OFF + s * OC_REC_BYTES);
         const uint32_t* r1 = h + 64;
         const uint32_t* r2 = h + 128;
+        const uint32_t* r3 = h + 192;
         oc_s("| ");
         oc_u(s);
         if (h[OC_H_MARK] != 0x0DC0FFEEu) {
-            oc_s(" | not written |||||||||||||\n");
+            oc_s(" | not written ||||||||||||||||||\n");
             continue;
         }
         oc_s(" | ");
@@ -601,6 +757,20 @@ static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t u
         }
         oc_s(" | ");
         oc_x(h[OC_H_HWID], 8);
+        oc_s(" | ");
+        oc_x(h[OC_H_M0C], 8);
+        oc_s(" | ");
+        oc_x(r3[rl], 8);
+        oc_s(" | ");
+        oc_i((int32_t)h[OC_H_TK3]);
+        for (int k = 0; k < 2; k++) {
+            uint32_t v = h[OC_H_TB3 + 2 * k];
+            oc_s(" | ");
+            if (v)
+                oc_u(v - t0);
+            else
+                oc_s("-");
+        }
         oc_s(" |\n");
     }
     if (rows < waves) {
@@ -623,8 +793,10 @@ static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t u
         }
     }
     oc_order(c, waves, 64 + rl, "ret1");
-    if (k_cs_oc[t->variant].has_op2)
+    if (k_cs_oc[t->variant].nops > 1)
         oc_order(c, waves, 128 + rl, "ret2");
+    if (k_cs_oc[t->variant].nops > 2)
+        oc_order(c, waves, 192 + rl, "ret3");
     oc_s("\n");
 }
 
