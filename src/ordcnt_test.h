@@ -26,7 +26,7 @@ extern int sceGnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t tgx, uint
 extern int sceGnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size);
 extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 
-#define OC_BUILD "ordcnt-6"
+#define OC_BUILD "ordcnt-7"
 #define OC_TIMEOUT_US 2000000u
 
 #define OC_OUT_SIZE 0x400000u /* params, GDS images, records */
@@ -119,7 +119,7 @@ struct OcTest {
     uint8_t regs_after; /* ... and after them */
     const uint16_t* regs;
     uint32_t m0plain, mid2, mid2_sel, addr3, val3, mid_sel, skip;
-    uint16_t gx, gy;
+    uint16_t gx, gy, gz; /* gz > 1 only with the lean shader */
     uint8_t wpt, ndisp, gds_init, lanes, m0mode;
     uint32_t gds_val, addr1, addr2, ystride1, pre_delay, mid_delay, val1, lane_mul, slot_mul, val2,
         alt;
@@ -128,8 +128,8 @@ struct OcTest {
 
 #define OC_T(...)                                                                                  \
     {                                                                                              \
-        .gx = 4, .gy = 2, .wpt = 2, .ndisp = 1, .flags = 0x08, .variant = CS_OC_A, .val1 = 1,      \
-        .val2 = 1, .val3 = 1, .exec = 1, .m0plain = 0x00000400u, __VA_ARGS__                       \
+        .gx = 4, .gy = 2, .gz = 1, .wpt = 2, .ndisp = 1, .flags = 0x08, .variant = CS_OC_A,        \
+        .val1 = 1, .val2 = 1, .val3 = 1, .exec = 1, .m0plain = 0x00000400u, __VA_ARGS__            \
     }
 #define OC_PROBE(n) OC_T(.id = n, .what = "probe: idx0, 16 waves, no delay", .kind = 2)
 
@@ -137,58 +137,36 @@ struct OcTest {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winitializer-overrides"
 static const struct OcTest k_oc_tests[] = {
-/* Model checks. Predictions from the release-step + done-order rules are in the descriptions.
-   Addresses: op1 0x000, op2 0x100, op3 0x200. */
-#define OC_V(n, v, ms, s2, w)                                                                      \
-    OC_T(.id = n, .variant = v, .addr2 = 0x100, .addr3 = 0x200, .mid_delay = 200, .mid_sel = ms,   \
-         .mid2 = 200, .mid2_sel = s2, .what = w)
-    OC_V("V01", CS_OC_RNR, 0xFFFFFFFFu, 0xFFFF,
-         "rel / no rel / rel done; wave 0 sleeps before op3. Predicted: wave 1 op1 at once, "
-         "wave 1 op2 after wave 0 op3"),
-    OC_V("V02", CS_OC_RNR, 0xFFFF, 0xFFFFFFFFu,
-         "rel / no rel / rel done; wave 0 sleeps before op2. Predicted: wave 1 op1 at once, "
-         "wave 1 op2 after wave 0 op3"),
-    OC_V("V03", CS_OC_U31, 0xFFFFFFFFu, 0x1,
-         "even waves 3 steps, odd 1; even waves sleep before op3. Predicted: each odd wave "
-         "after the previous even wave's op3"),
-    OC_V("V04", CS_OC_U13, 0xFFFFFFFFu, 0x10001,
-         "even waves 1 step, odd 3; odd waves sleep before op3. Predicted: each even wave "
-         "after the previous odd wave's op3"),
-    OC_V("V05", CS_OC_U23, 0xFFFFFFFFu, 0x10001,
-         "even waves 2 steps, odd 3; odd waves sleep before op3. Predicted: even op1 at once, "
-         "even op2 after the previous odd wave's op3"),
-#undef OC_V
-    /* Handoff speed: 128 waves wait for wave 0, then run in ID order. */
-    OC_T(.id = "H01", .gx = 128, .gy = 1, .wpt = 1, .pre_delay = 2,
-         .what = "128 waves arrive in reverse order, 1 op"),
-    OC_T(.id = "H02", .variant = CS_OC_B, .addr2 = 0x100, .gx = 128, .gy = 1, .wpt = 1,
-         .pre_delay = 2,
-         .what = "128 waves arrive in reverse order, 2 ops (idx0 rel, idx1 rel done)"),
-    /* Wave-ID wrap on compute pipe 1. */
-    OC_T(.id = "E01", .queue = 3, .gate = 1, .gx = 256, .gy = 4, .wpt = 1,
-         .what = "compute queue 3 (pipe 1), 1024 waves"),
-    /* Risky. */
-    OC_T(.id = "M02", .kind = 1, .flags = 0x18, .skip = 0x10001,
-         .what = "flags 0x18, 2-wave groups, only wave 1 of each group issues the op"),
+/* How many waves can wait at once, and in what order they run. Lean shader: 10 waves fit
+   per SIMD. DELAY_MODE (.pre_fwd) 1: only wave 0 sleeps (.pre_delay iterations). */
+#define OC_L(n, q, x, y, z, w, d, m, wh)                                                           \
+    OC_T(.id = n, .variant = CS_OC_LEAN, .queue = q, .gx = x, .gy = y, .gz = z, .wpt = w,          \
+         .pre_delay = d, .pre_fwd = m, .what = wh)
+    OC_L("L01", 0, 2048, 1, 1, 1, 4000, 1, "2048 1-wave groups, wave 0 sleeps, the rest wait"),
+    OC_L("L02", 0, 512, 1, 1, 4, 4000, 1, "512 4-wave groups, wave 0 sleeps, the rest wait"),
+    OC_L("L03", 0, 4, 3, 2, 2, 20, 0, "grid 4x3x2 of 2-wave groups, waves arrive in reverse order"),
+    OC_L("L04", 0, 8, 1, 1, 16, 2000, 1, "8 groups of 16 waves (1024 threads), wave 0 sleeps"),
+    OC_L("L05", 0, 4096, 1, 1, 1, 0, 0, "4096 1-wave groups, no delays"),
+    OC_L("L06", 1, 2048, 1, 1, 1, 4000, 1,
+         "compute queue 1: 2048 1-wave groups, wave 0 sleeps, the rest wait"),
+    OC_L("L07", 0, 6, 5, 4, 1, 0, 0, "grid 6x5x4 of 1-wave groups, no delays"),
+#undef OC_L
+    /* Risky: offset1 bit 5. */
+    OC_T(.id = "B01", .kind = 1, .variant = CS_OC_X5,
+         .what = "bit 5, value 1 in lane 0 (repeat of Z03)"),
     OC_PROBE("P01"),
-    OC_T(.id = "M03", .kind = 1, .flags = 0x18, .gx = 2, .gy = 2, .wpt = 4, .skip = 0x3,
-         .what = "flags 0x18, 4-wave groups, only wave 0 of each group issues the op"),
+    OC_T(.id = "B02", .kind = 1, .variant = CS_OC_X5, .exec = ~0ULL, .lane_mul = 1, .lanes = 1,
+         .what = "bit 5, EXEC all, value lane+1"),
     OC_PROBE("P02"),
-    OC_T(.id = "Z01", .kind = 1, .variant = CS_OC_T2, .what = "offset1 shader type 2 in a CS"),
+    OC_T(.id = "B03", .kind = 1, .variant = CS_OC_X5, .val1 = 100, .slot_mul = 1, .gds_init = 1,
+         .what = "bit 5, value 100+slot, GDS pattern 0x1000+dword"),
     OC_PROBE("P03"),
-    OC_T(.id = "Z02", .kind = 1, .variant = CS_OC_T3, .what = "offset1 shader type 3 in a CS"),
+    OC_T(.id = "B04", .kind = 1, .variant = CS_OC_X5S, .val1 = 100, .slot_mul = 1, .gds_init = 2,
+         .gds_val = 0x77, .what = "bit 5 with swap, value 100+slot, GDS 0x77"),
     OC_PROBE("P04"),
-    OC_T(.id = "Z03", .kind = 1, .variant = CS_OC_X5, .what = "offset1 bit 5 set"),
+    OC_T(.id = "B05", .kind = 1, .variant = CS_OC_X5A, .val3 = 0x100, .slot_mul = 1,
+         .what = "bit 5, ADDR v12 = 0xcafe0000|lane, next register v13 = 0x100+slot"),
     OC_PROBE("P05"),
-    OC_T(.id = "Z04", .kind = 1, .variant = CS_OC_X6, .what = "offset1 bit 6 set"),
-    OC_PROBE("P06"),
-    OC_T(.id = "Z05", .kind = 1, .variant = CS_OC_X7, .what = "offset1 bit 7 set"),
-    OC_PROBE("P07"),
-    OC_T(.id = "Z06", .kind = 1, .variant = CS_OC_LDS, .what = "GDS bit 0 (LDS)"),
-    OC_PROBE("P08"),
-    OC_T(.id = "Z07", .kind = 1, .addr1 = 0xC000,
-         .what = "M0 address 0xC000, just past the 48 KB partition"),
-    OC_PROBE("P09"),
 };
 #pragma clang diagnostic pop
 #define OC_NTESTS ((int)(sizeof(k_oc_tests) / sizeof(k_oc_tests[0])))
@@ -352,6 +330,40 @@ static const char* const k_oc_qname[4] = {"DCB", "compute queue 1 (pipe 0 queue 
                                           "compute queue 2 (pipe 0 queue 6)",
                                           "compute queue 3 (pipe 1 queue 5)"};
 
+/* Lean shader (cs_ordcnt.h "lean"): 64-byte records, its own parameter block. */
+enum {
+    OC_L_GX,
+    OC_L_WPT,
+    OC_L_GY,
+    OC_L_DELAY,
+    OC_L_WAVES,
+    OC_L_REC_BASE,
+    OC_L_DELAY_MODE, /* 0: (waves - 1 - slot) * DELAY, 1: slot 0 sleeps DELAY */
+};
+enum {
+    OC_LR_TGSIZE,
+    OC_LR_X,
+    OC_LR_Y,
+    OC_LR_Z,
+    OC_LR_WAVE,
+    OC_LR_SLOT,
+    OC_LR_RET,
+    OC_LR_TISSUE,
+    OC_LR_TRET,
+    OC_LR_HWID,
+    OC_LR_MARK,
+    OC_LR_TSTART,
+    OC_LR_TISSUE_HI,
+    OC_LR_TRET_HI,
+};
+#define OC_LEAN_REC 64u
+static uint32_t oc_waves(const struct OcTest* t) {
+    return (uint32_t)t->gx * t->gy * t->gz * t->wpt * t->ndisp;
+}
+static uint32_t oc_rec_bytes(const struct OcTest* t) {
+    return t->variant == CS_OC_LEAN ? OC_LEAN_REC : OC_REC_BYTES;
+}
+
 struct OcCtx {
     uint8_t* out;
     void* sh[CS_OC_COUNT];
@@ -379,7 +391,6 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
     for (int i = 0; i < t->nregs; i++)
         oc_copy_reg(b, t->regs[i], c->out + OC_REG_PRE + i * 4);
     uint64_t sa = (uint64_t)(uintptr_t)c->sh[t->variant];
-    uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt;
     for (int d = 0; d < t->ndisp; d++) {
         uint8_t* base = c->out + d * 0x100;
         uint32_t v[4];
@@ -392,14 +403,13 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
         oc_sh(b, 0x204, st, 6);
         uint32_t pgm[2] = {(uint32_t)(sa >> 8), (uint32_t)(sa >> 40)};
         oc_sh(b, 0x20c, pgm, 2);
-        uint32_t rsrc[2] = {CS_OC_RSRC1, CS_OC_RSRC2};
+        uint32_t rsrc[2] = {k_cs_oc[t->variant].rsrc1, k_cs_oc[t->variant].rsrc2};
         oc_sh(b, 0x212, rsrc, 2);
         uint32_t tmp = 0;
         oc_sh(b, 0x218, &tmp, 1);
         oc_sh(b, 0x240, v, 4);
-        (void)waves;
         if (pm4_have_space(b, 9)) {
-            sceGnmDispatchDirect(b->buf + b->off, 9, t->gx, t->gy, 1, t->flags);
+            sceGnmDispatchDirect(b->buf + b->off, 9, t->gx, t->gy, t->gz, t->flags);
             b->off += 9;
         } else {
             b->overflow++;
@@ -420,8 +430,19 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
 }
 
 static void oc_params(struct OcCtx* c, const struct OcTest* t) {
-    uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt;
-    my_memset(c->out, 0, OC_REC_OFF + (unsigned long)waves * t->ndisp * OC_REC_BYTES);
+    uint32_t waves = oc_waves(t) / t->ndisp;
+    my_memset(c->out, 0, OC_REC_OFF + (unsigned long)oc_waves(t) * oc_rec_bytes(t));
+    if (t->variant == CS_OC_LEAN) {
+        uint32_t* p = (uint32_t*)c->out;
+        p[OC_L_GX] = t->gx;
+        p[OC_L_WPT] = t->wpt;
+        p[OC_L_GY] = t->gy;
+        p[OC_L_DELAY] = t->pre_delay;
+        p[OC_L_WAVES] = waves;
+        p[OC_L_REC_BASE] = OC_REC_OFF;
+        p[OC_L_DELAY_MODE] = t->pre_fwd;
+        return;
+    }
     uint32_t* g = (uint32_t*)(c->out + OC_GDS_INIT);
     for (uint32_t i = 0; i < OC_GDS_BYTES / 4; i++)
         g[i] = t->gds_init == 1 ? 0x1000u + i : t->gds_init == 2 ? t->gds_val : 0;
@@ -603,8 +624,161 @@ static void oc_windows(struct OcCtx* c) {
     g_oc_snap_ok = 1;
 }
 
+/* Lean tests: launch order (slot = x, then y, then z, then wave in group) against the order the
+   ops ran in (the returned value), wave-ID steps, how many waves waited at once, and where they
+   ran (HW_ID: shader engine, compute unit, SIMD, wave slot). */
+static uint32_t g_oc_by_ret[0x10000];
+static void oc_lean_report(struct OcCtx* c, const struct OcTest* t, uint64_t us) {
+    uint32_t n = oc_waves(t);
+    const uint32_t* r0 = (const uint32_t*)(c->out + OC_REC_OFF);
+    uint32_t marks = 0, badret = 0;
+    for (uint32_t i = 0; i < n && i < 0x10000; i++)
+        g_oc_by_ret[i] = 0xFFFFFFFFu;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint32_t* r = r0 + s * (OC_LEAN_REC / 4);
+        if (r[OC_LR_MARK] != 0x0DC0FFEEu)
+            continue;
+        marks++;
+        if (r[OC_LR_RET] < n && g_oc_by_ret[r[OC_LR_RET]] == 0xFFFFFFFFu)
+            g_oc_by_ret[r[OC_LR_RET]] = s;
+        else
+            badret++;
+    }
+    oc_s("done in ");
+    oc_u(us);
+    oc_s(" us\nrecords written: ");
+    oc_u(marks);
+    oc_s(" / ");
+    oc_u(n);
+    oc_s(", returned values outside 0..waves-1 or repeated: ");
+    oc_u(badret);
+    /* launch order vs run order */
+    uint32_t slot_steps = 0, slot_other = 0, id_steps = 0, id_other = 0, prev = 0xFFFFFFFFu;
+    oc_s("\nrun order (by returned value) where the slot does not advance by 1:");
+    for (uint32_t v = 0; v < n; v++) {
+        uint32_t s = g_oc_by_ret[v];
+        if (s == 0xFFFFFFFFu)
+            continue;
+        if (prev != 0xFFFFFFFFu) {
+            const uint32_t* a = r0 + prev * (OC_LEAN_REC / 4);
+            const uint32_t* b = r0 + s * (OC_LEAN_REC / 4);
+            uint32_t ia = (a[OC_LR_TGSIZE] >> 6) & 0x7FF, ib = (b[OC_LR_TGSIZE] >> 6) & 0x7FF;
+            if (s == prev + 1) {
+                slot_steps++;
+            } else if (slot_other++ < 16) {
+                oc_s(" [");
+                oc_u(v);
+                oc_s("] ");
+                oc_u(prev);
+                oc_s("->");
+                oc_u(s);
+            }
+            if (ib == ia + 1) {
+                id_steps++;
+            } else if (id_other++ < 16) {
+                oc_s(" {id ");
+                oc_x(ia, 3);
+                oc_s("->");
+                oc_x(ib, 3);
+                oc_s(" at ");
+                oc_u(v);
+                oc_s("}");
+            }
+        }
+        prev = s;
+    }
+    oc_s("\nslot +1 steps ");
+    oc_u(slot_steps);
+    oc_s(", other ");
+    oc_u(slot_other);
+    oc_s("; wave-ID +1 steps ");
+    oc_u(id_steps);
+    oc_s(", other ");
+    oc_u(id_other);
+    oc_s("\nfirst 48 in run order (value: slot x,y,z wave id):");
+    for (uint32_t v = 0; v < n && v < 48; v++) {
+        uint32_t s = g_oc_by_ret[v];
+        if (s == 0xFFFFFFFFu)
+            continue;
+        const uint32_t* r = r0 + s * (OC_LEAN_REC / 4);
+        oc_s(v % 4 ? "   " : "\n");
+        oc_u(v);
+        oc_s(": ");
+        oc_u(s);
+        oc_s(" ");
+        oc_u(r[OC_LR_X]);
+        oc_s(",");
+        oc_u(r[OC_LR_Y]);
+        oc_s(",");
+        oc_u(r[OC_LR_Z]);
+        oc_s(" w");
+        oc_u(r[OC_LR_WAVE]);
+        oc_s(" ");
+        oc_x((r[OC_LR_TGSIZE] >> 6) & 0x7FF, 3);
+    }
+    /* waiting at the same time; where the waves ran */
+    uint64_t t0 = 0;
+    const uint32_t* w0 = r0;
+    if (w0[OC_LR_MARK] == 0x0DC0FFEEu)
+        t0 = ((uint64_t)w0[OC_LR_TISSUE_HI] << 32) | w0[OC_LR_TISSUE];
+    uint32_t before0 = 0, peak = 0, maxslot = 0;
+    static uint8_t cu_seen[64];
+    my_memset(cu_seen, 0, sizeof(cu_seen));
+    for (uint32_t s = 0; s < n; s++) {
+        const uint32_t* r = r0 + s * (OC_LEAN_REC / 4);
+        if (r[OC_LR_MARK] != 0x0DC0FFEEu)
+            continue;
+        uint64_t is = ((uint64_t)r[OC_LR_TISSUE_HI] << 32) | r[OC_LR_TISSUE];
+        uint64_t rt = ((uint64_t)r[OC_LR_TRET_HI] << 32) | r[OC_LR_TRET];
+        if (s && t0 && is < t0)
+            before0++;
+        uint32_t live = 0;
+        for (uint32_t k = 0; k < n; k++) {
+            const uint32_t* q = r0 + k * (OC_LEAN_REC / 4);
+            if (q[OC_LR_MARK] != 0x0DC0FFEEu)
+                continue;
+            uint64_t qi = ((uint64_t)q[OC_LR_TISSUE_HI] << 32) | q[OC_LR_TISSUE];
+            uint64_t qr = ((uint64_t)q[OC_LR_TRET_HI] << 32) | q[OC_LR_TRET];
+            if (qi <= is && is < qr)
+                live++;
+        }
+        if (live > peak)
+            peak = live;
+        (void)rt;
+        uint32_t h = r[OC_LR_HWID];
+        uint32_t cu = ((h >> 13) & 3) * 32 + ((h >> 12) & 1) * 16 + ((h >> 8) & 15);
+        cu_seen[cu & 63] = 1;
+        if ((h & 15) > maxslot)
+            maxslot = h & 15;
+    }
+    uint32_t ncu = 0;
+    for (int i = 0; i < 64; i++)
+        ncu += cu_seen[i];
+    oc_s("\nwaves that issued their op before wave 0 did: ");
+    oc_u(before0);
+    oc_s("\nmost ops in flight at one time (issued, not yet returned): ");
+    oc_u(peak);
+    oc_s("\ncompute units used: ");
+    oc_u(ncu);
+    oc_s(", highest wave slot in a SIMD: ");
+    oc_u(maxslot);
+    oc_s("\nfirst 8 records (TG_SIZE, HW_ID):");
+    for (uint32_t s = 0; s < n && s < 8; s++) {
+        const uint32_t* r = r0 + s * (OC_LEAN_REC / 4);
+        oc_s(" ");
+        oc_x(r[OC_LR_TGSIZE], 8);
+        oc_s("/");
+        oc_x(r[OC_LR_HWID], 8);
+    }
+    oc_s("\n\n");
+}
+
 static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t us) {
-    uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt * t->ndisp;
+    uint32_t waves = oc_waves(t);
+    if (t->variant == CS_OC_LEAN) {
+        oc_lean_report(c, t, us);
+        return;
+    }
     if (t->nregs) {
         const uint32_t* r0 = (const uint32_t*)(c->out + OC_REG_PRE);
         const uint32_t* r1 = (const uint32_t*)(c->out + OC_REG_POST);
@@ -837,7 +1011,7 @@ static int ordcnt_run(void) {
         int q = t->queue;
         if (t->kind && st.bad[0] && !st.bad[1])
             q = 1;
-        uint32_t waves = (uint32_t)t->gx * t->gy * t->wpt * t->ndisp;
+        uint32_t waves = oc_waves(t);
         oc_s("### ");
         oc_s(t->id);
         oc_s(": ");
@@ -852,6 +1026,8 @@ static int ordcnt_run(void) {
         oc_u(t->gx);
         oc_s("x");
         oc_u(t->gy);
+        oc_s("x");
+        oc_u(t->gz);
         oc_s(" x ");
         oc_u(t->wpt);
         oc_s(" waves x ");
@@ -861,7 +1037,7 @@ static int ordcnt_run(void) {
         oc_s(", M0 mode ");
         oc_u(t->m0mode);
         oc_s("\n");
-        if (st.bad[q] || waves > OC_MAX_WAVES) {
+        if (st.bad[q] || waves > (OC_OUT_SIZE - OC_REC_OFF) / oc_rec_bytes(t)) {
             oc_s("SKIPPED (this queue hung on its first ordered test, or too many waves)\n\n");
             oc_flush();
             st.next = k + 1;

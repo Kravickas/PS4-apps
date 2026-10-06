@@ -96,6 +96,9 @@ VARIANTS3 += [
     ("x6", 0xC0DE0C3D, [(o(0, 1, 1, V_VAL1, x1=0x40),) * 2]),
     ("x7", 0xC0DE0C3E, [(o(0, 1, 1, V_VAL1, x1=0x80),) * 2]),
     ("lds", 0xC0DE0C3F, [(o(0, 1, 1, V_VAL1, gds=0),) * 2]),
+    # offset1 bit 5: as swap; with ADDR = v12 (0xcafe0000 | lane) so that v13 = VAL3
+    ("x5s", 0xC0DE0C51, [(o(0, 1, 1, V_VAL1, swap=1, x1=0x20),) * 2]),
+    ("x5a", 0xC0DE0C52, [(o(0, 1, 1, V_RET3, x1=0x20),) * 2]),
 ]
 
 # GDS window shaders (no ordered ops): wave TGID.x covers GDS bytes [TGID.x * 0x400, +0x400) through
@@ -103,6 +106,78 @@ VARIANTS3 += [
 # "gdump" reads the window; "gfill" writes VAL1 there, then reads it back. Either way the record
 # of wave TGID.x (REC_BASE + TGID.x * 0x400) receives the window as read.
 WINDOW_SHADERS = [("gdump", 0xC0DE0C40, False), ("gfill", 0xC0DE0C41, True)]
+
+
+# Lean ordered shader: few registers (8 VGPRs, 40 SGPRs) so 10 waves fit per SIMD; 3D grid.
+# Inputs: s[0:3] V#, s4 / s5 / s6 TGID.x / y / z, s7 TG_SIZE (RSRC2 CS_OC_LEAN_RSRC2), v0 thread
+# id. Parameters s8..s15: GX, WPT, GY, DELAY, WAVES, REC_BASE, DELAY_MODE (0: (waves - 1 - slot) *
+# DELAY sleep iterations, 1: slot 0 sleeps DELAY, others none). One op: idx0 release done, adds 1,
+# M0 = TG_SIZE[16:6]. Record (64 bytes at REC_BASE + slot * 64): TG_SIZE, TGID x / y / z, wave in
+# group, slot, returned value, memtime before / after the op (low), HW_ID, marker, memtime at
+# start (low), memtime before / after (high).
+LEAN_SHADERS = [("lean", 0xC0DE0C50)]
+LEAN_RSRC1, LEAN_RSRC2 = 0x000C0101, 0x00000788
+
+
+def lean_shader(name):
+    w0, w1 = ds_words(o(0, 1, 1, 1), 2)
+    a = [
+        "; ---- variant %s ----" % name,
+        "s_buffer_load_dwordx8 s[8:15], s[0:3], 0x0",
+        "s_memtime s[16:17]",
+        "s_getreg_b32 s18, hwreg(HW_REG_HW_ID)",
+        "s_waitcnt lgkmcnt(0)",
+        "v_readfirstlane_b32 s19, v0",
+        "s_lshr_b32 s19, s19, 6",
+        "s_mul_i32 s20, s6, s10",
+        "s_add_u32 s20, s20, s5",
+        "s_mul_i32 s20, s20, s8",
+        "s_add_u32 s20, s20, s4",
+        "s_mul_i32 s20, s20, s9",
+        "s_add_u32 s20, s20, s19",
+        "s_lshl_b32 s21, s20, 6",
+        "s_add_u32 s21, s21, s13",
+        "s_bfe_u32 s22, s7, 0xb0006",
+        "s_sub_u32 s23, s12, 1",
+        "s_sub_u32 s23, s23, s20",
+        "s_mul_i32 s23, s23, s11",
+        "s_cmp_eq_u32 s14, 1",
+        "s_cbranch_scc0 %s_dm" % name,
+        "s_cmp_eq_u32 s20, 0",
+        "s_cselect_b32 s23, s11, 0",
+        "%s_dm:" % name,
+    ]
+    a += delay(name + "_pre", "s23")
+    a += [
+        "v_mov_b32 v1, 1",
+        "v_mov_b32 v2, 0xdead0000",
+        "s_memtime s[24:25]",
+        "s_mov_b32 m0, s22",
+        "s_mov_b64 exec, 1",
+        "s_nop 1",
+        "; ds_ordered_count v2, v1 idx0 rel done add gds",
+        ".long 0x%08x, 0x%08x" % (w0, w1),
+        "s_waitcnt lgkmcnt(0)",
+        "s_mov_b64 exec, -1",
+        "s_memtime s[26:27]",
+        "v_readfirstlane_b32 s28, v2",
+        "s_waitcnt lgkmcnt(0)",
+        "s_mov_b32 s29, 0x0dc0ffee",
+    ]
+    for i, sg in enumerate(["s7", "s4", "s5", "s6", "s19", "s20", "s28", "s24", "s26", "s18", "s29",
+                            "s16", "s25", "s27"]):
+        a.append("v_writelane_b32 v3, %s, %d" % (sg, i))
+    a += [
+        "v_and_b32 v4, 63, v0",
+        "v_lshlrev_b32 v4, 2, v4",
+        "v_add_i32 v4, vcc, s21, v4",
+        "s_mov_b32 exec_lo, 0xffff",
+        "s_mov_b32 exec_hi, 0",
+        "buffer_store_dword v3, v4, s[0:3], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "s_endpgm",
+    ]
+    return a
 
 
 def window_shader(name, fill):
@@ -429,8 +504,14 @@ def main():
     allv = [(n, h, [(x, x) for x in (op1, op2) if x]) for n, h, op1, op2 in VARIANTS]
     allv += VARIANTS3
     allv += [(n, h, fill) for n, h, fill in WINDOW_SHADERS]
+    allv += [(n, h, "lean") for n, h in LEAN_SHADERS]
     for name, h, slots in allv:
-        lines = window_shader(name, slots) if isinstance(slots, bool) else shader(name, slots)
+        if slots == "lean":
+            lines = lean_shader(name)
+        elif isinstance(slots, bool):
+            lines = window_shader(name, slots)
+        else:
+            lines = shader(name, slots)
         code = assemble(lines)
         if (len(code) + 2) % 2:
             code.append(0xBF800000)  # s_nop 0: header + code to an even dword count
@@ -441,7 +522,10 @@ def main():
         words += [0x5362724F, 0x00726468, (total * 4) << 8, 0, 0xDEADBEEF, h, 0]
         out_s += lines + [""]
         desc = []
-        if isinstance(slots, bool):
+        if slots == "lean":
+            desc.append("lean: idx0 release done add 1, 3D grid")
+            slots = []
+        elif isinstance(slots, bool):
             desc.append("GDS window %s" % ("fill + read" if slots else "read"))
             slots = []
         for k, (even, odd) in enumerate(slots):
@@ -465,12 +549,15 @@ def main():
     out_h.append("    const uint32_t* bin;")
     out_h.append("    uint32_t size;")
     out_h.append("    uint32_t nops; /* op slots */")
+    out_h.append("    uint32_t rsrc1, rsrc2;")
     out_h.append("    const char* name;")
     out_h.append("};")
     out_h.append("static const struct CsOcBin k_cs_oc[CS_OC_COUNT] = {")
     for name, h, slots in allv:
-        n = 0 if isinstance(slots, bool) else len(slots)
-        out_h.append("    {cs_oc_%s, sizeof(cs_oc_%s), %d, \"%s\"}," % (name, name, n, name))
+        n = 0 if isinstance(slots, (bool, str)) else len(slots)
+        r1, r2 = (LEAN_RSRC1, LEAN_RSRC2) if slots == "lean" else (0x000C02C6, 0x00000588)
+        out_h.append("    {cs_oc_%s, sizeof(cs_oc_%s), %d, 0x%08Xu, 0x%08Xu, \"%s\"}," % (
+            name, name, n, r1, r2, name))
     out_h.append("};")
     open("shaders/cs_ordcnt.s", "w").write("\n".join(out_s) + "\n")
     open("shaders/cs_ordcnt.h", "w").write("\n".join(out_h) + "\n")
