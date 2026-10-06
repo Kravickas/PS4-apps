@@ -38,6 +38,12 @@
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
+/* ORDCNT_TEST: the DS_ORDERED_COUNT hardware test (src/ordcnt_test.h) once before the main
+   loop; results in /user/data/ShadCube4/ShadCube4 ordcnt.log. 0: off. */
+#ifndef ORDCNT_TEST
+#define ORDCNT_TEST 1
+#endif
+
 #include "atmosphere.h"
 #include "bgm.h"
 #include "dds_loader.h"
@@ -1498,6 +1504,10 @@ static void post_consts(uint32_t* t, float a, float b, float c, float d) {
 
 /* after timesrc.h / ui.h: the clock uses g_ts */
 #include "clock.h" /* glass clock: text, per-frame constants */
+
+#if ORDCNT_TEST
+#include "ordcnt_test.h"
+#endif
 
 /* ==== §12 Post-processing: pass tables, MSAA state, passes ==================================== */
 static void build_post_tables(uint32_t* tab) {
@@ -3327,6 +3337,14 @@ int main(void) {
 
     ls_mark("final_setup");
     ls_finish(); /* the full bar; the splash went when the loading screen came up */
+#if ORDCNT_TEST
+    if (ordcnt_run() < 0) {
+        trace_msg("ordcnt: fence timeout, GPU hung - close the app\n");
+        for (;;)
+            sceKernelUsleep(1000000);
+    }
+    trace_msg("ordcnt: run finished\n");
+#endif
     int splash_ret = g_ls.splash_ret;
     { char L[96]; int p=0;
       const char *m = "HideSplashScreen ret=";

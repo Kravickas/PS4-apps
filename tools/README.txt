@@ -25,6 +25,8 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
                      distance atlas (URW Gothic Demi; not shipped)
   make_clock_light_norm.py   src/clock_light_norm.h: the clock's internal-light normaliser
   gen_ps_clock.py    shaders/ps_clock.s (clock mode's glass)
+  gen_cs_ordcnt.py   shaders/cs_ordcnt.s / .h: the DS_ORDERED_COUNT test shaders
+                     (src/ordcnt_test.h); needs llvm-mc-18 and llvm-objcopy-18
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =

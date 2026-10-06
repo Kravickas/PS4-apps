@@ -34,6 +34,10 @@ TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
   times per step ("load ms:"), time sources and zones ("tz", "tz_net", "tz_http"), and frame
   statistics every 60 frames.
+  ORDCNT_TEST (src/main.c, on): /user/data/ShadCube4/ShadCube4 ordcnt.log, the DS_ORDERED_COUNT
+  test, run before the main loop. After a GPU hang close the app and launch it again: it logs the
+  hung test and continues (state: ordcnt.state there). Once finished it does not run again until
+  ordcnt.state is deleted.
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top
@@ -45,6 +49,7 @@ SOURCE MAP
   src/bgm.c/.h         the looping music thread
   src/loadscreen.h     the loading screen (CPU-drawn)
   src/timesrc.h        time sources: in-game, console, SNTP and the time zone lookup
+  src/ordcnt_test.h    DS_ORDERED_COUNT hardware test (ORDCNT_TEST), log: ShadCube4 ordcnt.log
   src/ui.h, ui_atlas.h the panels: controls list, speeds, the time pill
   src/clock.h, clock_sdf.h, clock_light_norm.h   the glass clock (text, per-frame constants)
   src/logo_texture.h   the built-in logo texture (fallback when a texture is missing)
