@@ -3,16 +3,18 @@
  * Each test is one command buffer: GDS init (CP DMA from memory), one or two compute dispatches
  * (cs_ordcnt.h variant, sceGnmDispatchDirect flags 0x08 = ORDERED_APPEND_ENBL, 0x18 = + MODE),
  * CS_PARTIAL_FLUSH, GDS readback (CP DMA to memory), L2 write-back, fence. Queue 0 is the DCB
- * (graphics ring), queue 1 a compute queue mapped here (sceGnmMapComputeQueue + DingDong).
+ * (graphics ring), queues 1..3 compute queues mapped here (k_oc_queue; sceGnmMapComputeQueue +
+ * DingDong).
  *
- * Every wave writes a 768-byte record (src/../tools/gen_cs_ordcnt.py HEADER): TG_SIZE, TGID, wave
- * in group, M0, s_memtime around each op, a GDS ticket after each op (plain ds_add_rtn, global
- * completion order), HW_ID, and the op1 / op2 return VGPR of all 64 lanes.
+ * Every wave writes a 768-byte record (tools/gen_cs_ordcnt.py HEADER): TG_SIZE, TGID, wave in
+ * group, M0, s_memtime around each op, a GDS ticket after each op (plain ds_add_rtn_u32 gds with
+ * M0 = the test's m0plain; valid only where the G tests show that M0 works), HW_ID, and the
+ * op1 / op2 return VGPR of all 64 lanes.
  *
  * Results: ShadCube4 ordcnt.log next to the trace log (appended). A hang (fence timeout) ends the
- * run; the state file ordcnt.state makes the next launch log it and continue after it. If T01
- * (A01) hangs, the other tests of that queue are skipped and the risky ones use the other. Risky
- * tests (R*) can hang or desync the ordered wave IDs; each is followed by a probe (P*). A new
+ * run; the state file ordcnt.state makes the next launch log it and continue after it. If a gate
+ * test hangs, the other tests of its queue are skipped and the risky ones use compute queue 1.
+ * Risky tests can hang or desync the ordered wave IDs; each is followed by a probe (P*). A new
  * OC_BUILD starts over (log truncated); after the last test the run is not repeated until
  * ordcnt.state is deleted. */
 #include "cs_ordcnt.h"
@@ -22,7 +24,7 @@ extern int sceGnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t tgx, uint
 extern int sceGnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size);
 extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 
-#define OC_BUILD "ordcnt-2"
+#define OC_BUILD "ordcnt-3"
 #define OC_TIMEOUT_US 2000000u
 
 #define OC_OUT_SIZE 0x400000u /* params, GDS images, records */
@@ -65,6 +67,8 @@ enum {
     OC_P_VAL2,
     OC_P_YSTRIDE2,
     OC_P_ALT,
+    OC_P_PRE_FWD,  /* 0: pre-delay (waves - 1 - slot) * PRE_DELAY, 1: slot * PRE_DELAY */
+    OC_P_M0_PLAIN, /* M0 of the plain GDS op and of the tickets */
 };
 
 /* Record header dwords (gen_cs_ordcnt.py HEADER). */
@@ -96,6 +100,8 @@ struct OcTest {
     const char* what;
     uint8_t variant, queue, flags, kind; /* kind: 0 safe, 1 risky, 2 probe */
     uint8_t gate; /* a hang here means the queue cannot run ordered dispatches: skip its others */
+    uint8_t pre_fwd;
+    uint32_t m0plain;
     uint16_t gx, gy;
     uint8_t wpt, ndisp, gds_init, lanes, m0mode, skip_odd;
     uint32_t gds_val, addr1, addr2, ystride1, pre_delay, mid_delay, val1, lane_mul, slot_mul, val2,
@@ -106,89 +112,64 @@ struct OcTest {
 #define OC_T(...)                                                                                  \
     {                                                                                              \
         .gx = 4, .gy = 2, .wpt = 2, .ndisp = 1, .flags = 0x08, .variant = CS_OC_A, .val1 = 1,      \
-        .val2 = 1, .exec = 1, __VA_ARGS__                                                          \
+        .val2 = 1, .exec = 1, .m0plain = 0x0000FFFFu, __VA_ARGS__                                  \
     }
-#define OC_PROBE(n) OC_T(.id = n, .what = "probe: as T02", .kind = 2)
+#define OC_PROBE(n) OC_T(.id = n, .what = "probe: idx0, 16 waves, no delay", .kind = 2)
 
 /* OC_T defaults, then the test's own fields: later designated initializers win (C11 6.7.9). */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winitializer-overrides"
 static const struct OcTest k_oc_tests[] = {
-    OC_T(.id = "T00", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
-         .gds_init = 1, .addr1 = 0x40, .lanes = 1,
-         .what = "plain ds_add_rtn_u32 gds, no ordered append: GDS access, CP DMA init/readback"),
-    OC_T(.id = "T01", .gate = 1, .pre_delay = 40,
-         .what = "1 op (idx0 rel done), later waves arrive first"),
-    OC_T(.id = "T02", .what = "1 op, no delay (wave-ID continuity across submits)"),
-    OC_T(.id = "T03", .gx = 16, .gy = 1, .wpt = 1, .what = "1 op, 1-wave threadgroups"),
-    OC_T(.id = "T04", .gx = 2, .gy = 2, .wpt = 4, .what = "1 op, 4-wave threadgroups"),
-    OC_T(.id = "T05", .variant = CS_OC_B, .mid_delay = 200,
-         .what = "2 ops idx0 rel / idx1 rel done, same GDS dword, odd waves sleep between"),
-    OC_T(.id = "T06", .variant = CS_OC_B, .mid_delay = 200, .addr2 = 0x20,
-         .what = "2 ops idx0 / idx1, op2 M0 address 0x20"),
-    OC_T(.id = "T07", .variant = CS_OC_G, .mid_delay = 200,
-         .what = "2 ops idx1 rel / idx0 rel done, same dword, odd waves sleep between"),
-    OC_T(.id = "T08", .variant = CS_OC_C, .mid_delay = 200,
-         .what = "2 ops idx0 no-release / idx0 rel done, same dword, odd waves sleep between"),
-    OC_T(.id = "T09", .exec = ~0ULL, .lane_mul = 1, .lanes = 1,
-         .what = "1 op, EXEC all 64, value lane+1"),
-    OC_T(.id = "T10", .exec = 1ULL << 5, .lane_mul = 1, .lanes = 1,
-         .what = "1 op, EXEC lane 5 only, value lane+1"),
-    OC_T(.id = "T11", .exec = 0x8000000000000001ULL, .lane_mul = 1, .lanes = 1,
-         .what = "1 op, EXEC lanes 0 and 63, value lane+1"),
-    OC_T(.id = "T12", .variant = CS_OC_D, .val1 = 100, .slot_mul = 1, .gds_init = 2,
-         .gds_val = 0x77, .what = "1 op swap, value 100+slot, GDS init 0x77"),
-    OC_T(.id = "T13", .variant = CS_OC_E1, .alt = 1000,
-         .what = "ADDR field = 1000, DATA0 field = 1: which one is added"),
-    OC_T(.id = "T14", .variant = CS_OC_E2, .alt = 1000,
-         .what = "ADDR field = 1, DATA0 field = 1000: which one is added"),
-    OC_T(.id = "T15", .variant = CS_OC_F1, .addr1 = 0x10, .what = "idx1, M0 address 0x10"),
-    OC_T(.id = "T16", .variant = CS_OC_F2, .addr1 = 0x10, .what = "idx2, M0 address 0x10"),
-    OC_T(.id = "T17", .variant = CS_OC_F3, .addr1 = 0x10, .what = "idx3, M0 address 0x10"),
-    OC_T(.id = "T18", .addr1 = 0x10, .what = "idx0, M0 address 0x10 (bytes or dwords)"),
-    OC_T(.id = "T19", .gy = 4, .wpt = 1, .addr1 = 0x20, .ystride1 = 0x10,
-         .what = "M0 address 0x20 + TGID.y * 0x10"),
-    OC_T(.id = "T20", .ndisp = 2, .what = "2 dispatches in one command buffer"),
-    OC_T(.id = "T21", .gx = 1024, .gy = 4, .wpt = 1, .what = "4096 waves (wave-ID wrap)"),
-    OC_T(.id = "T22", .m0mode = 3, .what = "M0[15:0] = TG_SIZE[17:6] (12 bits)"),
-    OC_T(.id = "T23", .variant = CS_OC_B, .pre_delay = 40, .mid_delay = 200,
-         .what = "2 ops idx0 / idx1, later waves arrive first, odd waves sleep between"),
-    OC_T(.id = "A01", .queue = 1, .gate = 1, .pre_delay = 40, .what = "compute queue: as T01"),
-    OC_T(.id = "A02", .queue = 1, .what = "compute queue: as T02"),
-    OC_T(.id = "A03", .queue = 1, .variant = CS_OC_B, .mid_delay = 200,
-         .what = "compute queue: as T05"),
-    OC_T(.id = "A04", .queue = 1, .variant = CS_OC_C, .mid_delay = 200,
-         .what = "compute queue: as T08"),
-    OC_T(.id = "A05", .queue = 1, .gx = 256, .gy = 4, .wpt = 1,
-         .what = "compute queue: 1024 waves"),
-    OC_T(.id = "R01", .kind = 1, .flags = 0x18, .what = "ORDERED_APPEND_MODE (flags 0x18)"),
+    /* Plain DS_ADD_RTN_U32 gds at VGPR address 0x40, no ordered append: which M0 works. */
+    OC_T(.id = "G00", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x0000FFFFu,
+         .what = "plain ds_add_rtn_u32 gds, M0 0x0000ffff"),
+    OC_T(.id = "G01", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0xFFFF0000u,
+         .what = "plain ds_add_rtn_u32 gds, M0 0xffff0000"),
+    OC_T(.id = "G02", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0xFFFFFFFFu,
+         .what = "plain ds_add_rtn_u32 gds, M0 0xffffffff"),
+    OC_T(.id = "G03", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0,
+         .what = "plain ds_add_rtn_u32 gds, M0 0"),
+    OC_T(.id = "G04", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x04000000u,
+         .what = "plain ds_add_rtn_u32 gds, M0 0x04000000"),
+    OC_T(.id = "G05", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x00000400u,
+         .what = "plain ds_add_rtn_u32 gds, M0 0x00000400"),
+    OC_T(.id = "G06", .variant = CS_OC_PLAIN, .flags = 0, .exec = ~0ULL, .lane_mul = 1,
+         .gds_init = 1, .addr1 = 0x40, .lanes = 1, .m0plain = 0x00400400u,
+         .what = "plain ds_add_rtn_u32 gds, M0 0x00400400"),
+    /* frodo's case: one index, a GDS address per TGID.y; waves arrive in reverse order. */
+    OC_T(.id = "Y01", .gy = 4, .wpt = 1, .addr1 = 0x20, .ystride1 = 0x10, .pre_delay = 40,
+         .what = "idx0, M0 address 0x20 + TGID.y * 0x10, later waves arrive first"),
+    OC_T(.id = "Y02", .gy = 4, .wpt = 1, .addr1 = 0x20, .pre_delay = 40,
+         .what = "control: idx0, one address for all rows, later waves arrive first"),
+    /* Waves arrive in slot order (slot * delay): can wave 0's op2 run before late waves' op1? */
+    OC_T(.id = "F01", .variant = CS_OC_R2, .pre_delay = 40, .pre_fwd = 1,
+         .what = "2 ops both idx0 release, waves arrive in slot order"),
+    OC_T(.id = "F02", .variant = CS_OC_B, .pre_delay = 40, .pre_fwd = 1,
+         .what = "2 ops idx0 / idx1, waves arrive in slot order"),
+    OC_T(.id = "F03", .variant = CS_OC_H4, .pre_delay = 40, .pre_fwd = 1,
+         .what = "2 ops idx0 / idx4, waves arrive in slot order"),
+    /* Wave-ID sequences of compute queues: per queue or per pipe. */
+    OC_T(.id = "Q01", .queue = 1, .gate = 1, .what = "compute queue 1, 16 waves"),
+    OC_T(.id = "Q02", .queue = 2, .gate = 1, .what = "compute queue 2 (same pipe), 16 waves"),
+    OC_T(.id = "Q03", .queue = 1, .what = "compute queue 1 again"),
+    OC_T(.id = "Q04", .queue = 3, .gate = 1, .what = "compute queue 3 (pipe 1), 16 waves"),
+    OC_T(.id = "Q05", .queue = 2, .what = "compute queue 2 again"),
+    /* Risky. */
+    OC_T(.id = "M01", .kind = 1, .flags = 0x18, .skip_odd = 1,
+         .what = "flags 0x18, 2-wave threadgroups, only wave 0 of each group issues the op"),
     OC_PROBE("P01"),
-    OC_T(.id = "R02", .kind = 1, .flags = 0x18, .gx = 8, .gy = 1, .wpt = 1,
-         .what = "flags 0x18, 1-wave threadgroups"),
+    OC_T(.id = "C01", .kind = 1, .variant = CS_OC_C1, .mid_delay = 200,
+         .what = "op1 idx0 no release, op2 idx1 release done"),
     OC_PROBE("P02"),
-    OC_T(.id = "R03", .kind = 1, .variant = CS_OC_R2, .mid_delay = 200,
-         .what = "2 ops, both idx0 with release"),
+    OC_T(.id = "C02", .kind = 1, .variant = CS_OC_C4, .mid_delay = 200,
+         .what = "op1 idx0 no release, op2 idx4 release done"),
     OC_PROBE("P03"),
-    OC_T(.id = "R04", .kind = 1, .variant = CS_OC_R3, .what = "1 op idx0 release, no done"),
-    OC_PROBE("P04"),
-    OC_T(.id = "R05", .kind = 1, .m0mode = 1, .what = "M0[15:0] = 0"),
-    OC_PROBE("P05"),
-    OC_T(.id = "R06", .kind = 1, .m0mode = 2, .what = "M0[15:0] = wave ID + 1"),
-    OC_PROBE("P06"),
-    OC_T(.id = "R07", .kind = 1, .exec = 0, .what = "op with EXEC = 0"),
-    OC_PROBE("P07"),
-    OC_T(.id = "R08", .kind = 1, .skip_odd = 1, .what = "odd waves branch over the op"),
-    OC_PROBE("P08"),
-    OC_T(.id = "R09", .kind = 1, .variant = CS_OC_R4, .what = "idx4"),
-    OC_PROBE("P09"),
-    OC_T(.id = "R10", .kind = 1, .variant = CS_OC_R5, .what = "idx15"),
-    OC_PROBE("P10"),
-    OC_T(.id = "R11", .kind = 1, .variant = CS_OC_R6, .what = "offset1 shader type 1 (PS) in a CS"),
-    OC_PROBE("P11"),
-    OC_T(.id = "R12", .kind = 1, .flags = 0, .what = "ordered op without ORDERED_APPEND_ENBL"),
-    OC_PROBE("P12"),
-    OC_T(.id = "R13", .kind = 1, .variant = CS_OC_R7, .what = "1 op idx0 no release, no done"),
-    OC_PROBE("P13"),
 };
 #pragma clang diagnostic pop
 #define OC_NTESTS ((int)(sizeof(k_oc_tests) / sizeof(k_oc_tests[0])))
@@ -270,7 +251,7 @@ static void oc_x(unsigned long long v, int digits) {
 /* ---- state file: next test, test in flight, queues found hung ---- */
 struct OcState {
     char build[16];
-    int32_t next, inflight, bad[2];
+    int32_t next, inflight, bad[4];
 };
 static void oc_state_save(const struct OcState* st) {
     int fd = sceKernelOpen(g_oc_state_path, 0x601, 0x1FF);
@@ -336,16 +317,24 @@ static void oc_release_mem(struct PM4Builder* b, volatile uint32_t* addr, uint32
     pm4_emit(b, 0);
 }
 
+/* Queue 0: the DCB (graphics ring). Queues 1..3: compute queues mapped here (pipe, queue). */
+static const uint32_t k_oc_queue[3][2] = {{0, 5}, {0, 6}, {1, 5}};
+static const char* const k_oc_qname[4] = {"DCB", "compute queue 1 (pipe 0 queue 5)",
+                                          "compute queue 2 (pipe 0 queue 6)",
+                                          "compute queue 3 (pipe 1 queue 5)"};
+
 struct OcCtx {
     uint8_t* out;
     void* sh[CS_OC_COUNT];
     uint32_t* dcb;
     volatile uint32_t* fence;
     uint32_t fv;
-    uint32_t* ring;
-    volatile uint32_t* rptr;
-    int vqid;
-    uint32_t wptr;
+    struct {
+        uint32_t* ring;
+        volatile uint32_t* rptr;
+        int vqid;
+        uint32_t wptr;
+    } cq[3]; /* queue 1..3 = cq[0..2] */
 };
 
 /* Builds one test's packets into b. */
@@ -423,6 +412,8 @@ static void oc_params(struct OcCtx* c, const struct OcTest* t) {
         p[OC_P_VAL2] = t->val2;
         p[OC_P_YSTRIDE2] = 0;
         p[OC_P_ALT] = t->alt;
+        p[OC_P_PRE_FWD] = t->pre_fwd;
+        p[OC_P_M0_PLAIN] = t->m0plain;
     }
 }
 
@@ -430,9 +421,9 @@ static void oc_params(struct OcCtx* c, const struct OcTest* t) {
 static int oc_submit(struct OcCtx* c, const struct OcTest* t, int q, uint64_t* us) {
     struct PM4Builder b;
     if (q) {
-        if (c->vqid <= 0 || c->wptr + 0x400 > OC_RING_DW)
+        if (c->cq[q - 1].vqid <= 0 || c->cq[q - 1].wptr + 0x400 > OC_RING_DW)
             return -2;
-        pm4_init(&b, c->ring + c->wptr, OC_RING_DW - c->wptr);
+        pm4_init(&b, c->cq[q - 1].ring + c->cq[q - 1].wptr, OC_RING_DW - c->cq[q - 1].wptr);
     } else {
         pm4_init(&b, c->dcb, 0x4000 / 4);
     }
@@ -441,8 +432,8 @@ static int oc_submit(struct OcCtx* c, const struct OcTest* t, int q, uint64_t* u
         return -2;
     uint64_t t0 = sceKernelGetProcessTime();
     if (q) {
-        c->wptr += b.off;
-        sceGnmDingDong((uint32_t)c->vqid, c->wptr);
+        c->cq[q - 1].wptr += b.off;
+        sceGnmDingDong((uint32_t)c->cq[q - 1].vqid, c->cq[q - 1].wptr);
     } else {
         uint32_t sz = b.off * 4;
         void* a[1] = {c->dcb};
@@ -676,9 +667,12 @@ static int ordcnt_run(void) {
     c.out = (uint8_t*)gpu_alloc_typed(OC_OUT_SIZE, 0x10000, MEM_TYPE_ONION);
     c.dcb = (uint32_t*)gpu_alloc_typed(0x4000, 0x4000, MEM_TYPE_ONION);
     c.fence = (volatile uint32_t*)gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
-    c.ring = (uint32_t*)gpu_alloc_typed(OC_RING_DW * 4, 0x4000, MEM_TYPE_ONION);
-    c.rptr = (volatile uint32_t*)gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
-    int ok = c.out && c.dcb && c.fence && c.ring && c.rptr;
+    int ok = c.out && c.dcb && c.fence;
+    for (int i = 0; i < 3; i++) {
+        c.cq[i].ring = (uint32_t*)gpu_alloc_typed(OC_RING_DW * 4, 0x4000, MEM_TYPE_ONION);
+        c.cq[i].rptr = (volatile uint32_t*)gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
+        ok = ok && c.cq[i].ring && c.cq[i].rptr;
+    }
     for (int i = 0; ok && i < CS_OC_COUNT; i++) {
         c.sh[i] = gpu_alloc_typed(k_cs_oc[i].size + 256, 0x1000, MEM_TYPE_ONION);
         if (!c.sh[i] || ((uint64_t)(uintptr_t)c.sh[i] >> 40))
@@ -692,10 +686,20 @@ static int ordcnt_run(void) {
         return 0;
     }
     *c.fence = 0;
-    c.vqid = sceGnmMapComputeQueue(0, 5, c.ring, OC_RING_DW, (void*)c.rptr);
-    oc_s("compute queue: sceGnmMapComputeQueue(pipe 0, queue 5) = ");
-    oc_x((uint32_t)c.vqid, 8);
-    oc_s("\n\n");
+    for (int i = 0; i < 3; i++) {
+        c.cq[i].vqid = sceGnmMapComputeQueue(k_oc_queue[i][0], k_oc_queue[i][1], c.cq[i].ring,
+                                             OC_RING_DW, (void*)c.cq[i].rptr);
+        oc_s("compute queue ");
+        oc_u(i + 1);
+        oc_s(": sceGnmMapComputeQueue(pipe ");
+        oc_u(k_oc_queue[i][0]);
+        oc_s(", queue ");
+        oc_u(k_oc_queue[i][1]);
+        oc_s(") = ");
+        oc_x((uint32_t)c.cq[i].vqid, 8);
+        oc_s("\n");
+    }
+    oc_s("\n");
     oc_flush();
     for (int k = st.next; k < OC_NTESTS; k++) {
         const struct OcTest* t = &k_oc_tests[k];
@@ -710,7 +714,7 @@ static int ordcnt_run(void) {
         oc_s("\nvariant ");
         oc_s(k_cs_oc[t->variant].name);
         oc_s(", ");
-        oc_s(q ? "compute queue" : "DCB");
+        oc_s(k_oc_qname[q]);
         oc_s(", flags ");
         oc_x(t->flags, 2);
         oc_s(", grid ");

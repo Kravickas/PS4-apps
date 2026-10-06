@@ -44,6 +44,9 @@ VARIANTS = [
     ("r5", 0xC0DE0C0E, ("ord", 15, 1, 1, 0, V_VAL1, 0, 0), None),
     ("r6", 0xC0DE0C0F, ("ord", 0, 1, 1, 0, V_VAL1, 0, 1), None),
     ("r7", 0xC0DE0C10, ("ord", 0, 0, 0, 0, V_VAL1, 0, 0), None),
+    ("h4", 0xC0DE0C11, ("ord", 0, 1, 0, 0, V_VAL1, 0, 0), ("ord", 4, 1, 1, 0, V_VAL2, 0, 0)),
+    ("c1", 0xC0DE0C12, ("ord", 0, 0, 0, 0, V_VAL1, 0, 0), ("ord", 1, 1, 1, 0, V_VAL2, 0, 0)),
+    ("c4", 0xC0DE0C13, ("ord", 0, 0, 0, 0, V_VAL1, 0, 0), ("ord", 4, 1, 1, 0, V_VAL2, 0, 0)),
 ]
 
 
@@ -80,7 +83,7 @@ def ds_short(op):
 
 def op_block(op, m0_sgpr, vdst, ret_sgpr, tb, ta):
     w0, w1 = ds_words(op, vdst)
-    m0 = "s_mov_b32 m0, 0xffff" if op[0] == "plain" else "s_mov_b32 m0, %s" % m0_sgpr
+    m0 = "s_mov_b32 m0, s37" if op[0] == "plain" else "s_mov_b32 m0, %s" % m0_sgpr
     return [
         "s_memtime %s" % tb,
         m0,
@@ -92,7 +95,7 @@ def op_block(op, m0_sgpr, vdst, ret_sgpr, tb, ta):
         "s_waitcnt lgkmcnt(0)",
         "s_mov_b64 exec, -1",
         "s_memtime %s" % ta,
-        "s_mov_b32 m0, 0xffff",
+        "s_mov_b32 m0, s37",
         "s_mov_b64 exec, 1",
         "s_nop 1",
         "ds_add_rtn_u32 v8, v9, v10 gds",
@@ -200,6 +203,8 @@ def shader(name, op1, op2):
         "s_cbranch_scc1 %s_skip" % name,
         "s_sub_u32 s62, s29, 1",
         "s_sub_u32 s62, s62, s41",
+        "s_cmp_lg_u32 s36, 0",
+        "s_cselect_b32 s62, s41, s62",
         "s_mul_i32 s62, s62, s21",
     ]
     a += delay(name + "_pre", "s62")
