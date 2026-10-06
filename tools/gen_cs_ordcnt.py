@@ -52,8 +52,8 @@ VARIANTS = [
 ]
 
 
-def o(index, release, done, val, swap=0):
-    return ("ord", index, release, done, swap, val, 0, 0)
+def o(index, release, done, val, swap=0, stype=0, x1=0, gds=1):
+    return ("ord", index, release, done, swap, val, 0, stype, x1, gds)
 
 
 # Three-op variants: name, hash, [(op for even slots, op for odd slots or None = skip), ...].
@@ -77,6 +77,25 @@ VARIANTS3 += [
     ("dd", 0xC0DE0C34, [(o(0, 1, 1, V_VAL1),) * 2, (o(1, 1, 1, V_VAL2),) * 2]),
     # an op on idx0 after a done on idx0
     ("ad", 0xC0DE0C35, [(o(0, 1, 1, V_VAL1),) * 2, (o(0, 1, 1, V_VAL2),) * 2]),
+    # release, no release, release done
+    ("rnr", 0xC0DE0C36, [(o(0, 1, 0, V_VAL1),) * 2, (o(0, 0, 0, V_VAL2),) * 2,
+                         (o(0, 1, 1, V_VAL3),) * 2]),
+    # even slots three steps, odd slots one
+    ("u31", 0xC0DE0C37, [(o(0, 1, 0, V_VAL1), o(0, 1, 1, V_VAL1)), (o(0, 1, 0, V_VAL2), None),
+                         (o(0, 1, 1, V_VAL3), None)]),
+    # even slots one step, odd slots three
+    ("u13", 0xC0DE0C38, [(o(0, 1, 1, V_VAL1), o(0, 1, 0, V_VAL1)), (None, o(0, 1, 0, V_VAL2)),
+                         (None, o(0, 1, 1, V_VAL3))]),
+    # even slots two steps, odd slots three
+    ("u23", 0xC0DE0C39, [(o(0, 1, 0, V_VAL1),) * 2, (o(0, 1, 1, V_VAL2), o(0, 1, 0, V_VAL2)),
+                         (None, o(0, 1, 1, V_VAL3))]),
+    # field probes: shader type 2 / 3, offset1 bits 5 / 6 / 7, GDS bit 0
+    ("t2", 0xC0DE0C3A, [(o(0, 1, 1, V_VAL1, stype=2),) * 2]),
+    ("t3", 0xC0DE0C3B, [(o(0, 1, 1, V_VAL1, stype=3),) * 2]),
+    ("x5", 0xC0DE0C3C, [(o(0, 1, 1, V_VAL1, x1=0x20),) * 2]),
+    ("x6", 0xC0DE0C3D, [(o(0, 1, 1, V_VAL1, x1=0x40),) * 2]),
+    ("x7", 0xC0DE0C3E, [(o(0, 1, 1, V_VAL1, x1=0x80),) * 2]),
+    ("lds", 0xC0DE0C3F, [(o(0, 1, 1, V_VAL1, gds=0),) * 2]),
 ]
 
 # GDS window shaders (no ordered ops): wave TGID.x covers GDS bytes [TGID.x * 0x400, +0x400) through
@@ -120,20 +139,26 @@ def window_shader(name, fill):
     return a
 
 
+def op_x(op):
+    """Optional op fields: extra offset1 bits (x1, bits 7:5) and the GDS bit (default 1)."""
+    return (op[8] if len(op) > 8 else 0), (op[9] if len(op) > 9 else 1)
+
+
 def ds_words(op, vdst):
-    kind, index, release, done, swap, addr, data0, stype = op
+    kind, index, release, done, swap, addr, data0, stype = op[:8]
+    x1, gds = op_x(op)
     if kind == "plain":
         dw0 = (1 << 17) | (OP_ADD_RTN_U32 << 18) | (0x36 << 26)
     else:
         off0 = (index << 2) & 0xFF
-        off1 = release | (done << 1) | (stype << 2) | (swap << 4)
-        dw0 = off0 | (off1 << 8) | (1 << 17) | (OP_ORDERED << 18) | (0x36 << 26)
+        off1 = release | (done << 1) | (stype << 2) | (swap << 4) | x1
+        dw0 = off0 | (off1 << 8) | (gds << 17) | (OP_ORDERED << 18) | (0x36 << 26)
     dw1 = addr | (data0 << 8) | (vdst << 24)
     return dw0, dw1
 
 
 def ds_text(op, vdst):
-    kind, index, release, done, swap, addr, data0, stype = op
+    kind, index, release, done, swap, addr, data0, stype = op[:8]
     if kind == "plain":
         return "ds_add_rtn_u32 v%d, v%d, v%d gds" % (vdst, addr, data0)
     return "ds_ordered_count v%d, addr v%d, data0 v%d, idx %d rel %d done %d type %d %s gds" % (
@@ -141,13 +166,18 @@ def ds_text(op, vdst):
 
 
 def ds_short(op):
-    kind, index, release, done, swap, addr, data0, stype = op
+    kind, index, release, done, swap, addr, data0, stype = op[:8]
+    x1, gds = op_x(op)
     if kind == "plain":
         return "ds_add_rtn_u32 gds"
     f = ["idx%d" % index] + (["rel"] if release else []) + (["done"] if done else [])
     f += ["swap" if swap else "add", "a=v%d d0=v%d" % (addr, data0)]
     if stype:
         f.append("type%d" % stype)
+    if x1:
+        f.append("offset1|0x%02x" % x1)
+    if not gds:
+        f.append("gds=0")
     return " ".join(f)
 
 
@@ -227,7 +257,8 @@ def slot_block(name, k, even, odd):
     a = ["s_and_b32 s46, s41, 1",
          "s_cmp_eq_u32 s46, 0",
          "s_cbranch_scc0 %s_odd%d" % (name, k)]
-    a += op_block(even, m0, ret, tk, tb, ta)
+    if even:
+        a += op_block(even, m0, ret, tk, tb, ta)
     a += ["s_branch %s_join%d" % (name, k), "%s_odd%d:" % (name, k)]
     if odd:
         a += op_block(odd, m0, ret, tk, tb, ta)
@@ -300,8 +331,14 @@ def shader(name, slots):
         "s_mov_b64 s[68:69], 0",
         "s_mov_b32 s70, -1",
         "s_mov_b32 s64, 0x0dc0ffee",
-        "s_and_b32 s63, s41, 1",
-        "s_and_b32 s63, s63, s31",
+        # skip when SKIP[15:0] != 0 and (slot & SKIP[15:0]) != SKIP[31:16]
+        "s_and_b32 s46, s31, 0xffff",
+        "s_lshr_b32 s47, s31, 16",
+        "s_and_b32 s63, s41, s46",
+        "s_cmp_lg_u32 s63, s47",
+        "s_cselect_b32 s63, 1, 0",
+        "s_cmp_eq_u32 s46, 0",
+        "s_cselect_b32 s63, 0, s63",
         "s_cmp_lg_u32 s63, 0",
         "s_cbranch_scc1 %s_skip" % name,
         "s_sub_u32 s62, s29, 1",
@@ -313,7 +350,14 @@ def shader(name, slots):
     a += delay(name + "_pre", "s62")
     a += slot_block(name, 0, *slots[0])
     if len(slots) > 1:
-        a += ["s_and_b32 s62, s41, 1", "s_mul_i32 s62, s62, s22"]
+        # waves with (slot & MID_SEL[15:0]) == MID_SEL[31:16] sleep MID iterations; 0 = odd slots
+        a += ["s_cmp_eq_u32 s82, 0",
+              "s_cselect_b32 s46, 0x10001, s82",
+              "s_and_b32 s47, s46, 0xffff",
+              "s_lshr_b32 s46, s46, 16",
+              "s_and_b32 s62, s41, s47",
+              "s_cmp_eq_u32 s62, s46",
+              "s_cselect_b32 s62, s22, 0"]
         a += delay(name + "_mid", "s62")
         a += slot_block(name, 1, *slots[1])
     if len(slots) > 2:
@@ -404,7 +448,7 @@ def main():
             if even == odd:
                 desc.append("op%d %s" % (k + 1, ds_short(even)))
             else:
-                desc.append("op%d even %s, odd %s" % (k + 1, ds_short(even),
+                desc.append("op%d even %s, odd %s" % (k + 1, ds_short(even) if even else "none",
                                                         ds_short(odd) if odd else "none"))
         out_h += comment("%s: %s. Hash %08X." % (name, "; ".join(desc), h))
         out_h.append("static const uint32_t cs_oc_%s[] __attribute__((aligned(256))) = {" % name)
