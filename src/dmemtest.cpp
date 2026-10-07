@@ -1420,6 +1420,46 @@ static void run_h() {
     release_all(pa, 2);
 }
 
+// ---- H7: checked release beyond dmem, boundary found on the console ----------------------------
+
+static int32_t chk(uint64_t start, uint64_t len) {
+    return sceKernelCheckedReleaseDirectMemory((long)start, len);
+}
+
+static void run_h7() {
+    say("== H7 checked release past dmem end: ENOENT below X, OK from X; start in [1<<33, 1<<40]");
+    const uint64_t lo0 = 1ull << 33, hi0 = 1ull << 40;
+    {
+        Line l = head("H7", "16 samples 1<<33..1<<40 chk/rel");
+        for (int i = 0; i < 16; i++)
+            l.c(code(chk((lo0 + (hi0 - lo0) / 15 * i) & ~(PG - 1), PG)));
+        l.c(' ');
+        for (int i = 0; i < 16; i++)
+            l.c(code(sceKernelReleaseDirectMemory(
+                (long)((lo0 + (hi0 - lo0) / 15 * i) & ~(PG - 1)), PG)));
+        l.end();
+    }
+    if (chk(lo0, PG) == 0 || chk(hi0, PG) != 0)
+        return say("H8   SKIP not bracketed");
+    uint64_t lo = lo0, hi = hi0;
+    while (hi - lo > PG) {
+        uint64_t mid = (lo + (hi - lo) / 2) & ~(PG - 1);
+        if (mid <= lo)
+            mid = lo + PG;
+        if (chk(mid, PG) == 0)
+            hi = mid;
+        else
+            lo = mid;
+    }
+    {
+        Line l = head("H8", "boundary X");
+        l.s("X=").hex(hi).s(" X-4000:").c(code(chk(hi - PG, PG))).s(" X:").c(code(chk(hi, PG)));
+        l.s(" X+4000:").c(code(chk(hi + PG, PG))).s(" X-4000,len8000:");
+        l.c(code(chk(hi - PG, 2 * PG))).s(" 1<<33,len to X+4000:");
+        l.c(code(chk(lo0, hi + PG - lo0))).end();
+    }
+}
+
 // ---- P2: memory pool with a 2 MiB reservation ---------------------------------------------------
 
 struct PoolStats {
@@ -1526,6 +1566,90 @@ static void run_p2() {
     release_all(b, 4);
 }
 
+// ---- P4: pool block counters through commit, decommit and unmap ---------------------------------
+
+static void p_line(const char* id, const char* name, const char* tag, int32_t r) {
+    Line l = head(id, name);
+    l.ret(tag, r);
+    stats(l).end();
+}
+
+static void run_p4() {
+    say("== P4 pool counters; stats = avail flushed/cached, alloc flushed/cached");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    {
+        Line l = head("P40", "stats before");
+        stats(l).end();
+    }
+    uint64_t px = 0;
+    p_line("P41", "expand 4 blocks", "ret", sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px));
+    void* r1 = 0;
+    void* r2 = 0;
+    const int32_t a1 = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r1);
+    const int32_t a2 = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r2);
+    {
+        Line l = head("P42", "reserve R1, R2 (2M each)");
+        l.ret("r1", a1).ret("r2", a2);
+        stats(l).end();
+    }
+    if (a1 != 0 || a2 != 0)
+        return say("P43  SKIP reserve");
+    uint8_t* b1 = (uint8_t*)r1;
+    uint8_t* b2 = (uint8_t*)r2;
+    p_line("P43", "commit R1+0 64K t3", "ret", sceKernelMemoryPoolCommit(b1, blk, 3, 0x3, 0));
+    p_line("P44", "commit R1+10000 64K t3", "ret",
+           sceKernelMemoryPoolCommit(b1 + blk, blk, 3, 0x3, 0));
+    p_line("P45", "commit R2+0 64K t0", "ret", sceKernelMemoryPoolCommit(b2, blk, 0, 0x3, 0));
+    p_line("P46", "commit R1+20000 128K t3", "ret",
+           sceKernelMemoryPoolCommit(b1 + 2 * blk, 2 * blk, 3, 0x3, 0));
+    p_line("P47", "decommit R1+10000 64K", "ret", sceKernelMemoryPoolDecommit(b1 + blk, blk, 0));
+    p_line("P48", "decommit R1+0 64K", "ret", sceKernelMemoryPoolDecommit(b1, blk, 0));
+    p_line("P49", "decommit R1+20000 128K", "ret",
+           sceKernelMemoryPoolDecommit(b1 + 2 * blk, 2 * blk, 0));
+    p_line("P50", "munmap R1 (all decommitted)", "ret", sceKernelMunmap(b1, rsv));
+    void* r3 = 0;
+    const int32_t a3 = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r3);
+    const int32_t c3 = a3 == 0 ? sceKernelMemoryPoolCommit(r3, blk, 3, 0x3, 0) : -1;
+    {
+        Line l = head("P51", "reserve R3, commit 64K t3");
+        l.ret("res", a3).ret("commit", c3);
+        stats(l).end();
+    }
+    {
+        const int32_t ru = sceKernelMunmap(b2, rsv);
+        int32_t pr = 0;
+        Line l = head("P52", "munmap R2, 64K still committed");
+        l.ret("ret", ru).s("va=").c(mapped(b2, &pr) ? 'M' : '.').c(' ');
+        stats(l).end();
+    }
+    if (a3 == 0) {
+        const int32_t ru = sceKernelMunmap(r3, rsv);
+        int32_t pr = 0;
+        Line l = head("P53", "munmap R3, 64K still committed");
+        l.ret("ret", ru).s("va=").c(mapped(r3, &pr) ? 'M' : '.').c(' ');
+        stats(l).end();
+    }
+}
+
+// Window big enough for the length but with no aligned fit inside it; free space right after.
+static void run_p54() {
+    const uint64_t blk = 0x10000;
+    int32_t r = 0;
+    const long c = alloc_al(0, g_dmem, 12, blk, 3, &r);
+    if (c < 0)
+        return setup_failed("P54", "expand window", "alloc", r);
+    sceKernelReleaseDirectMemory(c + (long)PG, 11 * PG);
+    uint64_t px = 0;
+    const int32_t rx =
+        sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + 0x14000, blk, blk, &px);
+    Line l = head("P54", "expand, window 14000, no fit inside");
+    l.ret("ret", rx);
+    if (rx == 0)
+        l.s("at=").shex((long long)(px - (uint64_t)c));
+    l.end();
+    release_all(c, 1);
+}
+
 // ---- R: positive oversized length on a real allocation ---------------------------------------
 
 static void run_r() {
@@ -1619,8 +1743,11 @@ int main(void) {
         run_e();
         run_f();
         run_h();
+        run_h7();
         run_p();
         run_p2();
+        run_p4();
+        run_p54();
         run_c();
         run_g();
         run_r();

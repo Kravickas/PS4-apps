@@ -28,6 +28,11 @@ SECTIONS
   P  memory pool expand / commit / decommit, and releasing pooled memory
   H  ladders: release start values, every single-bit query flag, memory types -2..12,
      available-size alignments, null outputs, bytes written by a failing query
+  H7 checked release past the end of dmem: 16 samples, then H8 bisects on the console for the
+     first start that returns OK, with checks either side of it
+  P4 pool block counters through expand, two reservations, commits of type 3 and 0, decommits,
+     munmap of an empty reservation and of reservations that still hold committed memory
+  P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
      expand with a search window smaller than the length
