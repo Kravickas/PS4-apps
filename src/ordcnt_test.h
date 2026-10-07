@@ -26,7 +26,7 @@ extern int sceGnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t tgx, uint
 extern int sceGnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size);
 extern void sceGnmDingDong(uint32_t vqid, uint32_t next_offs_dw);
 
-#define OC_BUILD "ordcnt-7"
+#define OC_BUILD "ordcnt-9"
 #define OC_TIMEOUT_US 2000000u
 
 #define OC_OUT_SIZE 0x400000u /* params, GDS images, records */
@@ -114,6 +114,14 @@ struct OcTest {
     uint8_t variant, queue, flags, kind; /* kind: 0 safe, 1 risky, 2 probe */
     uint8_t gate; /* a hang here means the queue cannot run ordered dispatches: skip its others */
     uint8_t pre_fwd;
+    /* Graphics-stage tests (gfx 1: pixel shader under test, 2: vertex shader under test) */
+    uint8_t gfx, wave_cnt_en, k_auto, k, cshift, do_op, detect; /* detect: 2 GP0, 1 GP1 */
+    uint32_t cmask;
+    uint16_t nverts;
+    /* Sequence tests (conf / steps) */
+    uint32_t seed;
+    uint8_t nsteps, sleep_slot, sleep_step;
+    uint32_t sleep_iter;
     uint8_t nogds;      /* no CP DMA of GDS 0..0x3FF before / after */
     uint8_t nregs;      /* registers read with COPY_DATA before the dispatches ... */
     uint8_t regs_after; /* ... and after them */
@@ -151,6 +159,84 @@ static const struct OcTest k_oc_tests[] = {
          "compute queue 1: 2048 1-wave groups, wave 0 sleeps, the rest wait"),
     OC_L("L07", 0, 6, 5, 4, 1, 0, 0, "grid 6x5x4 of 1-wave groups, no delays"),
 #undef OC_L
+/* Model conformance: each wave runs up to 3 random ops (no release / release, index 0..3)
+   and a final release + done op, with random sleeps (.pre_delay = sleep unit); all ops add 1
+   to GDS 0x40. The checker replays the measured order through the release-step model. */
+#define OC_C(n, q, sd, x, w)                                                                       \
+    OC_T(.id = n, .variant = CS_OC_CONF, .queue = q, .seed = sd, .gx = x, .gy = 1, .wpt = w,       \
+         .pre_delay = 4, .what = "model conformance, seed " #sd)
+    OC_C("C01", 0, 1, 32, 1),
+    OC_C("C02", 0, 2, 32, 1),
+    OC_C("C03", 0, 3, 32, 1),
+    OC_C("C04", 0, 4, 32, 1),
+    OC_C("C05", 0, 5, 32, 1),
+    OC_C("C06", 0, 6, 32, 1),
+    OC_C("C07", 0, 7, 32, 1),
+    OC_C("C08", 0, 8, 32, 1),
+    OC_C("C09", 0, 9, 16, 2),
+    OC_C("C10", 1, 10, 32, 1),
+#undef OC_C
+    /* EXEC = 0 with GDS 0x77: what comes back, and whether anything is written. */
+    OC_T(.id = "E01", .exec = 0, .gds_init = 2, .gds_val = 0x77, .what = "EXEC = 0, add, GDS 0x77"),
+    OC_T(.id = "E02", .variant = CS_OC_D, .exec = 0, .val1 = 100, .slot_mul = 1, .gds_init = 2,
+         .gds_val = 0x77, .what = "EXEC = 0, swap (100+slot), GDS 0x77"),
+    /* Graphics stages. GP0 / GP1: pixel-shader waves dump their starting SGPRs without and with
+       the pixel shader's wave-count enable (SPI_SHADER_PGM_RSRC2_PS bit 7), no ordered op. GV0:
+       vertex-shader waves (1024 vertices of zero-area triangles) dump theirs. */
+    OC_T(.id = "GP0", .kind = 3, .gfx = 1, .variant = CS_OC_GPS, .nverts = 6, .detect = 2,
+         .what = "pixel shader, wave count off: starting SGPRs (64x64 pixels)"),
+    OC_T(.id = "GP1", .kind = 3, .gfx = 1, .variant = CS_OC_GPS, .nverts = 6, .wave_cnt_en = 1,
+         .detect = 1, .what = "pixel shader, wave count on: starting SGPRs (64x64 pixels)"),
+    OC_T(.id = "GV0", .kind = 3, .gfx = 2, .variant = CS_OC_GVS, .nverts = 1024,
+         .what = "vertex shader: starting SGPRs (1024 vertices)"),
+    /* Risky: ordered ops in graphics stages. */
+    OC_T(.id = "GPA", .kind = 1, .gfx = 1, .variant = CS_OC_GPS, .nverts = 6, .wave_cnt_en = 1,
+         .k_auto = 1, .cmask = 0xFFFF, .do_op = 1,
+         .what = "pixel shader, type 1 (PS), M0 ID = wave-count SGPR bits 15:0"),
+    OC_PROBE("P10"),
+    OC_T(.id = "GPB", .kind = 1, .gfx = 1, .variant = CS_OC_GPS, .nverts = 6, .wave_cnt_en = 1,
+         .k_auto = 1, .cshift = 6, .cmask = 0x7FF, .do_op = 1,
+         .what = "pixel shader, type 1 (PS), M0 ID = wave-count SGPR bits 16:6"),
+    OC_PROBE("P11"),
+    OC_T(.id = "GPC", .kind = 1, .gfx = 1, .variant = CS_OC_GPS, .nverts = 6, .wave_cnt_en = 1,
+         .cmask = 0, .do_op = 1, .what = "pixel shader, type 1 (PS), M0 ID = 0"),
+    OC_PROBE("P12"),
+    OC_T(.id = "GPD", .kind = 1, .gfx = 1, .variant = CS_OC_GPS0, .nverts = 6, .wave_cnt_en = 1,
+         .k_auto = 1, .cmask = 0xFFFF, .do_op = 1,
+         .what = "pixel shader, type 0 (compute), M0 ID = wave-count SGPR bits 15:0"),
+    OC_PROBE("P13"),
+    OC_T(.id = "GVA", .kind = 1, .gfx = 2, .variant = CS_OC_GVS, .nverts = 1024, .cmask = 0,
+         .do_op = 1, .what = "vertex shader, type 2 (VS), M0 ID = 0"),
+    OC_PROBE("P14"),
+/* Risky: more release steps per wave (8 one-wave groups; wave 0 sleeps before step
+   nsteps / 2). */
+#define OC_S(n, k, pn)                                                                             \
+    OC_T(.id = n, .kind = 1, .variant = CS_OC_STEPS, .gx = 8, .gy = 1, .wpt = 1, .nsteps = k,      \
+         .sleep_slot = 0, .sleep_step = k / 2, .sleep_iter = 200,                                  \
+         .what = #k " release steps per wave, wave 0 sleeps before step " #k "/2"),                \
+        OC_PROBE(pn)
+    OC_S("S04", 4, "P20"),
+    OC_S("S05", 5, "P21"),
+    OC_S("S08", 8, "P22"),
+    OC_S("S16", 16, "P23"),
+#undef OC_S
+    /* Risky: M0 addresses not on a dword boundary (GDS init 0, value 1). */
+    OC_T(.id = "A11", .kind = 1, .addr1 = 0x11, .what = "idx0, M0 address 0x11"),
+    OC_PROBE("P24"),
+    OC_T(.id = "A12", .kind = 1, .addr1 = 0x12, .what = "idx0, M0 address 0x12"),
+    OC_PROBE("P25"),
+    OC_T(.id = "A13", .kind = 1, .addr1 = 0x13, .what = "idx0, M0 address 0x13"),
+    OC_PROBE("P26"),
+    OC_T(.id = "A14", .kind = 1, .variant = CS_OC_F1, .addr1 = 0x11,
+         .what = "idx1, M0 address 0x11"),
+    OC_PROBE("P27"),
+    /* Risky: per-threadgroup IDs (flags 0x18) with more than one op. */
+    OC_T(.id = "M04", .kind = 1, .flags = 0x18, .variant = CS_OC_B, .addr2 = 0x100, .skip = 0x1,
+         .what = "flags 0x18, 2-wave groups, wave 0 issues idx0 release then idx1 release done"),
+    OC_PROBE("P28"),
+    OC_T(.id = "M05", .kind = 1, .flags = 0x18, .variant = CS_OC_TGS, .addr2 = 0x100,
+         .what = "flags 0x18, 2-wave groups, wave 0 issues idx0 release, wave 1 idx1 done"),
+    OC_PROBE("P29"),
     /* Risky: offset1 bit 5. */
     OC_T(.id = "B01", .kind = 1, .variant = CS_OC_X5,
          .what = "bit 5, value 1 in lane 0 (repeat of Z03)"),
@@ -249,7 +335,9 @@ static void oc_x(unsigned long long v, int digits) {
 struct OcState {
     char build[16];
     int32_t next, inflight, bad[4];
+    int32_t gfx_bad, gfx_k, gp0_mask; /* graphics harness hung; wave-count SGPR; GP0 result */
 };
+static int32_t g_oc_gfx_k = -1, g_oc_gp0_mask = -1, g_oc_k = 0;
 static void oc_state_save(const struct OcState* st) {
     int fd = sceKernelOpen(g_oc_state_path, 0x601, 0x1FF);
     if (fd < 0) {
@@ -360,7 +448,10 @@ enum {
 static uint32_t oc_waves(const struct OcTest* t) {
     return (uint32_t)t->gx * t->gy * t->gz * t->wpt * t->ndisp;
 }
+#define OC_SEQ_REC 256u
 static uint32_t oc_rec_bytes(const struct OcTest* t) {
+    if (t->variant == CS_OC_CONF || t->variant == CS_OC_STEPS)
+        return OC_SEQ_REC;
     return t->variant == CS_OC_LEAN ? OC_LEAN_REC : OC_REC_BYTES;
 }
 
@@ -378,6 +469,96 @@ struct OcCtx {
     } cq[3]; /* queue 1..3 = cq[0..2] */
 };
 
+/* Graphics draw for gfx tests (DCB only): a VS (gvs, params / records at out + 0x100) and a PS
+   (gps / gps0, params at out), no colour or depth target (EXEC_ON_NOOP keeps the PS running),
+   64 x 64 viewport, nverts auto-indexed vertices whose positions the CPU puts at
+   out + 0x100 + 0x40000. Register setup as build_shadow_dcb in main.c. */
+#define OC_GFX_VS_REC 0x80000u
+static void oc_build_gfx(struct PM4Builder* b, struct OcCtx* c, const struct OcTest* t) {
+    uint32_t v[4];
+    pm4_context_control(b);
+    int ps = t->gfx == 1 ? t->variant : CS_OC_GPS;
+    uint64_t va = (uint64_t)(uintptr_t)c->sh[CS_OC_GVS], pa = (uint64_t)(uintptr_t)c->sh[ps];
+    uint32_t vr[4] = {(uint32_t)(va >> 8), (uint32_t)(va >> 40), k_cs_oc[CS_OC_GVS].rsrc1,
+                      k_cs_oc[CS_OC_GVS].rsrc2};
+    pm4_set_sh_regs(b, SH_VS_PGM_LO, vr, 4);
+    build_vsharp(v, c->out + 0x100, OC_OUT_SIZE - 0x100);
+    pm4_set_sh_regs(b, SH_VS_USER_DATA_0, v, 4);
+    uint32_t pr[4] = {(uint32_t)(pa >> 8), (uint32_t)(pa >> 40), k_cs_oc[ps].rsrc1,
+                      k_cs_oc[ps].rsrc2 | ((uint32_t)t->wave_cnt_en << 7)};
+    pm4_set_sh_regs(b, SH_PS_PGM_LO, pr, 4);
+    build_vsharp(v, c->out, OC_OUT_SIZE);
+    pm4_set_sh_regs(b, SH_PS_USER_DATA_0, v, 4);
+    pm4_set_context_reg(b, CTX_WINDOW_OFFSET, 0);
+    pm4_set_context_reg(b, CTX_VGT_GS_ONCHIP_CNTL, VGT_GS_ONCHIP_CNTL_SAFE);
+    {
+        uint32_t sc[2] = {0, 64u | (64u << 16)};
+        pm4_set_context_regs(b, CTX_SCREEN_SCISSOR, sc, 2);
+        pm4_set_context_regs(b, CTX_VIEWPORT_SCISSOR0, sc, 2);
+        sc[0] = 1u << 31; /* WINDOW_OFFSET_DISABLE */
+        pm4_set_context_regs(b, CTX_GENERIC_SCISSOR, sc, 2);
+        pm4_set_context_regs(b, CTX_WINDOW_SCISSOR, sc, 2);
+    }
+    pm4_emit(b, pm4_type3(PM4_SET_CONTEXT_REG, 7));
+    pm4_emit(b, CTX_VIEWPORT0);
+    pm4_emit_f(b, 32.0f);
+    pm4_emit_f(b, 32.0f);
+    pm4_emit_f(b, 32.0f);
+    pm4_emit_f(b, 32.0f);
+    pm4_emit_f(b, 1.0f);
+    pm4_emit_f(b, 0.0f);
+    {
+        uint32_t z[2] = {0x00000000u, 0x3F800000u}; /* 0.0, 1.0 */
+        pm4_set_context_regs(b, CTX_VIEWPORT_ZMIN0, z, 2);
+    }
+    pm4_set_context_reg(b, CTX_INDEX_OFFSET, 0);
+    {
+        uint32_t cb[14] = {0}; /* CB_COLOR0_INFO 0: no colour target */
+        pm4_set_context_regs(b, CTX_CB_COLOR0_BASE, cb, 14);
+    }
+    pm4_set_context_reg(b, CTX_COLOR_TARGET_MASK, 0);
+    pm4_set_context_reg(b, CTX_COLOR_SHADER_MASK, 0);
+    pm4_set_context_reg(b, CTX_DEPTH_CONTROL, 0);
+    pm4_set_context_reg(b, CTX_DEPTH_RENDER_CONTROL, 0);
+    pm4_set_context_reg(b, CTX_DB_Z_INFO, 0);
+    pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0, 0);
+    pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 0); /* one parameter */
+    pm4_set_context_reg(b, CTX_PS_INPUT_ENA, 0x02);  /* PERSP_CENTER */
+    pm4_set_context_reg(b, CTX_PS_INPUT_ADDR, 0x02);
+    pm4_set_context_reg(b, CTX_NUM_INTERP, 1);
+    pm4_set_context_reg(b, CTX_SHADER_POS_FORMAT, 4);
+    pm4_set_context_reg(b, CTX_Z_EXPORT_FORMAT, 0);
+    pm4_set_context_reg(b, CTX_COLOR_EXPORT_FORMAT, 0);
+    pm4_set_context_reg(b, CTX_COLOR_CONTROL, 0x00CC0010u);
+    /* EXEC_ON_HIER_FAIL (bit 9) | EXEC_ON_NOOP (bit 10), gfx_7_2_sh_mask.h: run the PS although
+       it writes no target (it writes memory) */
+    pm4_set_context_reg(b, CTX_DB_SHADER_CONTROL, (1u << 9) | (1u << 10));
+    pm4_set_context_reg(b, CTX_SPI_BARYC_CNTL, 0);
+    pm4_set_context_reg(b, CTX_CLIPPER_CONTROL, 1u << 19);
+    pm4_set_context_reg(b, CTX_VIEWPORT_CONTROL, 0x43F);
+    pm4_set_context_reg(b, CTX_VS_OUTPUT_CONTROL, 0);
+    /* single-sample state, as emit_msaa_state(b, 1) in main.c */
+    {
+        uint32_t locs[16] = {0}, cp[2] = {0, 0}, mask[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+        pm4_set_context_reg(b, CTX_AA_CONFIG, 0);
+        pm4_set_context_reg(b, CTX_MODE_CONTROL, 0);
+        pm4_set_context_reg(b, CTX_DB_EQAA, (1u << 16) | (1u << 17) | (1u << 20));
+        pm4_set_context_regs(b, CTX_PA_SC_AA_MASK_X0Y0_X1Y0, mask, 2);
+        pm4_set_context_regs(b, CTX_PA_SC_CENTROID_PRIORITY_0, cp, 2);
+        pm4_set_context_regs(b, CTX_PA_SC_AA_SAMPLE_LOCS_X0Y0_0, locs, 16);
+        pm4_set_context_reg(b, CTX_DB_RENDER_OVERRIDE2, 0);
+    }
+    pm4_set_context_reg(b, CTX_BLEND_CONTROL0, 0);
+    pm4_set_context_reg(b, CTX_POLYGON_CONTROL, 0);
+    pm4_set_uconfig_reg(b, UCFG_PRIMITIVE_TYPE, 4);
+    pm4_set_uconfig_reg(b, UCFG_NUM_INSTANCES, 1);
+    pm4_draw_index_auto(b, t->nverts);
+    pm4_emit(b, pm4_type3(0x46, 1));
+    pm4_emit(b, 0x0Fu | (4u << 8)); /* EVENT_WRITE VS_PARTIAL_FLUSH */
+    pm4_emit(b, pm4_type3(0x46, 1));
+    pm4_emit(b, 0x10u | (4u << 8)); /* EVENT_WRITE PS_PARTIAL_FLUSH */
+}
+
 /* Builds one test's packets into b. */
 static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest* t, int q) {
     uint32_t avail = b->cap - b->off;
@@ -390,8 +571,10 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
         oc_dma(b, 0, (uint64_t)(uintptr_t)(c->out + OC_GDS_INIT), 1, 0, OC_GDS_BYTES);
     for (int i = 0; i < t->nregs; i++)
         oc_copy_reg(b, t->regs[i], c->out + OC_REG_PRE + i * 4);
+    if (t->gfx)
+        oc_build_gfx(b, c, t);
     uint64_t sa = (uint64_t)(uintptr_t)c->sh[t->variant];
-    for (int d = 0; d < t->ndisp; d++) {
+    for (int d = 0; !t->gfx && d < t->ndisp; d++) {
         uint8_t* base = c->out + d * 0x100;
         uint32_t v[4];
         build_vsharp(v, base, OC_OUT_SIZE - d * 0x100);
@@ -432,6 +615,40 @@ static void oc_build(struct PM4Builder* b, struct OcCtx* c, const struct OcTest*
 static void oc_params(struct OcCtx* c, const struct OcTest* t) {
     uint32_t waves = oc_waves(t) / t->ndisp;
     my_memset(c->out, 0, OC_REC_OFF + (unsigned long)oc_waves(t) * oc_rec_bytes(t));
+    if (t->gfx) {
+        my_memset(c->out, 0, OC_GFX_VS_REC + 0x80000);
+        uint32_t* p = (uint32_t*)c->out;           /* PS block */
+        uint32_t* q = (uint32_t*)(c->out + 0x100); /* VS block */
+        int ps_op = t->gfx == 1 && t->do_op, vs_op = t->gfx == 2 && t->do_op;
+        p[0] = q[0] = (uint32_t)g_oc_k;
+        p[1] = q[1] = t->cshift;
+        p[2] = q[2] = t->cmask;
+        p[3] = (uint32_t)ps_op;
+        q[3] = (uint32_t)vs_op;
+        p[4] = q[4] = t->addr1;
+        p[5] = OC_REC_OFF;
+        q[5] = OC_GFX_VS_REC - 0x100;
+        float* pos = (float*)(c->out + 0x100 + 0x40000);
+        static const float quad[12] = {-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1};
+        for (uint32_t i = 0; i < t->nverts; i++) {
+            pos[2 * i] = t->gfx == 1 ? quad[2 * (i % 6)] : 0.0f;
+            pos[2 * i + 1] = t->gfx == 1 ? quad[2 * (i % 6) + 1] : 0.0f;
+        }
+        my_memset(c->out + OC_GDS_INIT, 0, OC_GDS_BYTES);
+        return;
+    }
+    if (t->variant == CS_OC_CONF || t->variant == CS_OC_STEPS) {
+        uint32_t* p = (uint32_t*)c->out;
+        p[0] = t->wpt;
+        p[1] = t->seed;
+        p[2] = t->pre_delay;
+        p[3] = OC_REC_OFF;
+        p[4] = t->nsteps;
+        p[5] = t->sleep_slot;
+        p[6] = t->sleep_step;
+        p[7] = t->sleep_iter;
+        return;
+    }
     if (t->variant == CS_OC_LEAN) {
         uint32_t* p = (uint32_t*)c->out;
         p[OC_L_GX] = t->gx;
@@ -773,10 +990,300 @@ static void oc_lean_report(struct OcCtx* c, const struct OcTest* t, uint64_t us)
     oc_s("\n\n");
 }
 
+/* Graphics tests: per wave of the stage under test, the SGPRs it started with (s0..s15), the
+   candidate wave ID and the ordered op's result. Per SGPR index: how many waves had a value no
+   other wave had. GP0 / GP1 (detect 2 / 1): the wave-count SGPR is the lowest index >= 4 whose
+   values differ in every wave with SPI_SHADER_PGM_RSRC2_PS.WAVE_CNT_EN (GP1) and not without
+   it (GP0). */
+static void oc_gfx_report(struct OcCtx* c, const struct OcTest* t, uint64_t us) {
+    const uint32_t* gd = (const uint32_t*)(c->out + OC_GDS_DUMP);
+    uint32_t total = gd[0x300 / 4];
+    const uint8_t* base = t->gfx == 1 ? c->out + OC_REC_OFF : c->out + OC_GFX_VS_REC;
+    static uint32_t val[16][2048];
+    uint32_t n = 0;
+    oc_s("done in ");
+    oc_u(us);
+    oc_s(" us\nwaves that took a slot (all stages): ");
+    oc_u(total);
+    for (uint32_t s = 0; s < total && s < 1984; s++) {
+        const uint32_t* r = (const uint32_t*)(base + s * 128);
+        if (r[23] != 0x0DC0FFEEu)
+            continue;
+        for (int i = 0; i < 16; i++)
+            val[i][n] = r[i];
+        n++;
+    }
+    oc_s(t->gfx == 1 ? "\npixel-shader waves recorded: " : "\nvertex-shader waves recorded: ");
+    oc_u(n);
+    uint32_t mask = 0;
+    oc_s("\nper SGPR (index: waves with a value of their own / waves, first values):");
+    for (int i = 0; i < 16; i++) {
+        uint32_t uniq = 0;
+        for (uint32_t a = 0; a < n; a++) {
+            uint32_t dup = 0;
+            for (uint32_t b2 = 0; b2 < n && !dup; b2++)
+                dup = b2 != a && val[i][b2] == val[i][a];
+            uniq += !dup;
+        }
+        if (n > 1 && uniq == n)
+            mask |= 1u << i;
+        oc_s("\ns");
+        oc_u((uint32_t)i);
+        oc_s(": ");
+        oc_u(uniq);
+        oc_s("/");
+        oc_u(n);
+        for (uint32_t a = 0; a < n && a < 6; a++) {
+            oc_s(" ");
+            oc_x(val[i][a], 8);
+        }
+    }
+    if (t->detect == 2) {
+        g_oc_gp0_mask = (int32_t)mask;
+        oc_s("\nall-different SGPRs without WAVE_CNT_EN: ");
+        oc_x(mask, 4);
+    } else if (t->detect == 1) {
+        g_oc_gfx_k = -1;
+        if (g_oc_gp0_mask >= 0)
+            for (int i = 4; i < 16 && g_oc_gfx_k < 0; i++)
+                if ((mask >> i & 1) && !((uint32_t)g_oc_gp0_mask >> i & 1))
+                    g_oc_gfx_k = i;
+        oc_s("\nall-different SGPRs with WAVE_CNT_EN: ");
+        oc_x(mask, 4);
+        oc_s(", without (GP0): ");
+        oc_x((uint32_t)g_oc_gp0_mask, 4);
+        oc_s("\nwave-count SGPR used by the later tests: ");
+        if (g_oc_gfx_k >= 0) {
+            oc_s("s");
+            oc_u((uint32_t)g_oc_gfx_k);
+        } else {
+            oc_s("none found (those tests will be skipped)");
+        }
+    }
+    oc_s("\n\n| slot | v0 | EXEC | HW_ID | candidate | M0 | returned | t op | t ret |\n");
+    oc_s("|---|---|---|---|---|---|---|---|---|\n");
+    uint32_t rows = 0;
+    for (uint32_t s = 0; s < total && s < 1984 && rows < 64; s++) {
+        const uint32_t* r = (const uint32_t*)(base + s * 128);
+        if (r[23] != 0x0DC0FFEEu)
+            continue;
+        rows++;
+        oc_s("| ");
+        oc_u(r[16]);
+        oc_s(" | ");
+        oc_x(r[27], 8);
+        oc_s(" | ");
+        oc_x(((uint64_t)r[26] << 32) | r[25], 16);
+        oc_s(" | ");
+        oc_x(r[22], 8);
+        oc_s(" | ");
+        oc_x(r[17], 8);
+        oc_s(" | ");
+        oc_x(r[18], 8);
+        oc_s(" | ");
+        oc_x(r[19], 8);
+        oc_s(" | ");
+        if (r[20])
+            oc_u(r[20] - r[24]);
+        else
+            oc_s("-");
+        oc_s(" | ");
+        if (r[21])
+            oc_u(r[21] - r[24]);
+        else
+            oc_s("-");
+        oc_s(" |\n");
+    }
+    oc_s("\n");
+}
+
+/* Sequence tests: every op added 1 to GDS 0x40, so the returned values give the global order.
+   The checker replays that order through the release-step model (one sequence per pipe; a wave's
+   first op of step k waits until the previous wave has released step k; a done op also waits for
+   the previous wave's done; done frees the wave's remaining steps) and reports
+   - ops that ran although the model would still hold them back (model violated), and
+   - ops that returned much later than the model's last condition was met (unexplained waits;
+     a normal round trip is about 150 to 600 clocks). */
+static uint32_t oc_hash32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+#define OC_SEQ_MAXOPS 4096u
+static uint32_t g_oc_seq_at[OC_SEQ_MAXOPS]; /* returned value -> wave << 4 | op */
+static void oc_seq_report(struct OcCtx* c, const struct OcTest* t, uint64_t us) {
+    uint32_t n = oc_waves(t), total = 0, marks = 0, bad = 0, hashbad = 0, idbad = 0;
+    const uint32_t* r0 = (const uint32_t*)(c->out + OC_REC_OFF);
+#define OC_SR(w) (r0 + (w) * (OC_SEQ_REC / 4))
+    for (uint32_t i = 0; i < OC_SEQ_MAXOPS; i++)
+        g_oc_seq_at[i] = 0xFFFFFFFFu;
+    uint32_t hist[17] = {0};
+    for (uint32_t w = 0; w < n; w++) {
+        const uint32_t* r = OC_SR(w);
+        if (r[3] != 0x0DC0FFEEu)
+            continue;
+        marks++;
+        uint32_t k = r[2] > 16 ? 16 : r[2];
+        hist[k]++;
+        total += k;
+        if (w && ((r[0] >> 6) & 0x7FF) != ((((OC_SR(w - 1))[0] >> 6) + 1) & 0x7FF))
+            idbad++;
+        if (t->variant == CS_OC_CONF && r[5] != oc_hash32((t->seed * 0x9e3779b9u) ^ w))
+            hashbad++;
+        for (uint32_t i = 0; i < k; i++) {
+            uint32_t v = r[8 + 3 * i];
+            if (v < OC_SEQ_MAXOPS && g_oc_seq_at[v] == 0xFFFFFFFFu)
+                g_oc_seq_at[v] = (w << 4) | i;
+            else
+                bad++;
+        }
+    }
+    const uint32_t* gd = (const uint32_t*)(c->out + OC_GDS_DUMP);
+    oc_s("done in ");
+    oc_u(us);
+    oc_s(" us\nrecords ");
+    oc_u(marks);
+    oc_s(" / ");
+    oc_u(n);
+    oc_s(", ops ");
+    oc_u(total);
+    oc_s(", GDS 0x40 = ");
+    oc_u(gd[0x40 / 4]);
+    oc_s(", returned values out of range or repeated ");
+    oc_u(bad);
+    oc_s(", wave IDs not consecutive ");
+    oc_u(idbad);
+    if (t->variant == CS_OC_CONF) {
+        oc_s(", patterns not matching the CPU hash ");
+        oc_u(hashbad);
+    }
+    oc_s("\nwaves by op count:");
+    for (int k = 0; k <= 16; k++)
+        if (hist[k]) {
+            oc_s(" ");
+            oc_u((uint32_t)k);
+            oc_s(":");
+            oc_u(hist[k]);
+        }
+    /* replay */
+    static uint32_t nw[18], tnw[18];
+    static uint8_t st_step[0x400], st_hold[0x400], st_done[0x400];
+    uint32_t nd = 0, tnd = 0, viol = 0, slow = 0;
+    int32_t worst = 0;
+    my_memset(nw, 0, sizeof(nw));
+    my_memset(tnw, 0, sizeof(tnw));
+    my_memset(st_step, 0, sizeof(st_step));
+    my_memset(st_hold, 0, sizeof(st_hold));
+    my_memset(st_done, 0, sizeof(st_done));
+    oc_s("\nmodel violations (position: wave.op step / needed):");
+    for (uint32_t p = 0; p < total && p < OC_SEQ_MAXOPS; p++) {
+        uint32_t e = g_oc_seq_at[p];
+        if (e == 0xFFFFFFFFu)
+            continue;
+        uint32_t w = e >> 4, i = e & 15;
+        if (w >= 0x400)
+            continue;
+        const uint32_t* r = OC_SR(w);
+        uint64_t desc = ((uint64_t)r[57] << 32) | r[56];
+        uint32_t nib = (uint32_t)(desc >> (4 * i)) & 15, rel = nib & 1, done = (nib >> 1) & 1;
+        uint32_t tb = r[9 + 3 * i], ta = r[10 + 3 * i];
+        uint32_t s = st_step[w] > 16 ? 16 : st_step[w];
+        int ok = !st_done[w] && (st_hold[w] || nw[s] == w) && (!done || nd == w);
+        uint32_t ready = tb;
+        if (!st_hold[w] && (int32_t)(tnw[s] - ready) > 0)
+            ready = tnw[s];
+        if (done && (int32_t)(tnd - ready) > 0)
+            ready = tnd;
+        int32_t ex = (int32_t)(ta - ready);
+        if (ex > worst)
+            worst = ex;
+        if (!ok && viol++ < 12) {
+            oc_s(" [");
+            oc_u(p);
+            oc_s(": ");
+            oc_u(w);
+            oc_s(".");
+            oc_u(i);
+            oc_s(" step ");
+            oc_u(s);
+            oc_s(", wanted wave ");
+            oc_u(nw[s]);
+            oc_s(done ? ", done wanted " : "");
+            if (done)
+                oc_u(nd);
+            oc_s("]");
+        }
+        if (ex > 2000)
+            slow++;
+        st_hold[w] = 1;
+        if (rel) {
+            if (done) {
+                for (uint32_t k = s; k < 18; k++) {
+                    nw[k] = w + 1;
+                    tnw[k] = ta;
+                }
+                nd = w + 1;
+                tnd = ta;
+                st_done[w] = 1;
+            } else {
+                nw[s] = w + 1;
+                tnw[s] = ta;
+            }
+            st_step[w]++;
+            st_hold[w] = 0;
+        }
+    }
+    oc_s("\nmodel violations: ");
+    oc_u(viol);
+    oc_s("; ops returning more than 2000 clocks after the model's last condition: ");
+    oc_u(slow);
+    oc_s(" (largest gap ");
+    oc_i(worst);
+    oc_s(")\nfirst waves (op: R release / N none, D done, index, returned value, clocks issue->"
+         "return):");
+    for (uint32_t w = 0; w < n && w < 12; w++) {
+        const uint32_t* r = OC_SR(w);
+        if (r[3] != 0x0DC0FFEEu)
+            continue;
+        uint64_t desc = ((uint64_t)r[57] << 32) | r[56];
+        oc_s("\nwave ");
+        oc_u(w);
+        oc_s(" id ");
+        oc_x((r[0] >> 6) & 0x7FF, 3);
+        oc_s(":");
+        for (uint32_t i = 0; i < r[2] && i < 16; i++) {
+            uint32_t nib = (uint32_t)(desc >> (4 * i)) & 15;
+            oc_s(" ");
+            oc_s(nib & 1 ? "R" : "N");
+            oc_s(nib & 2 ? "D" : "");
+            oc_u(nib >> 2);
+            oc_s("=");
+            oc_u(r[8 + 3 * i]);
+            oc_s("@");
+            oc_u(r[9 + 3 * i] - OC_SR(0)[9]);
+            oc_s("->");
+            oc_u(r[10 + 3 * i] - OC_SR(0)[9]);
+        }
+    }
+    oc_s("\n\n");
+#undef OC_SR
+}
+
 static void oc_report(struct OcCtx* c, const struct OcTest* t, int q, uint64_t us) {
     uint32_t waves = oc_waves(t);
     if (t->variant == CS_OC_LEAN) {
         oc_lean_report(c, t, us);
+        return;
+    }
+    if (t->gfx) {
+        oc_gfx_report(c, t, us);
+        return;
+    }
+    if (t->variant == CS_OC_CONF || t->variant == CS_OC_STEPS) {
+        oc_seq_report(c, t, us);
         return;
     }
     if (t->nregs) {
@@ -947,6 +1454,8 @@ static int ordcnt_run(void) {
         for (int i = 0; OC_BUILD[i]; i++)
             st.build[i] = OC_BUILD[i];
         st.inflight = -1;
+        st.gfx_k = -1;
+        st.gp0_mask = -1;
         resumed = 0;
     }
     g_oc_fd = sceKernelOpen(g_oc_log_path, resumed ? 0x209 : 0x601, 0x1FF);
@@ -964,9 +1473,13 @@ static int ordcnt_run(void) {
         oc_s(": HUNG - the app ended before its fence (no record)\n\n");
         if (t->gate)
             st.bad[t->queue] = 1;
+        if (t->kind == 3)
+            st.gfx_bad = 1;
         st.next = st.inflight + 1;
         st.inflight = -1;
     }
+    g_oc_gfx_k = st.gfx_k;
+    g_oc_gp0_mask = st.gp0_mask;
     struct OcCtx c;
     my_memset(&c, 0, sizeof(c));
     c.out = (uint8_t*)gpu_alloc_typed(OC_OUT_SIZE, 0x10000, MEM_TYPE_ONION);
@@ -1009,7 +1522,7 @@ static int ordcnt_run(void) {
     for (int k = st.next; k < OC_NTESTS; k++) {
         const struct OcTest* t = &k_oc_tests[k];
         int q = t->queue;
-        if (t->kind && st.bad[0] && !st.bad[1])
+        if ((t->kind == 1 || t->kind == 2) && st.bad[0] && !st.bad[1])
             q = 1;
         uint32_t waves = oc_waves(t);
         oc_s("### ");
@@ -1020,23 +1533,29 @@ static int ordcnt_run(void) {
         oc_s(k_cs_oc[t->variant].name);
         oc_s(", ");
         oc_s(k_oc_qname[q]);
-        oc_s(", flags ");
-        oc_x(t->flags, 2);
-        oc_s(", grid ");
-        oc_u(t->gx);
-        oc_s("x");
-        oc_u(t->gy);
-        oc_s("x");
-        oc_u(t->gz);
-        oc_s(" x ");
-        oc_u(t->wpt);
-        oc_s(" waves x ");
-        oc_u(t->ndisp);
-        oc_s(" dispatch, EXEC ");
-        oc_x(t->exec, 16);
-        oc_s(", M0 mode ");
-        oc_u(t->m0mode);
-        oc_s("\n");
+        if (t->gfx) {
+            oc_s(", graphics draw of ");
+            oc_u(t->nverts);
+            oc_s(" vertices\n");
+        } else {
+            oc_s(", flags ");
+            oc_x(t->flags, 2);
+            oc_s(", grid ");
+            oc_u(t->gx);
+            oc_s("x");
+            oc_u(t->gy);
+            oc_s("x");
+            oc_u(t->gz);
+            oc_s(" x ");
+            oc_u(t->wpt);
+            oc_s(" waves x ");
+            oc_u(t->ndisp);
+            oc_s(" dispatch, EXEC ");
+            oc_x(t->exec, 16);
+            oc_s(", M0 mode ");
+            oc_u(t->m0mode);
+            oc_s("\n");
+        }
         if (st.bad[q] || waves > (OC_OUT_SIZE - OC_REC_OFF) / oc_rec_bytes(t)) {
             oc_s("SKIPPED (this queue hung on its first ordered test, or too many waves)\n\n");
             oc_flush();
@@ -1044,6 +1563,15 @@ static int ordcnt_run(void) {
             oc_state_save(&st);
             continue;
         }
+        if (t->gfx && (st.gfx_bad || (t->k_auto && st.gfx_k < 0))) {
+            oc_s(st.gfx_bad ? "SKIPPED (the graphics harness hung earlier)\n\n"
+                            : "SKIPPED (no wave-count SGPR found by GP1)\n\n");
+            oc_flush();
+            st.next = k + 1;
+            oc_state_save(&st);
+            continue;
+        }
+        g_oc_k = t->k_auto ? st.gfx_k : t->k;
         oc_params(&c, t);
         st.inflight = k;
         st.next = k;
@@ -1055,6 +1583,8 @@ static int ordcnt_run(void) {
             oc_s("TIMEOUT: no fence after 2 s - GPU hung; close the app, relaunch to continue\n\n");
             if (t->gate)
                 st.bad[q] = 1;
+            if (t->kind == 3)
+                st.gfx_bad = 1;
             st.inflight = -1;
             st.next = k + 1;
             oc_state_save(&st);
@@ -1065,6 +1595,8 @@ static int ordcnt_run(void) {
             oc_s("NOT SUBMITTED (no queue / ring space / submit error)\n\n");
         else
             oc_report(&c, t, q, us);
+        st.gfx_k = g_oc_gfx_k;
+        st.gp0_mask = g_oc_gp0_mask;
         st.inflight = -1;
         st.next = k + 1;
         oc_state_save(&st);

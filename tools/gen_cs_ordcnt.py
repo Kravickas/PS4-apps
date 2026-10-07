@@ -99,6 +99,8 @@ VARIANTS3 += [
     # offset1 bit 5: as swap; with ADDR = v12 (0xcafe0000 | lane) so that v13 = VAL3
     ("x5s", 0xC0DE0C51, [(o(0, 1, 1, V_VAL1, swap=1, x1=0x20),) * 2]),
     ("x5a", 0xC0DE0C52, [(o(0, 1, 1, V_RET3, x1=0x20),) * 2]),
+    # ordered-append mode test: even waves op1 idx0 release (no done), odd waves op2 idx1 done
+    ("tgs", 0xC0DE0C53, [(o(0, 1, 0, V_VAL1), None), (None, o(1, 1, 1, V_VAL2))]),
 ]
 
 # GDS window shaders (no ordered ops): wave TGID.x covers GDS bytes [TGID.x * 0x400, +0x400) through
@@ -174,6 +176,273 @@ def lean_shader(name):
         "s_mov_b32 exec_lo, 0xffff",
         "s_mov_b32 exec_hi, 0",
         "buffer_store_dword v3, v4, s[0:3], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "s_endpgm",
+    ]
+    return a
+
+
+# Graphics-stage shaders (PS or VS). Both dump s0..s15 as the wave starts, take an arrival slot
+# from a plain GDS counter (0x300, M0 0x400), pick a candidate wave ID = (SGPR[K] >> SHIFT) & MASK
+# (s_movrels with M0 = K), and, when DO_OP, run DS_ORDERED_COUNT idx0 release done add 1 with
+# M0 = ADDR << 16 | candidate and the variant's shader-type field. Parameters at the V# base:
+# K, SHIFT, MASK, DO_OP, ADDR, REC_BASE. Record (128 bytes at REC_BASE + slot * 128): s0..s15,
+# slot, candidate, M0, returned value, memtime before / after the op (low), HW_ID, marker, memtime
+# at start, EXEC lo / hi at start, v0 of the first active lane, memtime before / after (high).
+# VS: v0 = vertex index; position (x, y) from a table at V# + 0x40000 + 8 * index, z 0.5, w 1;
+# one parameter export. PS: null export.
+GFX_SHADERS = [("gps", 0xC0DE0C60, "ps", 1), ("gps0", 0xC0DE0C61, "ps", 0),
+               ("gvs", 0xC0DE0C62, "vs", 2)]
+GFX_RSRC1 = 0x000C01C3  # 16 VGPRs, 64 SGPRs
+
+
+def gfx_shader(name, stage, stype):
+    w0, w1 = ds_words(o(0, 1, 1, 7, stype=stype), 8)
+    a = ["; ---- variant %s (%s) ----" % (name, stage)]
+    a += ["v_writelane_b32 v3, s%d, %d" % (i, i) for i in range(16)]
+    a += [
+        "s_buffer_load_dwordx8 s[32:39], s[0:3], 0x0",
+        "s_memtime s[40:41]",
+        "s_getreg_b32 s42, hwreg(HW_REG_HW_ID)",
+        "s_waitcnt lgkmcnt(0)",
+        "s_mov_b64 s[44:45], exec",
+        "v_readfirstlane_b32 s43, v0",
+        "s_mov_b64 exec, 1",
+        "s_mov_b32 m0, 0x400",
+        "v_mov_b32 v4, 0x300",
+        "v_mov_b32 v5, 1",
+        "s_nop 1",
+        "ds_add_rtn_u32 v6, v4, v5 gds",
+        "s_waitcnt lgkmcnt(0)",
+        "v_readfirstlane_b32 s46, v6",
+        "s_mov_b32 m0, s32",
+        "s_nop 1",
+        "s_movrels_b32 s47, s0",
+        "s_lshr_b32 s47, s47, s33",
+        "s_and_b32 s47, s47, s34",
+        "s_mov_b32 s48, 0",
+        "s_mov_b32 s49, -1",
+        "s_mov_b64 s[50:51], 0",
+        "s_mov_b64 s[52:53], 0",
+        "s_cmp_eq_u32 s35, 0",
+        "s_cbranch_scc1 %s_skip" % name,
+        "s_lshl_b32 s48, s36, 16",
+        "s_or_b32 s48, s48, s47",
+        "v_mov_b32 v7, 1",
+        "v_mov_b32 v8, 0xdead0000",
+        "s_memtime s[50:51]",
+        "s_mov_b32 m0, s48",
+        "s_nop 1",
+        "; ds_ordered_count v8, v7 idx0 rel done add type %d gds" % stype,
+        ".long 0x%08x, 0x%08x" % (w0, w1),
+        "s_waitcnt lgkmcnt(0)",
+        "s_memtime s[52:53]",
+        "v_readfirstlane_b32 s49, v8",
+        "s_waitcnt lgkmcnt(0)",
+        "%s_skip:" % name,
+        "s_mov_b32 s29, 0x0dc0ffee",
+    ]
+    for i, sg in enumerate(["s46", "s47", "s48", "s49", "s50", "s52", "s42", "s29", "s40", "s44",
+                            "s45", "s43", "s51", "s53"]):
+        a.append("v_writelane_b32 v3, %s, %d" % (sg, 16 + i))
+    a += [
+        "s_lshl_b32 s54, s46, 7",
+        "s_add_u32 s54, s54, s37",
+        "s_mov_b32 exec_lo, -1",
+        "s_mov_b32 exec_hi, 0",
+        "v_mbcnt_lo_u32_b32 v9, -1, 0",
+        "v_lshlrev_b32 v9, 2, v9",
+        "v_add_i32 v9, vcc, s54, v9",
+        "buffer_store_dword v3, v9, s[0:3], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "s_mov_b64 exec, s[44:45]",
+    ]
+    if stage == "vs":
+        a += [
+            "v_lshlrev_b32 v10, 3, v0",
+            "v_add_i32 v10, vcc, 0x40000, v10",
+            "buffer_load_dwordx2 v[11:12], v10, s[0:3], 0 offen",
+            "v_mov_b32 v13, 0.5",
+            "v_mov_b32 v14, 1.0",
+            "s_waitcnt vmcnt(0)",
+            "exp param0 v11, v11, v11, v11",
+            "exp pos0 v11, v12, v13, v14 done",
+        ]
+    else:
+        a += ["exp null off, off, off, off done vm"]
+    a += ["s_endpgm"]
+    return a
+
+
+# Sequence shaders ("conf", "steps"): 1D grid, every op adds 1 to the dword at GDS 0x40 (M0
+# address 0x40 - index * 4), so the returned values give the global order of all ops.
+# Inputs: s[0:3] V#, s4 TGID.x, s5 TG_SIZE (RSRC2 CS_OC_SEQ_RSRC2), v0 thread id.
+# Parameters s8..s15: WPT, SEED, DELAY_UNIT, REC_BASE, NSTEPS, SLEEP_SLOT, SLEEP_STEP, SLEEP_ITER.
+# conf: P1 = hash(slot ^ (SEED * 0x9e3779b9)), P2 = hash(P1) (lowbias32). Ops k = 0..2: bits
+#   b = (P1 >> 5k) & 31; b & 3 == 0: no op; == 1: no release; else release; index (b >> 2) & 3;
+#   before it (P2 >> 8k) & 63 sleep iterations * DELAY_UNIT. Then a release + done op, index
+#   (P1 >> 15) & 3, after (P2 >> 24) & 63 * DELAY_UNIT.
+# steps: NSTEPS ops on index 0, each with release, the last also done; wave SLEEP_SLOT sleeps
+#   SLEEP_ITER iterations before op SLEEP_STEP.
+# Record (256 bytes at REC_BASE + slot * 256): 0 TG_SIZE, 1 slot, 2 ops, 3 marker, 4 HW_ID,
+# 5 P1, 6 P2, then per op i: 8 + 3i returned value, memtime before, memtime after (low);
+# 56 / 57: op descriptors, 4 bits per op (release, done, index 2 bits).
+SEQ_SHADERS = [("conf", 0xC0DE0C70), ("steps", 0xC0DE0C71)]
+SEQ_RSRC1, SEQ_RSRC2 = 0x000C01C1, 0x00000488
+
+
+def seq_hash(x, t):
+    """lowbias32 of SGPR x into x, t as scratch."""
+    return ["s_lshr_b32 %s, %s, 16" % (t, x), "s_xor_b32 %s, %s, %s" % (x, x, t),
+            "s_mul_i32 %s, %s, 0x7feb352d" % (x, x),
+            "s_lshr_b32 %s, %s, 15" % (t, x), "s_xor_b32 %s, %s, %s" % (x, x, t),
+            "s_mul_i32 %s, %s, 0x846ca68b" % (x, x),
+            "s_lshr_b32 %s, %s, 16" % (t, x), "s_xor_b32 %s, %s, %s" % (x, x, t)]
+
+
+def seq_op(name, tag, rel, done, idx):
+    """One ordered op (add 1 at GDS 0x40) and its record entry. s37 = next record lane, s46 = op
+    count, s[38:39] = descriptors, s22 = wave ID."""
+    w0, w1 = ds_words(o(idx, rel, done, 1), 2)
+    nib = rel | (done << 1) | (idx << 2)
+    return [
+        "s_mov_b32 s30, 0x%x" % ((0x40 - idx * 4) << 16),
+        "s_or_b32 s30, s30, s22",
+        "s_memtime s[32:33]",
+        "s_mov_b32 m0, s30",
+        "s_mov_b64 exec, 1",
+        "s_nop 1",
+        "; ds_ordered_count v2, v1 idx%d%s%s add gds" % (idx, " rel" if rel else "",
+                                                        " done" if done else ""),
+        ".long 0x%08x, 0x%08x" % (w0, w1),
+        "s_waitcnt lgkmcnt(0)",
+        "s_mov_b64 exec, -1",
+        "s_memtime s[34:35]",
+        "v_readfirstlane_b32 s36, v2",
+        "s_waitcnt lgkmcnt(0)",
+        "v_mov_b32 v4, s36",
+        "v_mov_b32 v5, s32",
+        "v_mov_b32 v6, s34",
+        "s_lshl_b32 s50, s37, 2",
+        "s_add_u32 s50, s50, s21",
+        "v_mov_b32 v7, s50",
+        "s_mov_b64 exec, 1",
+        "buffer_store_dword v4, v7, s[0:3], 0 offen",
+        "buffer_store_dword v5, v7, s[0:3], 0 offen offset:4",
+        "buffer_store_dword v6, v7, s[0:3], 0 offen offset:8",
+        "s_mov_b64 exec, -1",
+        "s_add_u32 s37, s37, 3",
+        "s_mov_b32 s44, %d" % nib,
+        "s_mov_b32 s45, 0",
+        "s_lshl_b32 s40, s46, 2",
+        "s_lshl_b64 s[42:43], s[44:45], s40",
+        "s_or_b64 s[38:39], s[38:39], s[42:43]",
+        "s_add_u32 s46, s46, 1",
+    ]
+
+
+def seq_sleep(name, tag, iters):
+    return ["s_mov_b32 s23, %s" % iters] + delay("%s_%s" % (name, tag), "s23")
+
+
+def seq_shader(name):
+    a = [
+        "; ---- variant %s ----" % name,
+        "s_buffer_load_dwordx8 s[8:15], s[0:3], 0x0",
+        "s_getreg_b32 s18, hwreg(HW_REG_HW_ID)",
+        "s_waitcnt lgkmcnt(0)",
+        "v_readfirstlane_b32 s19, v0",
+        "s_lshr_b32 s19, s19, 6",
+        "s_mul_i32 s20, s4, s8",
+        "s_add_u32 s20, s20, s19",
+        "s_lshl_b32 s21, s20, 8",
+        "s_add_u32 s21, s21, s11",
+        "s_bfe_u32 s22, s5, 0xb0006",
+        "s_mul_i32 s24, s9, 0x9e3779b9",
+        "s_xor_b32 s24, s24, s20",
+    ]
+    a += seq_hash("s24", "s25")
+    a += ["s_mov_b32 s26, s24"]
+    a += seq_hash("s26", "s25")
+    a += [
+        "v_mov_b32 v1, 1",
+        "v_mov_b32 v2, 0xdead0000",
+        "s_mov_b32 s37, 8",
+        "s_mov_b64 s[38:39], 0",
+        "s_mov_b32 s46, 0",
+    ]
+    if name == "conf":
+        for k in range(3):
+            j = "%s_j%d" % (name, k)
+            a += [
+                "s_lshr_b32 s27, s24, %d" % (5 * k),
+                "s_and_b32 s27, s27, 31",
+                "s_and_b32 s28, s27, 3",
+                "s_cmp_eq_u32 s28, 0",
+                "s_cbranch_scc1 %s" % j,
+                "s_lshr_b32 s29, s26, %d" % (8 * k),
+                "s_and_b32 s29, s29, 63",
+                "s_mul_i32 s29, s29, s10",
+            ]
+            a += seq_sleep(name, "d%d" % k, "s29")
+            # code = index * 2 + release
+            a += [
+                "s_lshr_b32 s31, s27, 2",
+                "s_lshl_b32 s31, s31, 1",
+                "s_cmp_lg_u32 s28, 1",
+                "s_cselect_b32 s28, 1, 0",
+                "s_or_b32 s31, s31, s28",
+            ]
+            for code in range(8):
+                a += ["s_cmp_eq_u32 s31, %d" % code,
+                      "s_cbranch_scc1 %s_k%d_c%d" % (name, k, code)]
+            a += ["s_branch %s" % j]
+            for code in range(8):
+                a += ["%s_k%d_c%d:" % (name, k, code)]
+                a += seq_op(name, "k%dc%d" % (k, code), code & 1, 0, code >> 1)
+                a += ["s_branch %s" % j]
+            a += ["%s:" % j]
+        a += [
+            "s_lshr_b32 s29, s26, 24",
+            "s_and_b32 s29, s29, 63",
+            "s_mul_i32 s29, s29, s10",
+        ]
+        a += seq_sleep(name, "df", "s29")
+        a += ["s_lshr_b32 s31, s24, 15", "s_and_b32 s31, s31, 3"]
+        for idx in range(4):
+            a += ["s_cmp_eq_u32 s31, %d" % idx, "s_cbranch_scc1 %s_f%d" % (name, idx)]
+        for idx in range(4):
+            a += ["%s_f%d:" % (name, idx)]
+            a += seq_op(name, "f%d" % idx, 1, 1, idx)
+            a += ["s_branch %s_end" % name]
+        a += ["%s_end:" % name]
+    else:
+        a += ["s_mov_b32 s47, 0"]
+        a += ["%s_loop:" % name,
+              "s_cmp_eq_u32 s20, s13",
+              "s_cselect_b32 s29, s15, 0",
+              "s_cmp_lg_u32 s47, s14",
+              "s_cselect_b32 s29, 0, s29"]
+        a += seq_sleep(name, "sl", "s29")
+        a += ["s_add_u32 s48, s47, 1",
+              "s_cmp_eq_u32 s48, s12",
+              "s_cbranch_scc1 %s_last" % name]
+        a += seq_op(name, "mid", 1, 0, 0)
+        a += ["s_add_u32 s47, s47, 1",
+              "s_branch %s_loop" % name,
+              "%s_last:" % name]
+        a += seq_op(name, "last", 1, 1, 0)
+    a += ["s_mov_b32 s49, 0x0dc0ffee"]
+    for lane, sg in [(0, "s5"), (1, "s20"), (2, "s46"), (3, "s49"), (4, "s18"), (5, "s24"),
+                     (6, "s26"), (56, "s38"), (57, "s39")]:
+        a.append("v_writelane_b32 v3, %s, %d" % (sg, lane))
+    a += [
+        "v_and_b32 v0, 63, v0",
+        "v_lshlrev_b32 v0, 2, v0",
+        "v_add_i32 v0, vcc, s21, v0",
+        "s_mov_b32 exec_lo, 0xff",       # header lanes 0..7
+        "s_mov_b32 exec_hi, 0x3000000",  # descriptor lanes 56, 57
+        "buffer_store_dword v3, v0, s[0:3], 0 offen",
         "s_waitcnt vmcnt(0)",
         "s_endpgm",
     ]
@@ -505,8 +774,14 @@ def main():
     allv += VARIANTS3
     allv += [(n, h, fill) for n, h, fill in WINDOW_SHADERS]
     allv += [(n, h, "lean") for n, h in LEAN_SHADERS]
+    allv += [(n, h, (st, ty)) for n, h, st, ty in GFX_SHADERS]
+    allv += [(n, h, "seq") for n, h in SEQ_SHADERS]
     for name, h, slots in allv:
-        if slots == "lean":
+        if slots == "seq":
+            lines = seq_shader(name)
+        elif isinstance(slots, tuple):
+            lines = gfx_shader(name, *slots)
+        elif slots == "lean":
             lines = lean_shader(name)
         elif isinstance(slots, bool):
             lines = window_shader(name, slots)
@@ -522,7 +797,13 @@ def main():
         words += [0x5362724F, 0x00726468, (total * 4) << 8, 0, 0xDEADBEEF, h, 0]
         out_s += lines + [""]
         desc = []
-        if slots == "lean":
+        if slots == "seq":
+            desc.append("sequence: randomised op patterns (conf) or N release steps (steps)")
+            slots = []
+        elif isinstance(slots, tuple):
+            desc.append("%s stage: SGPR dump, idx0 release done add 1, shader type %d" % slots)
+            slots = []
+        elif slots == "lean":
             desc.append("lean: idx0 release done add 1, 3D grid")
             slots = []
         elif isinstance(slots, bool):
@@ -554,8 +835,12 @@ def main():
     out_h.append("};")
     out_h.append("static const struct CsOcBin k_cs_oc[CS_OC_COUNT] = {")
     for name, h, slots in allv:
-        n = 0 if isinstance(slots, (bool, str)) else len(slots)
+        n = 0 if isinstance(slots, (bool, str, tuple)) else len(slots)
         r1, r2 = (LEAN_RSRC1, LEAN_RSRC2) if slots == "lean" else (0x000C02C6, 0x00000588)
+        if isinstance(slots, tuple):
+            r1, r2 = GFX_RSRC1, 0x00000008  # USER_SGPR 4; the PS wave-count bit is set per test
+        if slots == "seq":
+            r1, r2 = SEQ_RSRC1, SEQ_RSRC2
         out_h.append("    {cs_oc_%s, sizeof(cs_oc_%s), %d, 0x%08Xu, 0x%08Xu, \"%s\"}," % (
             name, name, n, r1, r2, name))
     out_h.append("};")
