@@ -1631,6 +1631,183 @@ static void run_p4() {
     }
 }
 
+// ---- P7: pool model; every line prints counter deltas ------------------------------------------
+
+struct PS {
+    int32_t af, ac, lf, lc;
+};
+
+static PS ps() {
+    PS st;
+    my_memset(&st, 0, sizeof(st));
+    sceKernelMemoryPoolGetBlockStats(&st, sizeof(st));
+    return st;
+}
+
+// Which counter moved: one char for (af, ac, lf, lc) going down (-) / up (+) / not at all.
+static char moved(const PS& a, const PS& b) {
+    const int d[4] = {b.af - a.af, b.ac - a.ac, b.lf - a.lf, b.lc - a.lc};
+    // encode the pair "from where -> to where" as a single letter for one-block moves
+    if (d[0] == -1 && d[2] == 1 && !d[1] && !d[3]) return 'F';  // avail flushed -> alloc flushed
+    if (d[0] == -1 && d[3] == 1 && !d[1] && !d[2]) return 'f';  // avail flushed -> alloc cached
+    if (d[1] == -1 && d[3] == 1 && !d[0] && !d[2]) return 'C';  // avail cached  -> alloc cached
+    if (d[1] == -1 && d[2] == 1 && !d[0] && !d[3]) return 'c';  // avail cached  -> alloc flushed
+    if (d[2] == -1 && d[0] == 1 && !d[1] && !d[3]) return 'R';  // alloc flushed -> avail flushed
+    if (d[2] == -1 && d[1] == 1 && !d[0] && !d[3]) return 'r';  // alloc flushed -> avail cached
+    if (d[3] == -1 && d[1] == 1 && !d[0] && !d[2]) return 'K';  // alloc cached  -> avail cached
+    if (d[3] == -1 && d[0] == 1 && !d[1] && !d[2]) return 'k';  // alloc cached  -> avail flushed
+    if (!d[0] && !d[1] && !d[2] && !d[3]) return '=';
+    return '*';
+}
+
+static Line& delta(Line& l, const PS& a, const PS& b) {
+    const int d[4] = {b.af - a.af, b.ac - a.ac, b.lf - a.lf, b.lc - a.lc};
+    l.s("d=");
+    for (int i = 0; i < 4; i++) {
+        if (i)
+            l.c('/');
+        l.dec(d[i]);
+    }
+    return l;
+}
+
+static void run_p7() {
+    say("== P7 pool model. moves: F af>lf  f af>lc  C ac>lc  c ac>lf  R lf>af  r lf>ac  K lc>ac  "
+        "k lc>af  = none  * other");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    uint64_t px = 0;
+    {
+        const PS a = ps();
+        const int32_t r = sceKernelMemoryPoolExpand(0, g_dmem, 16 * blk, blk, &px);
+        Line l = head("P70", "expand 16 blocks");
+        l.ret("ret", r);
+        delta(l, a, ps()).end();
+    }
+    void* rv = 0;
+    PS a = ps();
+    const int32_t rr = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rv);
+    {
+        Line l = head("P70b", "reserve 2M");
+        l.ret("ret", rr).s("move=").c(moved(a, ps())).end();
+    }
+    if (rr != 0)
+        return;
+    uint8_t* base = (uint8_t*)rv;
+    int32_t cr[11];
+    {
+        Line l = head("P71", "commit 64K type 0..10: move");
+        for (int t = 0; t <= 10; t++) {
+            a = ps();
+            cr[t] = sceKernelMemoryPoolCommit(base + t * blk, blk, t, 0x3, 0);
+            l.c(cr[t] == 0 ? moved(a, ps()) : code(cr[t]));
+        }
+        l.end();
+    }
+    {
+        Line l = head("P72", "decommit each: move");
+        for (int t = 0; t <= 10; t++) {
+            if (cr[t] != 0) {
+                l.c('-');
+                continue;
+            }
+            a = ps();
+            const int32_t rd = sceKernelMemoryPoolDecommit(base + t * blk, blk, 0);
+            l.c(rd == 0 ? moved(a, ps()) : code(rd));
+        }
+        l.end();
+    }
+    sceKernelMunmap(rv, rsv);
+    {
+        Line l = head("P73", "reserve 2,4,6,8M / munmap: delta");
+        for (int m = 1; m <= 4; m++) {
+            void* v = 0;
+            a = ps();
+            const int32_t r = sceKernelMemoryPoolReserve(0, m * rsv, 0, 0, &v);
+            l.c(code(r)).c(':');
+            delta(l, a, ps());
+            if (r == 0) {
+                a = ps();
+                sceKernelMunmap(v, m * rsv);
+                l.c('|');
+                delta(l, a, ps());
+            }
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
+        // both available pools non-empty: from which does each kind draw?
+        const PS st = ps();
+        Line l = head("P74", "draw order (needs af>0 and ac>0)");
+        l.s("af=").dec(st.af).s(" ac=").dec(st.ac).c(' ');
+        if (st.af > 0 && st.ac > 0) {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+                uint8_t* b = (uint8_t*)v;
+                a = ps();
+                const int32_t c3 = sceKernelMemoryPoolCommit(b, blk, 3, 0x3, 0);
+                l.s("t3:").c(c3 == 0 ? moved(a, ps()) : code(c3));
+                if (c3 == 0)
+                    sceKernelMemoryPoolDecommit(b, blk, 0);
+                a = ps();
+                const int32_t c0 = sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
+                l.s(" t0:").c(c0 == 0 ? moved(a, ps()) : code(c0));
+                if (c0 == 0)
+                    sceKernelMemoryPoolDecommit(b, blk, 0);
+                sceKernelMunmap(v, rsv);
+            }
+            void* w = 0;
+            a = ps();
+            const int32_t r2 = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &w);
+            l.s(" reserve:").c(r2 == 0 ? moved(a, ps()) : code(r2));
+            if (r2 == 0)
+                sceKernelMunmap(w, rsv);
+        }
+        l.end();
+    }
+    {
+        // drain every available block into 64K commits, then try a reserve and a commit
+        void* rs[16];
+        int nr = 0, used = 32, commits = 0;
+        int32_t last = 0;
+        for (int it = 0; it < 512; it++) {
+            const PS st = ps();
+            if (st.af + st.ac == 0)
+                break;
+            if (used == 32) {
+                if (nr == 16 || sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rs[nr]) != 0)
+                    break;
+                nr++;
+                used = 0;
+                continue;
+            }
+            last = sceKernelMemoryPoolCommit((uint8_t*)rs[nr - 1] + used * blk, blk, 3, 0x3, 0);
+            if (last != 0)
+                break;
+            used++;
+            commits++;
+        }
+        const PS st = ps();
+        void* v = 0;
+        const int32_t r_res = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v);
+        if (r_res == 0)
+            sceKernelMunmap(v, rsv);
+        int32_t r_com = -1;
+        if (nr > 0 && used < 32)
+            r_com = sceKernelMemoryPoolCommit((uint8_t*)rs[nr - 1] + used * blk, blk, 3, 0x3, 0);
+        Line l = head("P75", "drained pool: reserve / commit");
+        l.s("commits=").dec(commits).s(" reserves=").dec(nr).s(" left=").dec(st.af + st.ac);
+        l.s(" last=").c(code(last)).s(" reserve=").c(code(r_res));
+        l.s(" commit=").c(r_com == -1 ? '-' : code(r_com));
+        if (r_com == 0)
+            used++;
+        for (int i = 0; i < nr; i++)
+            sceKernelMunmap(rs[i], rsv);
+        l.c(' ');
+        stats(l).end();
+    }
+}
+
 // Window big enough for the length but with no aligned fit inside it; free space right after.
 static void run_p54() {
     const uint64_t blk = 0x10000;
@@ -1747,6 +1924,7 @@ int main(void) {
         run_p();
         run_p2();
         run_p4();
+        run_p7();
         run_p54();
         run_c();
         run_g();

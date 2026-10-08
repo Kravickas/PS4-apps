@@ -32,6 +32,9 @@ SECTIONS
      first start that returns OK, with checks either side of it
   P4 pool block counters through expand, two reservations, commits of type 3 and 0, decommits,
      munmap of an empty reservation and of reservations that still hold committed memory
+  P7 pool model, as counter moves per operation: commit and decommit of each memory type 0..10,
+     reservation cost for 2/4/6/8 MiB, which available pool each kind of allocation draws from,
+     and reserve / commit against a fully drained pool
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
