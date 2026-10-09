@@ -1808,6 +1808,146 @@ static void run_p7() {
     }
 }
 
+// ---- P8: reservation sizes, partial unmap, split draws, timing of returned blocks ---------------
+
+static Line& d4(Line& l, const PS& a, const PS& b) {
+    l.dec(b.af - a.af).c('/').dec(b.ac - a.ac).c('/').dec(b.lf - a.lf).c('/').dec(b.lc - a.lc);
+    return l;
+}
+
+static Line& s4(Line& l, const PS& a) {
+    l.dec(a.af).c('/').dec(a.ac).c('/').dec(a.lf).c('/').dec(a.lc);
+    return l;
+}
+
+static void reserve_sizes(const char* id, const char* name, const int* mb, int n) {
+    Line l = head(id, name);
+    for (int i = 0; i < n; i++) {
+        void* v = 0;
+        const PS a = ps();
+        const int32_t r = sceKernelMemoryPoolReserve(0, (uint64_t)mb[i] << 20, 0, 0, &v);
+        l.c(code(r)).c(':');
+        d4(l, a, ps());
+        if (r == 0) {
+            const PS b = ps();
+            sceKernelMunmap(v, (uint64_t)mb[i] << 20);
+            l.c('|');
+            d4(l, b, ps());
+        }
+        l.c(' ');
+    }
+    l.end();
+}
+
+static void series(Line& l) {
+    static const unsigned us[] = {0, 1000, 9000, 90000, 900000};
+    const char* tag[] = {"0:", " 1ms:", " 10ms:", " 100ms:", " 1s:"};
+    for (int i = 0; i < 5; i++) {
+        if (us[i])
+            sceKernelUsleep(us[i]);
+        l.s(tag[i]);
+        s4(l, ps());
+    }
+}
+
+static void run_p8() {
+    say("== P8 pool: stats are af/ac/lf/lc, deltas the same order");
+    const uint64_t blk = 0x10000, mb = 0x100000;
+    {
+        Line l = head("P80", "stats now / after 1s");
+        s4(l, ps());
+        sceKernelUsleep(1000000);
+        l.s(" -> ");
+        s4(l, ps()).end();
+    }
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 48 * blk, blk, &px);
+    static const int big1[] = {16, 32, 64};
+    static const int big2[] = {128, 256, 512};
+    reserve_sizes("P81", "reserve 16,32,64M | munmap", big1, 3);
+    reserve_sizes("P82", "reserve 128,256,512M | munmap", big2, 3);
+    {
+        void* v = 0;
+        PS a = ps();
+        const int32_t r = sceKernelMemoryPoolReserve(0, 4 * mb, 0, 0, &v);
+        Line l = head("P83", "4M: reserve | unmap 1st 2M | 2nd");
+        l.c(code(r)).c(':');
+        d4(l, a, ps());
+        if (r == 0) {
+            a = ps();
+            l.s(" |").c(code(sceKernelMunmap(v, 2 * mb))).c(':');
+            d4(l, a, ps());
+            a = ps();
+            l.s(" |").c(code(sceKernelMunmap((uint8_t*)v + 2 * mb, 2 * mb))).c(':');
+            d4(l, a, ps());
+        }
+        l.end();
+    }
+    {
+        // avail flushed down to exactly 1 with avail cached >= 1, then one 128K type-3 commit
+        void* v = 0;
+        Line l = head("P84", "128K t3 with af=1, ac>=1");
+        if (sceKernelMemoryPoolReserve(0, 8 * mb, 0, 0, &v) != 0) {
+            l.s("SKIP reserve").end();
+        } else {
+            uint8_t* b = (uint8_t*)v;
+            int used = 0;
+            if (ps().ac == 0) {
+                sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
+                sceKernelMemoryPoolDecommit(b, blk, 0);
+            }
+            while (ps().af > 1 && used < 120 &&
+                   sceKernelMemoryPoolCommit(b + used * blk, blk, 3, 0x3, 0) == 0)
+                used++;
+            const PS a = ps();
+            l.s("before=");
+            s4(l, a);
+            if (a.af == 1 && a.ac >= 1) {
+                const int32_t r = sceKernelMemoryPoolCommit(b + used * blk, 2 * blk, 3, 0x3, 0);
+                l.s(" ret=").c(code(r)).s(" d=");
+                d4(l, a, ps());
+            } else {
+                l.s(" SKIP state");
+            }
+            sceKernelMunmap(v, 8 * mb);
+            sceKernelUsleep(1000000);
+            l.end();
+        }
+    }
+    {
+        void* v = 0;
+        Line l = head("P85", "16x64K t3, munmap: series");
+        if (sceKernelMemoryPoolReserve(0, 2 * mb, 0, 0, &v) == 0) {
+            int n = 0;
+            for (int i = 0; i < 16; i++)
+                n += sceKernelMemoryPoolCommit((uint8_t*)v + i * blk, blk, 3, 0x3, 0) == 0;
+            l.s("n=").dec(n).s(" before=");
+            s4(l, ps()).c(' ');
+            sceKernelMunmap(v, 2 * mb);
+            series(l);
+        } else {
+            l.s("SKIP reserve");
+        }
+        l.end();
+    }
+    {
+        void* v = 0;
+        Line l = head("P86", "1M t3 commit, decommit: series");
+        if (sceKernelMemoryPoolReserve(0, 2 * mb, 0, 0, &v) == 0) {
+            const int32_t r = sceKernelMemoryPoolCommit(v, mb, 3, 0x3, 0);
+            l.s("c=").c(code(r)).s(" before=");
+            s4(l, ps()).c(' ');
+            if (r == 0)
+                l.s("dc=").c(code(sceKernelMemoryPoolDecommit(v, mb, 0))).c(' ');
+            series(l);
+            sceKernelMunmap(v, 2 * mb);
+        } else {
+            l.s("SKIP reserve");
+        }
+        l.end();
+    }
+}
+
 // Window big enough for the length but with no aligned fit inside it; free space right after.
 static void run_p54() {
     const uint64_t blk = 0x10000;
@@ -1925,6 +2065,7 @@ int main(void) {
         run_p2();
         run_p4();
         run_p7();
+        run_p8();
         run_p54();
         run_c();
         run_g();

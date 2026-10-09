@@ -35,6 +35,8 @@ SECTIONS
   P7 pool model, as counter moves per operation: commit and decommit of each memory type 0..10,
      reservation cost for 2/4/6/8 MiB, which available pool each kind of allocation draws from,
      and reserve / commit against a fully drained pool
+  P8 pool: block return timing after unmap and decommit, reservation cost from 16 to 512 MiB,
+     partial unmap of a reservation, and a two-block commit split across both available pools
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
