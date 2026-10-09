@@ -37,6 +37,7 @@ int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
 int32_t sceKernelMemoryPoolGetBlockStats(void* stats, size_t size);
 int32_t sceKernelGetDirectMemoryType(long start, int32_t* type, long* region_start,
                                      long* region_end);
+int32_t sceKernelVirtualQuery(const void* addr, int32_t flags, void* info, size_t info_size);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -2001,6 +2002,261 @@ static void run_p9() {
     }
 }
 
+// ---- T: every path the shadPS4 changes touch that the sections above do not isolate ----------
+
+static int32_t pdelta_run(Line& l, const char* tag, int32_t r, const PS& a) {
+    l.s(tag).c(code(r)).c(':');
+    d4(l, a, ps());
+    return r;
+}
+
+static void run_t() {
+    say("== T  touched paths: committed pool block, mixed ranges, nulls, fixed maps, partial ops");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    // T1-T7: the committed block itself, located through VirtualQuery
+    {
+        uint64_t x = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &x);
+        void* r = 0;
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r) != 0 ||
+            sceKernelMemoryPoolCommit(r, blk, 3, 0x3, 0) != 0) {
+            say("T1   SKIP reserve/commit");
+        } else {
+            unsigned char vi[0x60];
+            my_memset(vi, 0, sizeof(vi));
+            const int32_t rq = sceKernelVirtualQuery(r, 0, vi, 0x48);
+            uint64_t off = 0;
+            for (int k = 7; k >= 0; k--)
+                off = (off << 8) | vi[0x10 + k];
+            const bool committed = (vi[0x20] >> 4) & 1, pooled = (vi[0x20] >> 3) & 1;
+            const bool located = rq == 0 && committed && off != 0 && off % blk == 0;
+            {
+                Line l = head("T1", "VirtualQuery of committed VA");
+                l.ret("ret", rq).s("pooled=").c(pooled ? '1' : '0').s(" committed=");
+                l.c(committed ? '1' : '0').s(" located=").c(located ? '1' : '0').end();
+            }
+            if (located) {
+                const long pa = (long)off;
+                q_raw("T2", "exact query of committed block", pa, 0, sizeof(DmemInfo), pa);
+                q_raw("T3", "find-next from committed block", pa, 1, sizeof(DmemInfo), pa);
+                gdt_line("T4", "type of committed block", pa, pa);
+                e_map("T5", "map committed block", pa, blk, 0x3);
+                {
+                    PS a = ps();
+                    Line l = head("T6", "chk / rel committed block");
+                    pdelta_run(l, "chk=", sceKernelCheckedReleaseDirectMemory(pa, blk), a);
+                    a = ps();
+                    pdelta_run(l, " rel=", sceKernelReleaseDirectMemory(pa, blk), a);
+                    int32_t pr = 0;
+                    l.s(" va=").c(mapped(r, &pr) ? 'M' : '.').end();
+                }
+            }
+            sceKernelMunmap(r, rsv);
+        }
+    }
+    // T8: one release over [allocated A 4 pages][pool block]
+    {
+        int32_t rr = 0;
+        const long c = alloc_al(0, g_dmem, 8, blk, 3, &rr);
+        Line l = head("T8", "[A 4pg][pool blk]: chk / rel all");
+        if (c < 0) {
+            l.s("SKIP alloc").end();
+        } else {
+            sceKernelReleaseDirectMemory(c, 8 * PG);
+            const long a4 = alloc_in(c, c + (long)blk, 4, 3, &rr);
+            uint64_t pp = 0;
+            const int32_t re =
+                sceKernelMemoryPoolExpand((uint64_t)c + blk, (uint64_t)c + 2 * blk, blk, blk, &pp);
+            if (a4 != c || re != 0 || pp != (uint64_t)c + blk) {
+                l.s("SKIP layout").end();
+                release_all(a4, 4);
+            } else {
+                PS a = ps();
+                pdelta_run(l, "chk=", sceKernelCheckedReleaseDirectMemory(c, 2 * blk), a);
+                phys_str(l.c(' '), c, 4);
+                a = ps();
+                pdelta_run(l, " rel=", sceKernelReleaseDirectMemory(c, 2 * blk), a);
+                phys_str(l.c(' '), c, 4).end();
+                release_all(c, 4);
+            }
+        }
+    }
+    // T9: query next to a pool block, [pool blk][A t3][B t3]
+    {
+        int32_t rr = 0;
+        const long c = alloc_al(0, g_dmem, 12, blk, 3, &rr);
+        if (c < 0) {
+            say("T9   SKIP alloc");
+        } else {
+            sceKernelReleaseDirectMemory(c, 12 * PG);
+            uint64_t pp = 0;
+            const int32_t re =
+                sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &pp);
+            const long a = alloc_in(c + (long)blk, c + 2 * (long)blk, 4, 3, &rr);
+            const long b = alloc_in(c + 2 * (long)blk, c + 3 * (long)blk, 4, 3, &rr);
+            if (re != 0 || pp != (uint64_t)c || a != c + (long)blk || b != c + 2 * (long)blk) {
+                say("T9   SKIP layout");
+            } else {
+                q_raw("T9", "[pool][A][B]: query B, rel to B", b, 0, sizeof(DmemInfo), b);
+                q_raw("T10", "[pool][A][B]: find-next at pool", c, 1, sizeof(DmemInfo), b);
+            }
+            release_all(a, 4);
+            release_all(b, 4);
+        }
+    }
+    // T11: type of mapped memory
+    {
+        int32_t rr = 0;
+        const long pa = alloc(2, 3, &rr);
+        uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
+        if (va)
+            gdt_line("T11", "type of mapped memory", pa, pa);
+        unmap_all(va, 2);
+        release_all(pa, 2);
+    }
+    // T12: available size with one output null; T13: query with a null info pointer
+    {
+        long ph = -1;
+        size_t sz = 0;
+        Line l = head("T12", "available: null phys / null size");
+        l.ret("np", sceKernelAvailableDirectMemorySize(0, (long)g_dmem, PG, nullptr, &sz));
+        l.s("size!=0:").c(sz ? '1' : '0').c(' ');
+        l.ret("ns", sceKernelAvailableDirectMemorySize(0, (long)g_dmem, PG, &ph, nullptr));
+        l.s("phys set:").c(ph != -1 ? '1' : '0').end();
+    }
+    {
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        if (pa >= 0) {
+            Line l = head("T13", "query, null info: size 0 / 18");
+            l.ret("s0", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0));
+            l.ret("s18", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0x18)).end();
+            release_all(pa, 1);
+        }
+    }
+    // T14: reserve that cannot be placed (1 TiB): counters must not move
+    {
+        void* v = 0;
+        const PS a = ps();
+        Line l = head("T14", "reserve 1T");
+        const int32_t r = pdelta_run(l, "", sceKernelMemoryPoolReserve(0, 1ull << 40, 0, 0, &v), a);
+        if (r == 0) {
+            const PS b = ps();
+            pdelta_run(l, " munmap=", sceKernelMunmap(v, 1ull << 40), b);
+        }
+        l.end();
+    }
+    // T15: munmap of only the committed 64K inside a reservation
+    {
+        void* v = 0;
+        Line l = head("T15", "munmap committed 64K of a reserve");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
+            sceKernelMemoryPoolCommit(v, blk, 3, 0x3, 0) == 0) {
+            const PS a = ps();
+            pdelta_run(l, "", sceKernelMunmap(v, blk), a);
+            int32_t pr = 0;
+            l.s(" va=").c(mapped(v, &pr) ? 'M' : '.');
+            const PS b = ps();
+            pdelta_run(l, " whole=", sceKernelMunmap(v, rsv), b);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    // T16: decommit half of a 128K commit, then the rest
+    {
+        void* v = 0;
+        Line l = head("T16", "128K t3: decommit 1st 64K / 2nd");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
+            sceKernelMemoryPoolCommit(v, 2 * blk, 3, 0x3, 0) == 0) {
+            PS a = ps();
+            pdelta_run(l, "", sceKernelMemoryPoolDecommit(v, blk, 0), a);
+            a = ps();
+            pdelta_run(l, " ", sceKernelMemoryPoolDecommit((uint8_t*)v + blk, blk, 0), a);
+            sceKernelMunmap(v, rsv);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    // T17: mtypeprotect of committed pool memory to types other than 0 and 3
+    {
+        static const int types[] = {1, 2, 10};
+        Line l = head("T17", "t3 commit, mtype->1,2,10: mt|dc");
+        for (int t : types) {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0)
+                break;
+            if (sceKernelMemoryPoolCommit(v, blk, 3, 0x3, 0) == 0) {
+                PS a = ps();
+                l.dec(t).c(':');
+                pdelta_run(l, "", sceKernelMtypeprotect(v, blk, t, 0x3), a);
+                a = ps();
+                pdelta_run(l, "|", sceKernelMemoryPoolDecommit(v, blk, 0), a);
+                l.c(' ');
+            }
+            sceKernelMunmap(v, rsv);
+        }
+        l.end();
+    }
+    // T18: munmap covering two reservations at once
+    {
+        void* r1 = 0;
+        void* r2 = 0;
+        Line l = head("T18", "munmap over two reservations");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r1) == 0 &&
+            sceKernelMemoryPoolReserve((uint8_t*)r1 + rsv, rsv, 0, 0, &r2) == 0) {
+            if (r2 == (uint8_t*)r1 + rsv) {
+                const PS a = ps();
+                pdelta_run(l, "", sceKernelMunmap(r1, 2 * rsv), a);
+            } else {
+                l.s("SKIP not adjacent");
+                sceKernelMunmap(r1, rsv);
+                sceKernelMunmap(r2, rsv);
+            }
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    // T19: fixed direct mapping over a reservation that holds a committed block
+    {
+        void* v = 0;
+        int32_t rr = 0;
+        const long pa = alloc(4, 3, &rr);
+        Line l = head("T19", "MAP_FIXED dmem over reserve | munmap");
+        if (pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
+            sceKernelMemoryPoolCommit(v, blk, 0, 0x3, 0) == 0) {
+            PS a = ps();
+            void* at = v;
+            pdelta_run(l, "", sceKernelMapDirectMemory(&at, blk, 0x3, 0x10, pa, PG), a);
+            l.s(" same=").c(at == v ? '1' : '0');
+            a = ps();
+            pdelta_run(l, " munmap=", sceKernelMunmap(v, rsv), a);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+        release_all(pa, 4);
+    }
+    // T20: block stats with sizes other than 16
+    {
+        static const uint32_t sizes[] = {0, 4, 8, 12, 16, 32};
+        Line l = head("T20", "block stats: bytes written per size");
+        for (uint32_t sz : sizes) {
+            unsigned char buf[0x30];
+            my_memset(buf, 0xCC, sizeof(buf));
+            const int32_t r = sceKernelMemoryPoolGetBlockStats(buf, sz);
+            int last = 0;
+            for (int k = 0; k < 0x30; k++)
+                if (buf[k] != 0xCC)
+                    last = k + 1;
+            l.hex(sz).c(':').c(code(r)).hex((uint64_t)last).c(' ');
+        }
+        l.end();
+    }
+}
+
 // Window big enough for the length but with no aligned fit inside it; free space right after.
 static void run_p54() {
     const uint64_t blk = 0x10000;
@@ -2120,6 +2376,7 @@ int main(void) {
         run_p7();
         run_p8();
         run_p9();
+        run_t();
         run_p54();
         run_c();
         run_g();

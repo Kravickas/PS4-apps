@@ -39,6 +39,13 @@ SECTIONS
      partial unmap of a reservation, and a two-block commit split across both available pools
   P9 memory type changed with mtypeprotect between commit and decommit, and
      sceKernelGetDirectMemoryType on a pool block, a plain allocation and a free page
+  T  every path the shadPS4 changes touch that no other section isolates: the committed pool block
+     itself (located through VirtualQuery) under query, find-next, type, map, chk and rel; one
+     release over an allocation plus a pool block; query next to a pool block; type of mapped
+     memory; one null output; a null query info; a reserve that cannot be placed; munmap of only
+     the committed part of a reservation; partial decommit; mtypeprotect of committed pool memory
+     to types 1, 2 and 10; munmap over two reservations; a fixed direct map over a reservation;
+     block stats with sizes other than 16
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
