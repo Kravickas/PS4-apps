@@ -35,6 +35,8 @@ int32_t sceKernelMemoryPoolCommit(void* addr, uint64_t len, int32_t type, int32_
 int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
 // libkernel 0x19e80: ioctl 0x4010a802 into 16 bytes, copies min(size, 0x10); no null check.
 int32_t sceKernelMemoryPoolGetBlockStats(void* stats, size_t size);
+int32_t sceKernelGetDirectMemoryType(long start, int32_t* type, long* region_start,
+                                     long* region_end);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -1948,6 +1950,57 @@ static void run_p8() {
     }
 }
 
+// ---- P9: memory type changed between commit and decommit; GetDirectMemoryType --------------
+
+static void p9_case(const char* id, const char* name, int commit_type, int new_type) {
+    const uint64_t blk = 0x10000;
+    void* v = 0;
+    Line l = head(id, name);
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &v) != 0)
+        return l.s("SKIP reserve").end();
+    PS a = ps();
+    const int32_t rc = sceKernelMemoryPoolCommit(v, blk, commit_type, 0x3, 0);
+    l.s("commit=").c(code(rc)).c(':');
+    d4(l, a, ps());
+    if (rc == 0) {
+        a = ps();
+        l.s(" mtype=").c(code(sceKernelMtypeprotect(v, blk, new_type, 0x3))).c(':');
+        d4(l, a, ps());
+        a = ps();
+        l.s(" decommit=").c(code(sceKernelMemoryPoolDecommit(v, blk, 0))).c(':');
+        d4(l, a, ps());
+    }
+    sceKernelMunmap(v, 0x200000);
+    l.end();
+}
+
+static void gdt_line(const char* id, const char* name, long at, long ref) {
+    int32_t type = -1;
+    long st = -1, en = -1;
+    const int32_t r = sceKernelGetDirectMemoryType(at, &type, &st, &en);
+    Line l = head(id, name);
+    l.ret("ret", r);
+    if (r == 0)
+        l.s("type=").dec(type).s(" start=").shex(st - ref).s(" end=").shex(en - ref);
+    l.end();
+}
+
+static void run_p9() {
+    say("== P9 mtypeprotect between commit and decommit (deltas af/ac/lf/lc); GetDirectMemoryType");
+    p9_case("P90", "commit t3, mtype->0, decommit", 3, 0);
+    p9_case("P91", "commit t0, mtype->3, decommit", 0, 3);
+    uint64_t pp = 0;
+    if (sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &pp) == 0)
+        gdt_line("P92", "type of an uncommitted pool block", (long)pp, (long)pp);
+    int32_t r = 0;
+    const long pa = alloc(2, 3, &r);
+    if (pa >= 0) {
+        gdt_line("P93", "type of a plain allocation", pa, pa);
+        gdt_line("P94", "type of a free page", pa + (long)(2 * PG), pa);
+        release_all(pa, 2);
+    }
+}
+
 // Window big enough for the length but with no aligned fit inside it; free space right after.
 static void run_p54() {
     const uint64_t blk = 0x10000;
@@ -2066,6 +2119,7 @@ int main(void) {
         run_p4();
         run_p7();
         run_p8();
+        run_p9();
         run_p54();
         run_c();
         run_g();
