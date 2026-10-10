@@ -70,6 +70,13 @@ SECTIONS
      low aligned addresses, over the second half of a reservation, and over a 2 MiB direct mapping
   LA the occupied band above the thread stacks, found with fixed no-overwrite probes and bisected
      to 16 KiB, and where the default search goes once everything below it is full
+  HB non-fixed reservations whose hint is occupied, crosses the default search end, or lies in
+     the system region
+  XC cross-checks from a second angle for rules that rested on one probe: pool expand windows,
+     fixed reservation alignment, checked release past 0x5000000000, partial copy into read-only
+     and unmapped memory, and the default search end for flexible maps and pool reservations
+  MF file mappings: placement without a hint, with the default search space full, with an
+     occupied hint, and with a hint above the default search end
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
@@ -86,9 +93,3 @@ BUILD
   Needs OO_PS4_TOOLCHAIN and sce_sys/about/right.sprx (the CI stages it from the toolchain).
     make all    -> eboot.bin and IV0000-SHAD00090_00-SHADDMEMTEST0000.pkg
 
-Stack-size variant
-  `make MAIN_STACK=0x1000000` builds DmemTestStack (title SHAD00091): the same test with a 16 MiB
-  main thread stack, set through the process parameters (src/procparam.S replaces the block from
-  OpenOrbis' crt1.o, which the Makefile strips with objcopy). It writes dmem_results_stack.txt.
-  CI builds both packages. Comparing the two logs shows whether the address where the default
-  mapping search stops depends on the main thread stack.

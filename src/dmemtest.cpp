@@ -39,6 +39,8 @@ int32_t sceKernelGetDirectMemoryType(long start, int32_t* type, long* region_sta
                                      long* region_end);
 int32_t sceKernelVirtualQuery(const void* addr, int32_t flags, void* info, size_t info_size);
 int32_t sceKernelMapFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags);
+int32_t sceKernelMmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+                      void** res);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -332,17 +334,12 @@ static Screen g_screen;
 // ---- log ------------------------------------------------------------------------------------
 // Each line is opened, written, fsynced and closed, so it survives the process dying mid-test.
 
-#ifdef DMEM_STACK_VARIANT
-#define DMEM_RESULTS_NAME "dmem_results_stack.txt"
-#else
-#define DMEM_RESULTS_NAME "dmem_results.txt"
-#endif
-static const char* g_log_path = "/data/" DMEM_RESULTS_NAME;
+static const char* g_log_path = "/data/dmem_results.txt";
 
 static void log_init() {
     int fd = sceKernelOpen(g_log_path, 0x0601, 0777);
     if (fd < 0) {
-        g_log_path = "/temp0/" DMEM_RESULTS_NAME;
+        g_log_path = "/temp0/dmem_results.txt";
         fd = sceKernelOpen(g_log_path, 0x0601, 0777);
     }
     if (fd >= 0)
@@ -3268,6 +3265,256 @@ static void run_l() {
     release_all(pa, 1);
 }
 
+// ---- HB: a non-fixed mapping whose address hint is occupied or runs past the search end ------
+
+static void hint_line(const char* id, const char* name, void* hint, uint64_t len) {
+    void* v = hint;
+    const int32_t r = sceKernelMemoryPoolReserve(hint, len, 0, 0, &v);
+    Line l = head(id, name);
+    l.c(code(r));
+    if (r == 0) {
+        l.s(" at=").hex((uint64_t)v).s(" rel hint=").shex((long long)((uint64_t)v - (uint64_t)hint));
+        sceKernelMunmap(v, len);
+    }
+    l.end();
+}
+
+static void run_hb() {
+    say("== HB non-fixed reservations with an occupied hint or a hint near the search end");
+    const uint64_t rsv = 0x200000;
+    void* held = 0;
+    if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &held) == 0) {
+        hint_line("HB1", "hint = an existing reservation", held, rsv);
+        sceKernelMunmap(held, rsv);
+    } else {
+        say("HB1  SKIP");
+    }
+    hint_line("HB2", "hint 7EEA00000, 4M (crosses 7EEC00000)", (void*)0x7EEA00000ull, 2 * rsv);
+    hint_line("HB3", "hint 800000000 (system region)", (void*)0x800000000ull, rsv);
+    hint_line("HB4", "hint 7EEC00000 exactly, 2M", (void*)0x7EEC00000ull, rsv);
+}
+
+// ---- XC / MF: independent cross-checks of rules that rested on one probe; file mappings ---------
+
+// Takes every space the default search would use: largest reservations first, then 16 KiB aliases
+// of one physical page until the search fails or lands at or above `stop`.
+struct DefaultFill {
+    void* held[16];
+    uint64_t held_size[16];
+    int nh = 0;
+    void* small[2048];
+    int ns = 0;
+    int32_t last = 0;
+    uint64_t escaped = 0;
+};
+
+static void fill_default(DefaultFill& f, long pa, uint64_t stop) {
+    for (; f.nh < 16; f.nh++) {
+        const uint64_t m = max_reserve(1ull << 40);
+        if (!m || sceKernelMemoryPoolReserve(0, m, 0, 0, &f.held[f.nh]) != 0)
+            break;
+        f.held_size[f.nh] = m;
+        if ((uint64_t)f.held[f.nh] >= stop) {
+            f.nh++;
+            break;
+        }
+    }
+    for (; f.ns < 2048; f.ns++) {
+        void* d = 0;
+        f.last = sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG);
+        if (f.last != 0)
+            break;
+        f.small[f.ns] = d;
+        if ((uint64_t)d >= stop) {
+            f.escaped = (uint64_t)d;
+            f.ns++;
+            break;
+        }
+    }
+}
+
+static void unfill_default(DefaultFill& f) {
+    for (int i = 0; i < f.ns; i++)
+        sceKernelMunmap(f.small[i], PG);
+    for (int i = 0; i < f.nh; i++)
+        sceKernelMunmap(f.held[i], f.held_size[i]);
+}
+
+static int mf_open() {
+    // a 64 KiB file next to the results file
+    char path[64];
+    const char* dir = g_log_path[1] == 'd' ? "/data/" : "/temp0/";
+    int n = 0;
+    for (const char* c = dir; *c; c++)
+        path[n++] = *c;
+    for (const char* c = "dmem_mf.bin"; *c; c++)
+        path[n++] = *c;
+    path[n] = 0;
+    const int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd < 0)
+        return fd;
+    static unsigned char zero[0x4000];
+    for (int i = 0; i < 4; i++)
+        sceKernelWrite(fd, zero, sizeof(zero));
+    return fd;
+}
+
+static void mf_line(const char* id, const char* name, int fd, void* hint) {
+    void* v = 0;
+    const int32_t r = sceKernelMmap(hint, 0x10000, 0x1, 0x1, fd, 0, &v);
+    Line l = head(id, name);
+    l.c(code(r));
+    if (r == 0) {
+        l.s(" at=").hex((uint64_t)v);
+        if (hint)
+            l.s(" rel hint=").shex((long long)((uint64_t)v - (uint64_t)hint));
+        sceKernelMunmap(v, 0x10000);
+    }
+    l.end();
+}
+
+static void run_xc() {
+    say("== XC cross-checks: expand window, fixed reserve alignment, checked release past X, "
+        "partial copy, default search end for flexible and pool");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    int32_t rr = 0;
+    {
+        // XC1: expand windows over a known layout, 64 KiB aligned base c:
+        // [page at c][free ...]
+        const long c = alloc_al(0, g_dmem, 16, blk, 3, &rr);
+        Line l = head("XC1", "expand win: fit@c, fit@end, 1 page short");
+        if (c < 0) {
+            l.s("SKIP").end();
+        } else {
+            sceKernelReleaseDirectMemory(c, 16 * PG);
+            uint64_t px = 0;
+            // fits exactly at the start of the window
+            int32_t r = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &px);
+            l.c(code(r)).c(r == 0 && px == (uint64_t)c ? '=' : '.').c(' ');
+            // c is now pooled: the next aligned fit is c+10000, window ends exactly there + blk
+            r = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + 2 * blk, blk, blk, &px);
+            l.c(code(r)).c(r == 0 && px == (uint64_t)c + blk ? '=' : '.').c(' ');
+            // fit needs c+20000..c+30000, window stops one page short of it
+            r = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + 3 * blk - PG, blk, blk, &px);
+            l.c(code(r));
+            l.end();
+        }
+    }
+    {
+        // XC2: fixed reservations inside a free, 2 MiB aligned 4 MiB range
+        Line l = head("XC2", "fixed rsv at +4000, +100000, +200000");
+        void* base = 0;
+        if (sceKernelMemoryPoolReserve(0, 2 * rsv, 0, 0, &base) == 0) {
+            sceKernelMunmap(base, 2 * rsv);
+            static const uint64_t offs[] = {0x4000, 0x100000, 0x200000};
+            for (uint64_t o : offs) {
+                void* at = (uint8_t*)base + o;
+                void* v = at;
+                const int32_t r = sceKernelMemoryPoolReserve(at, rsv, 0, 0x90, &v);
+                l.c(code(r));
+                if (r == 0) {
+                    l.c(v == at ? '=' : '!');
+                    sceKernelMunmap(v, rsv);
+                }
+                l.c(' ');
+            }
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    {
+        // XC3: checked and unchecked release past 0x5000000000 with other lengths and starts
+        static const uint64_t st[] = {0x5000000000ull, 0x5000000000ull, 0x5000004000ull,
+                                      0x6000000000ull, 0x4FFFFFC000ull};
+        static const uint64_t ln[] = {1ull << 20, 1ull << 35, PG, 1ull << 30, 1ull << 20};
+        Line l = head("XC3", "chk/rel: X+1M, X+32G, X+4000, 6000.., X-4000+1M");
+        for (int i = 0; i < 5; i++) {
+            l.c(code(sceKernelCheckedReleaseDirectMemory((long)st[i], ln[i])));
+            l.c(code(sceKernelReleaseDirectMemory((long)st[i], ln[i]))).c(' ');
+        }
+        l.end();
+    }
+    {
+        // XC4: info straddling writable -> read-only, and a 4-byte straddle into unmapped
+        const long pa = alloc(3, 3, &rr);
+        uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
+        Line l = head("XC4", "straddle into RO (8) / unmapped (4)");
+        if (va) {
+            sceKernelMprotect(va + PG, PG, 0x1);
+            unsigned char* t = va + PG - 8;
+            my_memset(t, 0xCC, 8);
+            int32_t r = sceKernelDirectMemoryQuery(pa, 0, t, 0x18);
+            int w = 0;
+            for (int k = 0; k < 8; k++)
+                w += t[k] != 0xCC;
+            l.s("ro: ").c(code(r)).c(':').dec(w).c(' ');
+            sceKernelMunmap(va + PG, PG);
+            t = va + PG - 4;
+            my_memset(t, 0xCC, 4);
+            r = sceKernelDirectMemoryQuery(pa, 0, t, 0x18);
+            w = 0;
+            for (int k = 0; k < 4; k++)
+                w += t[k] != 0xCC;
+            l.s("unmapped: ").c(code(r)).c(':').dec(w);
+            sceKernelMunmap(va, PG);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+        release_all(pa, 3);
+    }
+    {
+        // XC5 / MF2: with the default search space full, flexible, pool and file mappings
+        const long pa = alloc(1, 3, &rr);
+        DefaultFill f;
+        if (pa >= 0)
+            fill_default(f, pa, 0x7EEC00000ull);
+        void* fx = 0;
+        const int32_t rf = sceKernelMapFlexibleMemory(&fx, PG, 0x3, 0);
+        void* rv = 0;
+        const int32_t rp = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rv);
+        Line l = head("XC5", "default space full: flex / pool rsv");
+        l.s("filled small=").dec(f.ns).s(" escaped=").c(f.escaped ? '1' : '0');
+        l.s(" flex=").c(code(rf));
+        if (rf == 0) {
+            l.c(':').hex((uint64_t)fx);
+            sceKernelMunmap(fx, PG);
+        }
+        l.s(" rsv=").c(code(rp));
+        if (rp == 0) {
+            l.c(':').hex((uint64_t)rv);
+            sceKernelMunmap(rv, rsv);
+        }
+        l.end();
+        const int fd = mf_open();
+        if (fd >= 0) {
+            mf_line("MF2", "file mmap, default space full", fd, 0);
+            sceKernelClose(fd);
+        } else {
+            say("MF2  SKIP open");
+        }
+        unfill_default(f);
+        release_all(pa, 1);
+    }
+    {
+        const int fd = mf_open();
+        if (fd < 0) {
+            Line l = head("MF1", "file mmap, no hint");
+            l.s("SKIP open ").hex((uint64_t)(uint32_t)fd).end();
+        } else {
+            mf_line("MF1", "file mmap, no hint", fd, 0);
+            void* held = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &held) == 0) {
+                mf_line("MF3", "file mmap, hint = a reservation", fd, held);
+                sceKernelMunmap(held, rsv);
+            }
+            mf_line("MF4", "file mmap, hint 900000000", fd, (void*)0x900000000ull);
+            sceKernelClose(fd);
+        }
+    }
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -3526,9 +3773,6 @@ int main(void) {
     log_init();
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
     say("===== DMEM RELEASE TEST =====");
-#ifdef DMEM_STACK_VARIANT
-    say("variant: main thread stack set through the process parameters");
-#endif
     {
         Line l;
         l.s("dmem size=").hex(g_dmem).s("  page=").hex(PG).s("  screen=").c(g_screen.ok ? '1' : '0');
@@ -3563,6 +3807,8 @@ int main(void) {
         run_m();
         run_n();
         run_l();
+        run_hb();
+        run_xc();
         run_k();
         run_p54();
         run_c();
