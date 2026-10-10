@@ -55,6 +55,8 @@ SECTIONS
      pool reservation limit is a size limit; query info on a read-only page; fixed direct maps
      over a whole reservation and its tail; a fixed flexible map over a reservation and free VA;
      whether a rejected mtypeprotect leaves the protection unchanged
+  X  memory type 10 by protection (mtypeprotect and pool commit), and fixed direct maps over the
+     tail, the middle, a whole committed reservation, and a reservation plus space past it
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,

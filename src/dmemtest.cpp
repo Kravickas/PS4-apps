@@ -2554,6 +2554,99 @@ static void run_w() {
     }
 }
 
+// ---- X: type 10 by protection, fixed maps over parts of reservations ---------------------------
+
+static void fixed_over(const char* id, const char* name, uint64_t at_off, uint64_t len,
+                       bool commit) {
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    int32_t rr = 0;
+    const int pages = (int)((at_off + len + PG - 1) / PG) + 4;
+    const long pa = alloc(pages, 3, &rr);
+    void* v = 0;
+    Line l = head(id, name);
+    if (pa < 0 || sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0) {
+        l.s("SKIP").end();
+        release_all(pa, pages);
+        return;
+    }
+    if (commit && sceKernelMemoryPoolCommit(v, blk, 0, 0x3, 0) != 0)
+        l.s("commit failed ");
+    PS a = ps();
+    void* at = (uint8_t*)v + at_off;
+    const int32_t r = sceKernelMapDirectMemory(&at, len, 0x3, 0x10, pa, PG);
+    pdelta_run(l, "", r, a);
+    if (r == 0) {
+        l.s(" same=").c(at == (uint8_t*)v + at_off ? '1' : '0');
+        sceKernelMunmap(at, len);
+    }
+    a = ps();
+    pdelta_run(l, " munmap rsv=", sceKernelMunmap(v, rsv), a);
+    l.end();
+    release_all(pa, pages);
+}
+
+static void run_x() {
+    say("== X  type 10 by protection; fixed maps over parts of a reservation");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    {
+        static const int prots[] = {0, 1, 2, 3, 0x10, 0x20, 0x30, 0x11, 0x22, 0x33};
+        Line l = head("X1", "dmem mtype 10, prot 0,1,2,3,10..33");
+        for (int pr : prots) {
+            int32_t rr = 0;
+            const long pa = alloc(1, 3, &rr);
+            uint8_t* va = pa >= 0 ? map(pa, 1, &rr) : nullptr;
+            if (!va) {
+                l.s("? ");
+                release_all(pa, 1);
+                continue;
+            }
+            const int32_t r = sceKernelMtypeprotect(va, PG, 10, pr);
+            DmemInfo q;
+            my_memset(&q, 0, sizeof(q));
+            sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+            l.c(code(r)).dec(q.mtype).c(' ');
+            unmap_all(va, 1);
+            release_all(pa, 1);
+        }
+        l.end();
+    }
+    {
+        Line l = head("X2", "pool commit t10, prot 0,1,2,3: move");
+        for (int pr = 0; pr <= 3; pr++) {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0)
+                break;
+            const PS a = ps();
+            const int32_t r = sceKernelMemoryPoolCommit(v, blk, 10, pr, 0);
+            l.c(r == 0 ? moved(a, ps()) : code(r));
+            if (r == 0)
+                sceKernelMemoryPoolDecommit(v, blk, 0);
+            sceKernelMunmap(v, rsv);
+        }
+        l.end();
+    }
+    {
+        void* v = 0;
+        Line l = head("X3", "pool t3 commit, mtype->10 prot 1");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
+            sceKernelMemoryPoolCommit(v, blk, 3, 0x3, 0) == 0) {
+            PS a = ps();
+            pdelta_run(l, "mt=", sceKernelMtypeprotect(v, blk, 10, 0x1), a);
+            a = ps();
+            pdelta_run(l, " dc=", sceKernelMemoryPoolDecommit(v, blk, 0), a);
+        } else {
+            l.s("SKIP");
+        }
+        if (v)
+            sceKernelMunmap(v, rsv);
+        l.end();
+    }
+    fixed_over("X4", "fixed over rsv tail (last page)", rsv - PG, PG, false);
+    fixed_over("X5", "fixed over rsv middle", 0x100000, PG, false);
+    fixed_over("X6", "fixed whole rsv holding a commit", 0, rsv, true);
+    fixed_over("X7", "fixed rsv + 2M past it", 0, 2 * rsv, false);
+}
+
 // U12, last: query info pointing at unmapped memory
 static void run_u12() {
     int32_t rr = 0;
@@ -2690,6 +2783,7 @@ int main(void) {
         run_t();
         run_u();
         run_w();
+        run_x();
         run_p54();
         run_c();
         run_g();
