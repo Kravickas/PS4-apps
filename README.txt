@@ -66,8 +66,10 @@ SECTIONS
   M  pool reserve flags and alignment ladders, pool reserve with MAP_FIXED over free space, part of
      a reservation, a whole reservation and a direct mapping, direct map alignments of 2G/4G/3M, and
      the type 10 fallback deltas
+  N  alignment ladders for pool reservations (2M..2G) and direct maps (4K..1G), fixed reservations at
+     low aligned addresses, over the second half of a reservation, and over a 2 MiB direct mapping
   K  address space layout: placement with hints, filling the space below the ceiling and then
-     mapping direct and flexible memory, fixed maps above it, every region above 0x700000000,
+     mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked

@@ -3055,6 +3055,114 @@ static void run_m() {
     }
 }
 
+// ---- N: alignment ladders, fixed reservations at aligned targets ------------------------------
+
+static void run_n() {
+    say("== N  alignment ladders (reserve, direct map); fixed reservations at 2 MiB aligned targets");
+    const uint64_t rsv = 0x200000;
+    int32_t rr = 0;
+    {
+        Line l = head("N1", "reserve align 2M,4M,..,2G");
+        for (int b = 21; b <= 31; b++) {
+            void* v = 0;
+            const int32_t r = sceKernelMemoryPoolReserve(0, rsv, 1ull << b, 0, &v);
+            l.c(code(r));
+            if (r == 0) {
+                l.c((uint64_t)v % (1ull << b) == 0 ? '=' : '!');
+                sceKernelMunmap(v, rsv);
+            }
+        }
+        l.end();
+    }
+    {
+        static const int bits[] = {12, 14, 15, 16, 20, 21, 24, 28, 30};
+        const long pa = alloc(1, 3, &rr);
+        Line l = head("N2", "dmem align 4K,16K,32K,64K,1M,2M,16M,256M,1G");
+        for (int b : bits) {
+            void* d = 0;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, 1ull << b) : -1;
+            l.c(code(r));
+            if (r == 0) {
+                l.c((uint64_t)d % (1ull << b) == 0 ? '=' : '!');
+                sceKernelMunmap(d, PG);
+            }
+        }
+        l.end();
+        release_all(pa, 1);
+    }
+    {
+        static const uint64_t lows[] = {0x200000ull, 0x40000000ull};
+        Line l = head("N3", "fixed rsv at 200000, 40000000");
+        for (uint64_t at : lows) {
+            void* v = (void*)at;
+            const int32_t r = sceKernelMemoryPoolReserve((void*)at, rsv, 0, 0x90, &v);
+            l.c(code(r));
+            if (r == 0) {
+                l.c(v == (void*)at ? '=' : '!');
+                sceKernelMunmap(v, rsv);
+            }
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
+        // a 4 MiB reservation, then a fixed 4 MiB reservation starting 2 MiB into it
+        Line l = head("N4", "fixed rsv over 2nd half of a 4M rsv");
+        void* base = 0;
+        if (sceKernelMemoryPoolReserve(0, 4 * rsv, 0, 0, &base) == 0) {
+            sceKernelMunmap(base, 4 * rsv);
+            void* r1 = base;
+            if (sceKernelMemoryPoolReserve(base, 2 * rsv, 0, 0x10, &r1) == 0) {
+                static const int32_t ff[] = {0x10, 0x90};
+                for (int32_t f : ff) {
+                    PS a = ps();
+                    void* w = (uint8_t*)base + rsv;
+                    const int32_t r = sceKernelMemoryPoolReserve(w, 2 * rsv, 0, f, &w);
+                    l.hex((uint64_t)f).c(':');
+                    pdelta_run(l, "", r, a);
+                    l.c(' ');
+                    if (r == 0)
+                        sceKernelMunmap(w, 2 * rsv);
+                }
+                sceKernelMunmap(base, 2 * rsv);
+            } else {
+                l.s("SKIP fixed");
+            }
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    {
+        // a 2 MiB aligned direct mapping, then a fixed reservation over it
+        const long pa = alloc(128, 3, &rr);
+        Line l = head("N5", "fixed rsv over a 2M dmem map 10|90");
+        void* d = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&d, rsv, 0x3, 0, pa, rsv) == 0) {
+            static const int32_t ff[] = {0x90, 0x10};
+            for (int32_t f : ff) {
+                PS a = ps();
+                void* w = d;
+                const int32_t r = sceKernelMemoryPoolReserve(d, rsv, 0, f, &w);
+                l.hex((uint64_t)f).c(':');
+                pdelta_run(l, "", r, a);
+                l.c(' ');
+                if (r == 0) {
+                    sceKernelMunmap(w, rsv);
+                    d = 0;
+                    break;
+                }
+            }
+            if (d)
+                sceKernelMunmap(d, rsv);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+        release_all(pa, 128);
+    }
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -3167,6 +3275,8 @@ static void run_k() {
     }
     say("K4   regions from 700000000 upward (find-next):");
     vq_walk("K4", 0x700000000ull, 0x10000000000ull, 24);
+    say("K6   every region from 0 (find-next, up to 64):");
+    vq_walk("K6", 0, 0x10000000000ull, 64);
     {
         static const uint64_t addrs[] = {0x7F0000000ull, 0x800000000ull, 0x1000000000ull,
                                          0xFC00000000ull};
@@ -3343,6 +3453,7 @@ int main(void) {
         run_z();
         run_j();
         run_m();
+        run_n();
         run_k();
         run_p54();
         run_c();
