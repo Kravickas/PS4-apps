@@ -1350,13 +1350,15 @@ static char code(int32_t r) {
         return 'A';
     case 0x80020002:
         return 'N';
+    case 0x8002000E:
+        return 'F';
     default:
         return '?';
     }
 }
 
 static void run_h() {
-    say("== H  ladders; codes: o ok, I EINVAL, M ENOMEM, A EACCES, N ENOENT, ? other");
+    say("== H  ladders; codes: o ok, I EINVAL, M ENOMEM, A EACCES, N ENOENT, F EFAULT, ? other");
     static const uint64_t starts[] = {1ull << 33, 1ull << 40, 1ull << 62, 0x7FFFFFFFFFFFC000ull,
                                       0x8000000000000000ull};
     {
@@ -3515,6 +3517,46 @@ static void run_xc() {
     }
 }
 
+// ---- CG: how many bytes a query writes before faulting, by size and writable bytes -----------
+
+static void cg_case(const char* id, const char* name, uint64_t writable, uint64_t size, bool ro) {
+    int32_t rr = 0;
+    const long pa = alloc(3, 3, &rr);
+    uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
+    Line l = head(id, name);
+    if (!va) {
+        l.s("SKIP").end();
+        release_all(pa, 3);
+        return;
+    }
+    if (ro)
+        sceKernelMprotect(va + PG, PG, 0x1);
+    else
+        sceKernelMunmap(va + PG, PG);
+    unsigned char* t = va + PG - writable;
+    my_memset(t, 0xCC, writable);
+    const int32_t r = sceKernelDirectMemoryQuery(pa, 0, t, size);
+    int w = 0;
+    for (uint64_t k = 0; k < writable; k++)
+        w += t[k] != 0xCC;
+    l.c(code(r)).s(" written=").hex((uint64_t)w).end();
+    if (ro)
+        sceKernelMunmap(va, 2 * PG);
+    else
+        sceKernelMunmap(va, PG);
+    release_all(pa, 3);
+}
+
+static void run_cg() {
+    say("== CG query copy before a fault: bytes written for size / writable bytes before the fault");
+    cg_case("CG1", "size 18, 0C writable (unmapped)", 0x0C, 0x18, false);
+    cg_case("CG2", "size 14, 12 writable (unmapped)", 0x12, 0x14, false);
+    cg_case("CG3", "size 14, 10 writable (unmapped)", 0x10, 0x14, false);
+    cg_case("CG4", "size 14, 11 writable (unmapped)", 0x11, 0x14, false);
+    cg_case("CG5", "size 18, 10 writable (unmapped)", 0x10, 0x18, false);
+    cg_case("CG6", "size 14, 12 writable (read-only)", 0x12, 0x14, true);
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -3809,6 +3851,7 @@ int main(void) {
         run_l();
         run_hb();
         run_xc();
+        run_cg();
         run_k();
         run_p54();
         run_c();

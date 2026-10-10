@@ -77,6 +77,8 @@ SECTIONS
      and unmapped memory, and the default search end for flexible maps and pool reservations
   MF file mappings: placement without a hint, with the default search space full, with an
      occupied hint, and with a hint above the default search end
+  CG how many bytes a query writes before a fault, for sizes that are and are not multiples of 8
+     and for unmapped and read-only memory after the writable part
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
