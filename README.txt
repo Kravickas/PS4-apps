@@ -59,6 +59,13 @@ SECTIONS
      tail, the middle, a whole committed reservation, and a reservation plus space past it
   Y  pool reservation addresses next to a direct and a flexible mapping; whether the reservation
      limit is a shared total; type 10 pool commits with GPU protection and with cached blocks free
+  Z  a type 10 pool commit when no flushed block is available
+  J  the remaining code paths: query info inside a reservation and straddling into unmapped
+     memory, pool commit types -1/11/12, size-0 mtypeprotect, fixed+no-overwrite over a
+     reservation, and a reservation that does not fit giving its block back
+  K  address space layout: placement with hints, filling the space below the ceiling and then
+     mapping direct and flexible memory, fixed maps above it, every region above 0x700000000,
+     placement with large alignments
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
