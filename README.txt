@@ -46,6 +46,11 @@ SECTIONS
      the committed part of a reservation; partial decommit; mtypeprotect of committed pool memory
      to types 1, 2 and 10; munmap over two reservations; a fixed direct map over a reservation;
      block stats with sizes other than 16
+  U  the committed pool block isolated by draining the pool and committing one known block, then
+     queried, typed, mapped and released; a null query info on a failing lookup; mtypeprotect type
+     ladders on committed pool memory and on direct memory; the largest pool reservation found by
+     bisection; MAP_FIXED direct maps over an empty reservation, a direct mapping and free VA.
+     U12 runs last: a query whose info pointer is unmapped
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,

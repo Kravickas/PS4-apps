@@ -2257,6 +2257,203 @@ static void run_t() {
     }
 }
 
+// ---- U: committed block isolated by draining, mtype ladders, reserve limit, fixed maps --------
+
+static void run_u() {
+    say("== U  committed pool block, mtypeprotect ladders, reserve size limit, MAP_FIXED variants");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    // U1-U6: drain the pool, expand one known block, commit it, probe it
+    {
+        void* rx = 0;
+        void* rs[16];
+        int nr = 0, used = 32;
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rx) != 0) {
+            say("U1   SKIP reserve");
+        } else {
+            for (int it = 0; it < 1024; it++) {
+                const PS st = ps();
+                if (st.af + st.ac == 0)
+                    break;
+                if (used == 32) {
+                    if (st.af + st.ac < 2 || nr == 16 ||
+                        sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rs[nr]) != 0)
+                        break;
+                    nr++;
+                    used = 0;
+                    continue;
+                }
+                if (sceKernelMemoryPoolCommit((uint8_t*)rs[nr - 1] + used * blk, blk, 3, 0x3, 0) !=
+                    0)
+                    break;
+                used++;
+            }
+            const PS drained = ps();
+            uint64_t x = 0;
+            const int32_t re = sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &x);
+            const int32_t rc = re == 0 ? sceKernelMemoryPoolCommit(rx, blk, 3, 0x3, 0) : -1;
+            const bool ok = drained.af + drained.ac == 0 && re == 0 && rc == 0;
+            {
+                Line l = head("U1", "drain, expand X, commit X");
+                l.s("left=").dec(drained.af + drained.ac).ret(" expand", re).ret("commit", rc);
+                l.s("isolated=").c(ok ? '1' : '0').end();
+            }
+            if (ok) {
+                const long pa = (long)x;
+                q_raw("U2", "exact query of committed X", pa, 0, sizeof(DmemInfo), pa);
+                q_raw("U3", "find-next from committed X", pa, 1, sizeof(DmemInfo), pa);
+                gdt_line("U4", "type of committed X", pa, pa);
+                e_map("U5", "map committed X", pa, blk, 0x3);
+                PS a = ps();
+                Line l = head("U6", "chk / rel committed X");
+                pdelta_run(l, "chk=", sceKernelCheckedReleaseDirectMemory(pa, blk), a);
+                a = ps();
+                pdelta_run(l, " rel=", sceKernelReleaseDirectMemory(pa, blk), a);
+                int32_t pr = 0;
+                l.s(" va=").c(mapped(rx, &pr) ? 'M' : '.');
+                if (mapped(rx, &pr) && (pr & 1)) {
+                    *(volatile uint32_t*)rx = 0x5A0E0001;
+                    l.s(" rw=").c(*(volatile uint32_t*)rx == 0x5A0E0001 ? '1' : '0');
+                }
+                l.end();
+            }
+            sceKernelMunmap(rx, rsv);
+            for (int i = 0; i < nr; i++)
+                sceKernelMunmap(rs[i], rsv);
+        }
+    }
+    // U7: null info on a failing lookup
+    {
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        if (pa >= 0) {
+            sceKernelReleaseDirectMemory(pa, PG);
+            Line l = head("U7", "null info, free page: size 18 / 0");
+            l.ret("s18", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0x18));
+            l.ret("s0", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0)).end();
+        }
+    }
+    // U8: mtypeprotect of committed pool memory, types -1..12
+    {
+        Line l = head("U8", "pool t3 commit, mtype -1..12: move");
+        for (int t = -1; t <= 12; t++) {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0) {
+                l.c('R');
+                continue;
+            }
+            if (sceKernelMemoryPoolCommit(v, blk, 3, 0x3, 0) == 0) {
+                const PS a = ps();
+                const int32_t r = sceKernelMtypeprotect(v, blk, t, 0x3);
+                l.c(r == 0 ? moved(a, ps()) : code(r));
+                sceKernelMemoryPoolDecommit(v, blk, 0);
+            } else {
+                l.c('C');
+            }
+            sceKernelMunmap(v, rsv);
+        }
+        l.end();
+    }
+    // U9: mtypeprotect of direct memory, types -1..12, then the type a query reports
+    {
+        Line l = head("U9", "dmem mtype -1..12: ret/query type");
+        for (int t = -1; t <= 12; t++) {
+            int32_t rr = 0;
+            const long pa = alloc(1, 3, &rr);
+            uint8_t* va = pa >= 0 ? map(pa, 1, &rr) : nullptr;
+            if (!va) {
+                l.s("? ");
+                release_all(pa, 1);
+                continue;
+            }
+            const int32_t r = sceKernelMtypeprotect(va, PG, t, 0x3);
+            DmemInfo q;
+            my_memset(&q, 0, sizeof(q));
+            sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+            l.c(code(r)).dec(q.mtype).c(' ');
+            unmap_all(va, 1);
+            release_all(pa, 1);
+        }
+        l.end();
+    }
+    // U10: largest pool reservation, 2 MiB granularity, between 2 MiB and 1 TiB
+    {
+        auto try_reserve = [&](uint64_t size) {
+            void* v = 0;
+            const int32_t r = sceKernelMemoryPoolReserve(0, size, 0, 0, &v);
+            if (r == 0)
+                sceKernelMunmap(v, size);
+            return r;
+        };
+        uint64_t lo = rsv, hi = 1ull << 40;
+        Line l = head("U10", "largest pool reserve (2M steps)");
+        if (try_reserve(lo) != 0) {
+            l.s("SKIP 2M fails");
+        } else if (try_reserve(hi) == 0) {
+            l.s("1T fits");
+        } else {
+            while (hi - lo > rsv) {
+                const uint64_t mid = (lo + (hi - lo) / 2) & ~(rsv - 1);
+                if (try_reserve(mid) == 0)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            l.s("max=").hex(lo).s(" next fails=").c(code(try_reserve(lo + rsv)));
+        }
+        l.end();
+    }
+    // U11: MAP_FIXED direct map over an empty pool reservation, over a direct map, over free VA
+    {
+        int32_t rr = 0;
+        const long pa = alloc(2, 3, &rr);
+        Line l = head("U11", "MAP_FIXED over: empty rsv/dmem/free");
+        if (pa < 0) {
+            l.s("SKIP").end();
+        } else {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+                PS a = ps();
+                void* at = v;
+                pdelta_run(l, "rsv=", sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa, PG), a);
+                sceKernelMunmap(v, rsv);
+            }
+            uint8_t* d = map(pa, 1, &rr);
+            if (d) {
+                *(volatile uint32_t*)d = 0x5A0F0001;
+                void* at = d;
+                const int32_t r = sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa + (long)PG, PG);
+                l.s(" dmem=").c(code(r)).s(" same=").c(at == d ? '1' : '0');
+                unmap_all(d, 1);
+            }
+            uint8_t* f = map(pa, 1, &rr);
+            if (f) {
+                unmap_all(f, 1);
+                void* at = f;
+                const int32_t r = sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa, PG);
+                l.s(" free=").c(code(r)).s(" same=").c(at == f ? '1' : '0');
+                if (r == 0)
+                    unmap_all((uint8_t*)at, 1);
+            }
+            l.end();
+            release_all(pa, 2);
+        }
+    }
+}
+
+// U12, last: query info pointing at unmapped memory
+static void run_u12() {
+    int32_t rr = 0;
+    const long pa = alloc(1, 3, &rr);
+    uint8_t* va = pa >= 0 ? map(pa, 1, &rr) : nullptr;
+    if (!va)
+        return say("U12  SKIP");
+    unmap_all(va, 1);
+    say("U12  starting");
+    Line l = head("U12", "query info = unmapped VA");
+    l.ret("ret", sceKernelDirectMemoryQuery(pa, 0, va, 0x18)).end();
+    release_all(pa, 1);
+}
+
 // Window big enough for the length but with no aligned fit inside it; free space right after.
 static void run_p54() {
     const uint64_t blk = 0x10000;
@@ -2377,10 +2574,12 @@ int main(void) {
         run_p8();
         run_p9();
         run_t();
+        run_u();
         run_p54();
         run_c();
         run_g();
         run_r();
+        run_u12();
     }
     say("===== DONE =====");
     for (;;)
