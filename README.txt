@@ -57,6 +57,8 @@ SECTIONS
      whether a rejected mtypeprotect leaves the protection unchanged
   X  memory type 10 by protection (mtypeprotect and pool commit), and fixed direct maps over the
      tail, the middle, a whole committed reservation, and a reservation plus space past it
+  Y  pool reservation addresses next to a direct and a flexible mapping; whether the reservation
+     limit is a shared total; type 10 pool commits with GPU protection and with cached blocks free
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,

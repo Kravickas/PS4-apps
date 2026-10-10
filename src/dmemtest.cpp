@@ -2647,6 +2647,112 @@ static void run_x() {
     fixed_over("X7", "fixed rsv + 2M past it", 0, 2 * rsv, false);
 }
 
+// ---- Y: pool reservation address range and total, type 10 commit details -----------------------
+
+static uint64_t max_reserve(uint64_t hi) {
+    const uint64_t rsv = 0x200000;
+    auto ok = [](uint64_t size) {
+        void* v = 0;
+        const int32_t r = sceKernelMemoryPoolReserve(0, size, 0, 0, &v);
+        if (r == 0)
+            sceKernelMunmap(v, size);
+        return r == 0;
+    };
+    if (!ok(rsv))
+        return 0;
+    uint64_t lo = rsv;
+    if (ok(hi))
+        return hi;
+    while (hi - lo > rsv) {
+        const uint64_t mid = (lo + (hi - lo) / 2) & ~(rsv - 1);
+        if (ok(mid))
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+static void run_y() {
+    say("== Y  pool reservation addresses and total size; type 10 commit by GPU prot and draw");
+    const uint64_t blk = 0x10000, rsv = 0x200000, top = 1ull << 40;
+    {
+        void* r = 0;
+        void* f = 0;
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        uint8_t* d = pa >= 0 ? map(pa, 1, &rr) : nullptr;
+        const int32_t a = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r);
+        const int32_t b = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
+        Line l = head("Y1", "VA of pool rsv / dmem map / flex");
+        l.s("rsv=").hex(a == 0 ? (uint64_t)r : 0).s(" dmem=").hex((uint64_t)d);
+        l.s(" flex=").hex(b == 0 ? (uint64_t)f : 0).end();
+        if (a == 0)
+            sceKernelMunmap(r, rsv);
+        if (b == 0)
+            sceKernelMunmap(f, PG);
+        unmap_all(d, 1);
+        release_all(pa, 1);
+    }
+    {
+        Line l = head("Y2", "max rsv / again holding it / w 8G");
+        const uint64_t m1 = max_reserve(top);
+        l.s("m1=").hex(m1);
+        void* h = 0;
+        if (m1 && sceKernelMemoryPoolReserve(0, m1, 0, 0, &h) == 0) {
+            l.s(" m2=").hex(max_reserve(top)).s(" at=").hex((uint64_t)h);
+            sceKernelMunmap(h, m1);
+        }
+        void* e = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000000ull, 0, 0, &e) == 0) {
+            l.s(" m3=").hex(max_reserve(top)).s(" at8G=").hex((uint64_t)e);
+            sceKernelMunmap(e, 0x200000000ull);
+        } else {
+            l.s(" 8G fails");
+        }
+        l.end();
+    }
+    {
+        static const int prots[] = {0x10, 0x11, 0x20, 0x21, 0x30};
+        Line l = head("Y3", "pool commit t10, prot 10,11,20,21,30");
+        for (int pr : prots) {
+            void* v = 0;
+            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0)
+                break;
+            const int32_t r = sceKernelMemoryPoolCommit(v, blk, 10, pr, 0);
+            l.c(code(r));
+            if (r == 0)
+                sceKernelMemoryPoolDecommit(v, blk, 0);
+            sceKernelMunmap(v, rsv);
+        }
+        l.end();
+    }
+    {
+        // avail cached > 0 when the type 10 commit is made
+        void* v = 0;
+        Line l = head("Y4", "t10 prot 1 commit with ac>0: move");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+            uint8_t* b = (uint8_t*)v;
+            sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
+            sceKernelMemoryPoolDecommit(b, blk, 0);
+            const PS a = ps();
+            l.s("ac=").dec(a.ac).s(" af=").dec(a.af).c(' ');
+            if (a.ac > 0 && a.af > 0) {
+                const int32_t r = sceKernelMemoryPoolCommit(b + blk, blk, 10, 0x1, 0);
+                l.s("move=").c(r == 0 ? moved(a, ps()) : code(r));
+                if (r == 0)
+                    sceKernelMemoryPoolDecommit(b + blk, blk, 0);
+            } else {
+                l.s("SKIP state");
+            }
+            sceKernelMunmap(v, rsv);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+}
+
 // U12, last: query info pointing at unmapped memory
 static void run_u12() {
     int32_t rr = 0;
@@ -2784,6 +2890,7 @@ int main(void) {
         run_u();
         run_w();
         run_x();
+        run_y();
         run_p54();
         run_c();
         run_g();
