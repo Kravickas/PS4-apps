@@ -63,6 +63,9 @@ SECTIONS
   J  the remaining code paths: query info inside a reservation and straddling into unmapped
      memory, pool commit types -1/11/12, size-0 mtypeprotect, fixed+no-overwrite over a
      reservation, and a reservation that does not fit giving its block back
+  M  pool reserve flags and alignment ladders, pool reserve with MAP_FIXED over free space, part of
+     a reservation, a whole reservation and a direct mapping, direct map alignments of 2G/4G/3M, and
+     the type 10 fallback deltas
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000,
      placement with large alignments

@@ -2915,6 +2915,146 @@ static void run_j() {
     }
 }
 
+// ---- M: reserve flags/alignment/MAP_FIXED, direct-map alignment, type 10 fallback deltas ------
+
+static void run_m() {
+    say("== M  reserve flags, alignment and MAP_FIXED; direct map alignment; t10 fallback deltas");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    int32_t rr = 0;
+    {
+        // M1: type 10 commit with no flushed block free
+        void* rx = 0;
+        void* rs[16];
+        int nr = 0, used = 32;
+        Line l = head("M1", "t10 commit with af=0, ac>0: delta");
+        if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rx) == 0) {
+            uint8_t* x = (uint8_t*)rx;
+            if (ps().ac == 0) {
+                sceKernelMemoryPoolCommit(x, blk, 0, 0x3, 0);
+                sceKernelMemoryPoolDecommit(x, blk, 0);
+            }
+            for (int it = 0; it < 1024 && ps().af > 0; it++) {
+                if (used == 32) {
+                    if (nr == 16 || sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rs[nr]) != 0)
+                        break;
+                    nr++;
+                    used = 0;
+                    continue;
+                }
+                if (sceKernelMemoryPoolCommit((uint8_t*)rs[nr - 1] + used * blk, blk, 3, 0x3, 0) !=
+                    0)
+                    break;
+                used++;
+            }
+            const PS a = ps();
+            l.s("af=").dec(a.af).s(" ac=").dec(a.ac).c(' ');
+            if (a.af == 0 && a.ac > 0)
+                pdelta_run(l, "d=", sceKernelMemoryPoolCommit(x + blk, blk, 10, 0x1, 0), a);
+            else
+                l.s("SKIP state");
+            sceKernelMunmap(rx, rsv);
+            for (int i = 0; i < nr; i++)
+                sceKernelMunmap(rs[i], rsv);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    {
+        static const int32_t flags[] = {0x1, 0x2, 0x4, 0x8, 0x20, 0x40, 0x100, 0x1000, 0x80, 0x10};
+        Line l = head("M2", "reserve flags 1,2,4,8,20,40,100,1000,80,10");
+        for (int32_t f : flags) {
+            void* v = 0;
+            const int32_t r = sceKernelMemoryPoolReserve(0, rsv, 0, f, &v);
+            l.c(code(r));
+            if (r == 0)
+                sceKernelMunmap(v, rsv);
+        }
+        l.end();
+    }
+    {
+        static const uint64_t al[] = {0x4000, 0x10000, 0x100000, 0x200000, 0x300000, 0x80000000ull,
+                                      0x100000000ull};
+        Line l = head("M3", "reserve align 4000,10000,1M,2M,3M,2G,4G");
+        for (uint64_t a : al) {
+            void* v = 0;
+            const int32_t r = sceKernelMemoryPoolReserve(0, rsv, a, 0, &v);
+            l.c(code(r));
+            if (r == 0) {
+                l.c((uint64_t)v % a == 0 ? '=' : '!');
+                sceKernelMunmap(v, rsv);
+            }
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
+        // M4: reserve with MAP_FIXED over free VA, part of a reservation, a whole reservation, a
+        // direct mapping; each plain (10) and with no-overwrite (90)
+        Line l = head("M4", "fixed rsv 10|90: free/part/whole/dmem");
+        static const int32_t fixed_flags[] = {0x10, 0x90};
+        for (int32_t f : fixed_flags) {
+            l.hex((uint64_t)f).c(':');
+            void* base = 0;
+            if (sceKernelMemoryPoolReserve(0, 2 * rsv, 0, 0, &base) != 0) {
+                l.s("SKIP ");
+                continue;
+            }
+            sceKernelMunmap(base, 2 * rsv);
+            PS a = ps();
+            void* v = base;
+            int32_t r = sceKernelMemoryPoolReserve(base, rsv, 0, f, &v);
+            pdelta_run(l, "free=", r, a);
+            l.c(r == 0 && v == base ? '=' : '.');
+            if (r == 0) {
+                a = ps();
+                void* w = (uint8_t*)base + rsv - PG;
+                const int32_t r2 = sceKernelMemoryPoolReserve(w, rsv, 0, f, &w);
+                pdelta_run(l, " part=", r2, a);
+                if (r2 == 0)
+                    sceKernelMunmap(w, rsv);
+                a = ps();
+                void* x = base;
+                const int32_t r3 = sceKernelMemoryPoolReserve(base, rsv, 0, f, &x);
+                pdelta_run(l, " whole=", r3, a);
+                sceKernelMunmap(base, rsv);
+            }
+            const long pa = alloc(1, 3, &rr);
+            uint8_t* d = pa >= 0 ? map(pa, 1, &rr) : nullptr;
+            if (d) {
+                a = ps();
+                void* y = d;
+                const int32_t r4 = sceKernelMemoryPoolReserve(d, rsv, 0, f, &y);
+                pdelta_run(l, " dmem=", r4, a);
+                if (r4 == 0)
+                    sceKernelMunmap(y, rsv);
+                else
+                    unmap_all(d, 1);
+            }
+            release_all(pa, 1);
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
+        static const uint64_t al[] = {0x80000000ull, 0x100000000ull, 0x300000};
+        const long pa = alloc(1, 3, &rr);
+        Line l = head("M5", "dmem map align 2G, 4G, 3M");
+        for (uint64_t a : al) {
+            void* d = 0;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, a) : -1;
+            l.c(code(r));
+            if (r == 0) {
+                l.c((uint64_t)d % a == 0 ? '=' : '!');
+                sceKernelMunmap(d, PG);
+            }
+            l.c(' ');
+        }
+        l.end();
+        release_all(pa, 1);
+    }
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -3202,6 +3342,7 @@ int main(void) {
         run_y();
         run_z();
         run_j();
+        run_m();
         run_k();
         run_p54();
         run_c();
