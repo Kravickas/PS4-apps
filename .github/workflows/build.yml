@@ -54,13 +54,26 @@ jobs:
             CC="${CLANG:-clang}" \
             CXX="${CLANGXX:-clang++}" \
             LD="${LLD:-ld.lld}"
+          mkdir -p dist
+          cp *.pkg dist/ && cp eboot.bin dist/eboot.bin
 
-      - name: Upload package + eboot
+      - name: Build stack-size variant (16 MiB main thread stack)
+        run: |
+          CLANG="$(find "$OO_PS4_TOOLCHAIN" -type f -name clang | head -1)"
+          CLANGXX="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'clang++' | head -1)"
+          LLD="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'ld.lld' | head -1)"
+          make clean
+          make \
+            CC="${CLANG:-clang}" \
+            CXX="${CLANGXX:-clang++}" \
+            LD="${LLD:-ld.lld}" \
+            MAIN_STACK=0x1000000
+          cp *.pkg dist/ && cp eboot.bin dist/eboot_stack16m.bin
+
+      - name: Upload packages + eboots
         uses: actions/upload-artifact@v4
         with:
-          name: ShadCube4
-          path: |
-            *.pkg
-            eboot.bin
+          name: DmemTest
+          path: dist/*
           if-no-files-found: warn
           retention-days: 30
