@@ -3163,6 +3163,106 @@ static void run_n() {
     }
 }
 
+// ---- L: the occupied band above the stacks, and where the default search ends -----------------
+
+static bool fixed_probe(long pa, uint64_t at) {
+    // true when a 16 KiB fixed, no-overwrite direct mapping fits at `at`
+    void* d = (void*)at;
+    if (sceKernelMapDirectMemory(&d, PG, 0x3, 0x90, pa, PG) != 0)
+        return false;
+    sceKernelMunmap(d, PG);
+    return true;
+}
+
+static void run_l() {
+    say("== LA occupied band above the stacks (fixed no-overwrite probes) and default search end");
+    int32_t rr = 0;
+    const long pa = alloc(1, 3, &rr);
+    if (pa < 0)
+        return say("LA1  SKIP alloc");
+    {
+        static const uint64_t at[] = {0x7EEC00000ull, 0x7EF000000ull, 0x7F0000000ull,
+                                      0x7F8000000ull, 0x7FC000000ull, 0x7FFFF8000ull,
+                                      0x7FFFFC000ull, 0x800000000ull, 0x880000000ull,
+                                      0xFC0000000ull, 0xFC4000000ull, 0x1000000000ull};
+        Line l = head("LA1", "free at 7EEC0,7EF0,7F00,7F80,7FC0,..,10000");
+        for (uint64_t a : at)
+            l.c(fixed_probe(pa, a) ? 'o' : 'x');
+        l.end();
+    }
+    {
+        // lowest occupied address above the stacks, and the first free one after the band
+        auto edge = [&](uint64_t lo, uint64_t hi, bool lo_free) {
+            // invariant: fixed_probe(lo) == lo_free, fixed_probe(hi) == !lo_free
+            while (hi - lo > PG) {
+                const uint64_t mid = (lo + (hi - lo) / 2) & ~(PG - 1);
+                if (fixed_probe(pa, mid) == lo_free)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            return hi;
+        };
+        Line l = head("LA2", "band edges (16K)");
+        const bool f1 = fixed_probe(pa, 0x7EF000000ull), f2 = fixed_probe(pa, 0x7F0000000ull);
+        const bool f3 = fixed_probe(pa, 0x800000000ull);
+        if (f1 && !f2)
+            l.s("first occupied=").hex(edge(0x7EF000000ull, 0x7F0000000ull, true));
+        else
+            l.s("lower edge not bracketed ").c(f1 ? 'o' : 'x').c(f2 ? 'o' : 'x');
+        if (!f2 && f3)
+            l.s(" first free after=").hex(edge(0x7F0000000ull, 0x800000000ull, false));
+        else
+            l.s(" upper edge not bracketed ").c(f2 ? 'o' : 'x').c(f3 ? 'o' : 'x');
+        l.end();
+    }
+    {
+        // fill all 2 MiB gaps, then the small holes, until the default search leaves the area
+        void* held[16];
+        uint64_t held_size[16];
+        int nh = 0;
+        for (; nh < 16; nh++) {
+            const uint64_t m = max_reserve(1ull << 40);
+            if (!m || sceKernelMemoryPoolReserve(0, m, 0, 0, &held[nh]) != 0)
+                break;
+            held_size[nh] = m;
+            if ((uint64_t)held[nh] >= 0x7FFFFC000ull) {
+                nh++;
+                break;
+            }
+        }
+        static void* small[2048];
+        int ns = 0;
+        int32_t last = 0;
+        uint64_t outside = 0;
+        for (; ns < 2048; ns++) {
+            void* d = 0;
+            last = sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG);
+            if (last != 0)
+                break;
+            small[ns] = d;
+            if ((uint64_t)d >= 0x7EF000000ull) {
+                outside = (uint64_t)d;
+                ns++;
+                break;
+            }
+        }
+        Line l = head("LA3", "default search after filling");
+        l.s("rsv=").dec(nh);
+        if (nh)
+            l.s(" last rsv at=").hex((uint64_t)held[nh - 1]);
+        l.s(" small maps=").dec(ns).s(" last=").c(code(last));
+        if (outside)
+            l.s(" first above 7EF000000 at=").hex(outside);
+        l.end();
+        for (int i = 0; i < ns; i++)
+            sceKernelMunmap(small[i], PG);
+        for (int i = 0; i < nh; i++)
+            sceKernelMunmap(held[i], held_size[i]);
+    }
+    release_all(pa, 1);
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -3454,6 +3554,7 @@ int main(void) {
         run_j();
         run_m();
         run_n();
+        run_l();
         run_k();
         run_p54();
         run_c();

@@ -68,6 +68,8 @@ SECTIONS
      the type 10 fallback deltas
   N  alignment ladders for pool reservations (2M..2G) and direct maps (4K..1G), fixed reservations at
      low aligned addresses, over the second half of a reservation, and over a 2 MiB direct mapping
+  LA the occupied band above the thread stacks, found with fixed no-overwrite probes and bisected
+     to 16 KiB, and where the default search goes once everything below it is full
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
