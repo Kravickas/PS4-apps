@@ -11,6 +11,21 @@ CONTENT_ID  := IV0000-SHAD00090_00-SHADDMEMTEST0000
 
 EXTRAFLAGS  :=
 
+# ---- Optional stack-size variant: set MAIN_STACK (bytes) to give the main thread that stack.
+#      It builds under its own title id with its own process parameters (src/procparam.S).
+#      Empty = the normal build with OpenOrbis' default process parameters. ----
+MAIN_STACK  :=
+OBJCOPY     := objcopy
+ifneq ($(MAIN_STACK),)
+TITLE       := DmemTestStack
+EXTRAFLAGS  += -DDMEM_STACK_VARIANT
+TITLE_ID    := SHAD00091
+CONTENT_ID  := IV0000-SHAD00091_00-SHADDMEMTEST0001
+CRT_OBJS     = $(INTDIR)/crt1_noparam.o $(INTDIR)/procparam.o
+else
+CRT_OBJS    := $(OO_PS4_TOOLCHAIN)/lib/crt1.o
+endif
+
 # ---- Toolchain / paths (don't usually need to touch) ----
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
 
@@ -43,7 +58,7 @@ CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRA
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
-               $(TOOLCHAIN)/lib/crt1.o
+               $(CRT_OBJS)
 
 all: $(CONTENT_ID).pkg
 
@@ -58,8 +73,16 @@ $(INTDIR)/%.o: $(SRCDIR)/%.cpp | $(INTDIR)
 
 $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
+# crt1.o without its process parameters; the three blocks they point to become visible to
+# src/procparam.S, which supplies the parameters with the stack size filled in.
+$(INTDIR)/crt1_noparam.o: $(TOOLCHAIN)/lib/crt1.o | $(INTDIR)
+	$(OBJCOPY) --globalize-symbol=_sceLibcParam --globalize-symbol=_sceKernelMemParam \
+	           --globalize-symbol=_sceKernelFsParam --remove-section=.rela.data.sce_process_param \
+	           --remove-section=.data.sce_process_param $< $@
+$(INTDIR)/procparam.o: $(SRCDIR)/procparam.S | $(INTDIR)
+	$(CC) $(CFLAGS) -DMAIN_STACK_SIZE=$(MAIN_STACK) -o $@ $<
 
-eboot.bin: $(OBJS)
+eboot.bin: $(OBJS) $(filter $(INTDIR)/%,$(CRT_OBJS))
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
 	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001
 

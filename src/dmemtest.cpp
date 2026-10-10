@@ -332,12 +332,17 @@ static Screen g_screen;
 // ---- log ------------------------------------------------------------------------------------
 // Each line is opened, written, fsynced and closed, so it survives the process dying mid-test.
 
-static const char* g_log_path = "/data/dmem_results.txt";
+#ifdef DMEM_STACK_VARIANT
+#define DMEM_RESULTS_NAME "dmem_results_stack.txt"
+#else
+#define DMEM_RESULTS_NAME "dmem_results.txt"
+#endif
+static const char* g_log_path = "/data/" DMEM_RESULTS_NAME;
 
 static void log_init() {
     int fd = sceKernelOpen(g_log_path, 0x0601, 0777);
     if (fd < 0) {
-        g_log_path = "/temp0/dmem_results.txt";
+        g_log_path = "/temp0/" DMEM_RESULTS_NAME;
         fd = sceKernelOpen(g_log_path, 0x0601, 0777);
     }
     if (fd >= 0)
@@ -3521,6 +3526,9 @@ int main(void) {
     log_init();
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
     say("===== DMEM RELEASE TEST =====");
+#ifdef DMEM_STACK_VARIANT
+    say("variant: main thread stack set through the process parameters");
+#endif
     {
         Line l;
         l.s("dmem size=").hex(g_dmem).s("  page=").hex(PG).s("  screen=").c(g_screen.ok ? '1' : '0');
