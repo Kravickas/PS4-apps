@@ -51,6 +51,10 @@ SECTIONS
      ladders on committed pool memory and on direct memory; the largest pool reservation found by
      bisection; MAP_FIXED direct maps over an empty reservation, a direct mapping and free VA.
      U12 runs last: a query whose info pointer is unmapped
+  W  exact counter deltas for mtypeprotect of committed pool memory to types 4..9; whether the
+     pool reservation limit is a size limit; query info on a read-only page; fixed direct maps
+     over a whole reservation and its tail; a fixed flexible map over a reservation and free VA;
+     whether a rejected mtypeprotect leaves the protection unchanged
   P54 pool expand with a window long enough for the length but with no aligned fit inside it
   P2 pool with a 2 MiB reservation: block stats around expand, commit, checked and unchecked
      release of committed and decommitted pool memory, find-next and map around a pool block,
