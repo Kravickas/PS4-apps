@@ -80,7 +80,8 @@ SECTIONS
   CG how many bytes a query writes before a fault, for sizes that are and are not multiples of 8
      and for unmapped and read-only memory after the writable part
   MFC (near the end) file mapping contents through a read-write and a read-only fd, and whether
-     each mapping shows a write made to the file afterwards
+     each mapping shows a write made to the file afterwards; closing the fd while mapped;
+     map/close/reopen/map; mapping an empty file through a read-only fd
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

@@ -3792,6 +3792,70 @@ static void run_mf2() {
         sceKernelClose(fd_rw);
     if (fd_ro >= 0)
         sceKernelClose(fd_ro);
+    {
+        // MF9: close the fd while the mapping is live
+        const int fd = sceKernelOpen(path, 0x0000, 0777);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &m) : -1;
+        if (fd >= 0)
+            sceKernelClose(fd);
+        Line l = head("MF9", "close fd while mapped: ret/byte 8001");
+        l.c(code(r));
+        if (r == 0) {
+            l.s(" byte=").hex(((volatile unsigned char*)m)[0x8001]);
+            sceKernelMunmap(m, 0x10000);
+        }
+        l.end();
+    }
+    {
+        // MF10: map, unmap, close, reopen and map the same file again
+        int32_t r1 = -1, r2 = -1;
+        bool same = false;
+        int fd = sceKernelOpen(path, 0x0002, 0777);
+        void* m = 0;
+        if (fd >= 0) {
+            r1 = sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &m);
+            if (r1 == 0)
+                sceKernelMunmap(m, 0x10000);
+            sceKernelClose(fd);
+        }
+        fd = sceKernelOpen(path, 0x0002, 0777);
+        if (fd >= 0) {
+            r2 = sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &m);
+            if (r2 == 0) {
+                same = ((volatile unsigned char*)m)[0x8001] ==
+                       (unsigned char)((0x8001 * 7) & 0xFF);
+                sceKernelMunmap(m, 0x10000);
+            }
+            sceKernelClose(fd);
+        }
+        Line l = head("MF10", "map/close/reopen/map: rets, content");
+        l.c(code(r1)).c(code(r2)).s(" content=").c(same ? '1' : '0').end();
+    }
+    {
+        // MF11: an empty file through a read-only fd; the mapping is never touched
+        char empty[64];
+        mf_path(empty);
+        int n = 0;
+        while (empty[n])
+            n++;
+        empty[n - 4] = 'e';
+        empty[n - 3] = 'm';
+        empty[n - 2] = 'p';
+        empty[n - 1] = 't';
+        int fd = sceKernelOpen(empty, 0x0602, 0777);
+        if (fd >= 0)
+            sceKernelClose(fd);
+        fd = sceKernelOpen(empty, 0x0000, 0777);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &m) : -1;
+        Line l = head("MF11", "empty file, ro fd, read-only map");
+        l.c(code(r)).end();
+        if (r == 0)
+            sceKernelMunmap(m, 0x10000);
+        if (fd >= 0)
+            sceKernelClose(fd);
+    }
 }
 
 // U12, last: query info pointing at unmapped memory
