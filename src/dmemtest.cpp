@@ -3706,6 +3706,94 @@ static void run_k() {
     }
 }
 
+// ---- MF5-MF8: file mapping contents, read-write vs read-only fd, writes after mapping -----------
+
+static void mf_path(char* path) {
+    const char* dir = g_log_path[1] == 'd' ? "/data/" : "/temp0/";
+    int n = 0;
+    for (const char* c = dir; *c; c++)
+        path[n++] = *c;
+    for (const char* c = "dmem_mf2.bin"; *c; c++)
+        path[n++] = *c;
+    path[n] = 0;
+}
+
+static void run_mf2() {
+    say("== MFC file mapping contents: read-write fd and read-only fd, then a write after mapping");
+    char path[64];
+    mf_path(path);
+    {
+        // 64 KiB with byte k = (k * 7) & 0xFF
+        const int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd < 0)
+            return say("MF5  SKIP create");
+        static unsigned char buf[0x4000];
+        for (int part = 0; part < 4; part++) {
+            for (int k = 0; k < 0x4000; k++)
+                buf[k] = (unsigned char)(((part * 0x4000 + k) * 7) & 0xFF);
+            sceKernelWrite(fd, buf, sizeof(buf));
+        }
+        sceKernelClose(fd);
+    }
+    auto content_ok = [](const unsigned char* m) {
+        for (int k = 0; k < 64; k++)
+            if (m[k] != (unsigned char)((k * 7) & 0xFF))
+                return false;
+        return m[0x8001] == (unsigned char)((0x8001 * 7) & 0xFF);
+    };
+    const int fd_rw = sceKernelOpen(path, 0x0002, 0777);
+    const int fd_ro = sceKernelOpen(path, 0x0000, 0777);
+    void* m_rw = 0;
+    void* m_ro = 0;
+    const int32_t a = fd_rw >= 0 ? sceKernelMmap(0, 0x10000, 0x1, 0x1, fd_rw, 0, &m_rw) : -1;
+    const int32_t b = fd_ro >= 0 ? sceKernelMmap(0, 0x10000, 0x1, 0x1, fd_ro, 0, &m_ro) : -1;
+    {
+        Line l = head("MF5", "rw fd, read-only map: ret/content");
+        l.c(code(a));
+        if (a == 0)
+            l.s(" content=").c(content_ok((const unsigned char*)m_rw) ? '1' : '0');
+        l.end();
+    }
+    {
+        Line l = head("MF6", "ro fd, read-only map: ret/content");
+        l.c(code(b));
+        if (b == 0)
+            l.s(" content=").c(content_ok((const unsigned char*)m_ro) ? '1' : '0');
+        l.end();
+    }
+    // write 0xA5 at offset 0 through a fresh write-only fd
+    const int fd_w = sceKernelOpen(path, 0x0001, 0777);
+    if (fd_w >= 0) {
+        const unsigned char v = 0xA5;
+        sceKernelWrite(fd_w, &v, 1);
+        sceKernelClose(fd_w);
+    }
+    {
+        Line l = head("MF7", "rw-fd map sees later write: byte0");
+        if (a == 0)
+            l.hex(*(volatile unsigned char*)m_rw);
+        else
+            l.s("SKIP");
+        l.end();
+    }
+    {
+        Line l = head("MF8", "ro-fd map sees later write: byte0");
+        if (b == 0)
+            l.hex(*(volatile unsigned char*)m_ro);
+        else
+            l.s("SKIP");
+        l.end();
+    }
+    if (a == 0)
+        sceKernelMunmap(m_rw, 0x10000);
+    if (b == 0)
+        sceKernelMunmap(m_ro, 0x10000);
+    if (fd_rw >= 0)
+        sceKernelClose(fd_rw);
+    if (fd_ro >= 0)
+        sceKernelClose(fd_ro);
+}
+
 // U12, last: query info pointing at unmapped memory
 static void run_u12() {
     int32_t rr = 0;
@@ -3857,6 +3945,7 @@ int main(void) {
         run_c();
         run_g();
         run_r();
+        run_mf2();
         run_u12();
     }
     say("===== DONE =====");
