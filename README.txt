@@ -82,6 +82,8 @@ SECTIONS
   MFC (near the end) file mapping contents through a read-write and a read-only fd, and whether
      each mapping shows a write made to the file afterwards; closing the fd while mapped;
      map/close/reopen/map; mapping an empty file through a read-only fd
+  MFE mapping past the end of a file: beyond EOF through read-only and read-write fds, exactly the
+     file, an offset past EOF; MF16 (dead last) an empty file through a read-write fd
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

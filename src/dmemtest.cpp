@@ -3858,6 +3858,61 @@ static void run_mf2() {
     }
 }
 
+// ---- MF12-MF16: mapping past the end of a file --------------------------------------------------
+
+static void mf_named(char* path, const char* name) {
+    const char* dir = g_log_path[1] == 'd' ? "/data/" : "/temp0/";
+    int n = 0;
+    for (const char* c = dir; *c; c++)
+        path[n++] = *c;
+    for (const char* c = name; *c; c++)
+        path[n++] = *c;
+    path[n] = 0;
+}
+
+static void mf_sized(const char* id, const char* name, int open_flags, uint64_t file_size,
+                     uint64_t map_len, long offset) {
+    char path[64];
+    mf_named(path, "dmem_mf3.bin");
+    int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd >= 0) {
+        static unsigned char ones[0x4000];
+        for (uint64_t k = 0; k < sizeof(ones); k++)
+            ones[k] = 0x5A;
+        for (uint64_t done = 0; done < file_size; done += sizeof(ones))
+            sceKernelWrite(fd, ones, sizeof(ones));
+        sceKernelClose(fd);
+    }
+    fd = sceKernelOpen(path, open_flags, 0777);
+    void* m = 0;
+    const int32_t r = fd >= 0 ? sceKernelMmap(0, map_len, 0x1, 0x1, fd, offset, &m) : -1;
+    Line l = head(id, name);
+    l.c(code(r));
+    if (r == 0) {
+        // only the first page is read, which lies inside the file whenever the file is not empty
+        if (file_size > (uint64_t)offset)
+            l.s(" byte0=").hex(*(volatile unsigned char*)m);
+        sceKernelMunmap(m, map_len);
+    }
+    l.end();
+    if (fd >= 0)
+        sceKernelClose(fd);
+}
+
+static void run_mf3() {
+    say("== MFE mapping past the end of a file (16 KiB file unless noted)");
+    mf_sized("MF12", "ro fd, map 64K of a 16K file", 0x0000, 0x4000, 0x10000, 0);
+    mf_sized("MF13", "rw fd, map 64K of a 16K file", 0x0002, 0x4000, 0x10000, 0);
+    mf_sized("MF14", "ro fd, map 16K of a 16K file", 0x0000, 0x4000, 0x4000, 0);
+    mf_sized("MF15", "ro fd, offset 32K past 16K EOF", 0x0000, 0x4000, 0x4000, 0x8000);
+}
+
+// last of all: an empty file through a read-write fd
+static void run_mf16() {
+    say("MF16 starting");
+    mf_sized("MF16", "rw fd, empty file, map 64K", 0x0002, 0, 0x10000, 0);
+}
+
 // U12, last: query info pointing at unmapped memory
 static void run_u12() {
     int32_t rr = 0;
@@ -4010,7 +4065,9 @@ int main(void) {
         run_g();
         run_r();
         run_mf2();
+        run_mf3();
         run_u12();
+        run_mf16();
     }
     say("===== DONE =====");
     for (;;)
