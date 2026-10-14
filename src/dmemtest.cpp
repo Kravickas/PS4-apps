@@ -41,6 +41,7 @@ int32_t sceKernelVirtualQuery(const void* addr, int32_t flags, void* info, size_
 int32_t sceKernelMapFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags);
 int32_t sceKernelMmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                       void** res);
+int32_t sceKernelUnlink(const char* path);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -3879,8 +3880,12 @@ static void mf_sized(const char* id, const char* name, int open_flags, uint64_t 
         static unsigned char ones[0x4000];
         for (uint64_t k = 0; k < sizeof(ones); k++)
             ones[k] = 0x5A;
-        for (uint64_t done = 0; done < file_size; done += sizeof(ones))
-            sceKernelWrite(fd, ones, sizeof(ones));
+        for (uint64_t done = 0; done < file_size;) {
+            const uint64_t chunk =
+                file_size - done < sizeof(ones) ? file_size - done : (uint64_t)sizeof(ones);
+            sceKernelWrite(fd, ones, chunk);
+            done += chunk;
+        }
         sceKernelClose(fd);
     }
     fd = sceKernelOpen(path, open_flags, 0777);
@@ -3905,12 +3910,27 @@ static void run_mf3() {
     mf_sized("MF13", "rw fd, map 64K of a 16K file", 0x0002, 0x4000, 0x10000, 0);
     mf_sized("MF14", "ro fd, map 16K of a 16K file", 0x0000, 0x4000, 0x4000, 0);
     mf_sized("MF15", "ro fd, offset 32K past 16K EOF", 0x0000, 0x4000, 0x4000, 0x8000);
+    // a file that does not end on a page boundary
+    mf_sized("MF17", "ro fd, 10K file, map 16K", 0x0000, 0x2800, 0x4000, 0);
+    mf_sized("MF18", "ro fd, 10K file, map 32K", 0x0000, 0x2800, 0x8000, 0);
+    mf_sized("MF19", "ro fd, 20K file, map 32K", 0x0000, 0x5000, 0x8000, 0);
+    mf_sized("MF20", "ro fd, 20K file, offset 16K, map 16K", 0x0000, 0x5000, 0x4000, 0x4000);
 }
 
 // last of all: an empty file through a read-write fd
 static void run_mf16() {
     say("MF16 starting");
     mf_sized("MF16", "rw fd, empty file, map 64K", 0x0002, 0, 0x10000, 0);
+}
+
+// after the last test: remove the scratch files the mapping tests created
+static void remove_scratch_files() {
+    static const char* names[] = {"dmem_mf.bin", "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin"};
+    for (const char* name : names) {
+        char path[64];
+        mf_named(path, name);
+        sceKernelUnlink(path);
+    }
 }
 
 // U12, last: query info pointing at unmapped memory
@@ -4068,6 +4088,7 @@ int main(void) {
         run_mf3();
         run_u12();
         run_mf16();
+        remove_scratch_files();
     }
     say("===== DONE =====");
     for (;;)
