@@ -42,6 +42,7 @@ int32_t sceKernelMapFlexibleMemory(void** addr, size_t len, int32_t prot, int32_
 int32_t sceKernelMmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                       void** res);
 int32_t sceKernelUnlink(const char* path);
+long sceKernelLseek(int32_t fd, long offset, int whence);
 long sceKernelGetDirectMemorySize(void);
 int sceKernelUsleep(unsigned int usec);
 int sceKernelOpen(const char* path, int flags, unsigned short mode);
@@ -3915,6 +3916,118 @@ static void run_mf3() {
     mf_sized("MF18", "ro fd, 10K file, map 32K", 0x0000, 0x2800, 0x8000, 0);
     mf_sized("MF19", "ro fd, 20K file, map 32K", 0x0000, 0x5000, 0x8000, 0);
     mf_sized("MF20", "ro fd, 20K file, offset 16K, map 16K", 0x0000, 0x5000, 0x4000, 0x4000);
+    {
+        // MF22: a byte past the end of a 10 KiB file, inside its last page; MF23: the fd's file
+        // position across a mapping into that last page
+        char path[64];
+        mf_named(path, "dmem_mf3.bin");
+        int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            static unsigned char ones[0x2800];
+            for (uint64_t k = 0; k < sizeof(ones); k++)
+                ones[k] = 0x5A;
+            sceKernelWrite(fd, ones, sizeof(ones));
+            sceKernelClose(fd);
+        }
+        fd = sceKernelOpen(path, 0x0000, 0777);
+        Line l = head("MF22", "10K file, map 16K: bytes 0, 27FF, 2800, 3FFF");
+        if (fd >= 0) {
+            sceKernelLseek(fd, 0x123, 0);
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m);
+            l.c(code(r));
+            const long pos = sceKernelLseek(fd, 0, 1);
+            if (r == 0) {
+                const volatile unsigned char* b = (const volatile unsigned char*)m;
+                l.c(' ').hex(b[0]).c(' ').hex(b[0x27FF]).c(' ').hex(b[0x2800]).c(' ').hex(b[0x3FFF]);
+                sceKernelMunmap(m, 0x4000);
+            }
+            l.end();
+            Line l2 = head("MF23", "fd position after that mmap (set 123)");
+            l2.hex((uint64_t)pos).end();
+            sceKernelClose(fd);
+        } else {
+            l.s("SKIP").end();
+        }
+    }
+}
+
+// ---- MG: end-of-file grid. One line per file size; for offsets 0/16K/32K and lengths
+//      16K/32K/48K/64K: o = mapped and contents right, ! = mapped but contents wrong, else the
+//      error code. Only bytes inside the file's last 16 KiB page are read. --------------------------
+
+static void mf_grid_line(const char* id, uint64_t file_size) {
+    char path[64];
+    mf_named(path, "dmem_mf4.bin");
+    int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd >= 0) {
+        static unsigned char fill[0x4000];
+        for (uint64_t k = 0; k < sizeof(fill); k++)
+            fill[k] = 0x5A;
+        for (uint64_t done = 0; done < file_size;) {
+            const uint64_t chunk =
+                file_size - done < sizeof(fill) ? file_size - done : (uint64_t)sizeof(fill);
+            sceKernelWrite(fd, fill, chunk);
+            done += chunk;
+        }
+        sceKernelClose(fd);
+    }
+    fd = sceKernelOpen(path, 0x0000, 0777);
+    Line l = head(id, "eof grid");
+    l.s("size=").hex(file_size).c(' ');
+    if (fd < 0) {
+        l.s("SKIP open").end();
+        return;
+    }
+    const uint64_t page_end = (file_size + 0x3FFF) & ~0x3FFFull;
+    static const uint64_t offs[] = {0, 0x4000, 0x8000};
+    static const uint64_t lens[] = {0x4000, 0x8000, 0xC000, 0x10000};
+    for (uint64_t off : offs) {
+        l.dec((long long)(off >> 10)).s("K:");
+        for (uint64_t len : lens) {
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, len, 0x1, 0x1, fd, (long)off, &m);
+            if (r != 0) {
+                l.c(code(r));
+                continue;
+            }
+            const volatile unsigned char* b = (const volatile unsigned char*)m;
+            bool ok = true;
+            // first byte of the mapping, if it is inside the file
+            if (off < file_size)
+                ok = ok && b[0] == 0x5A;
+            // last byte of the file, if it is inside the mapping
+            if (file_size > off && file_size - 1 < off + len)
+                ok = ok && b[file_size - 1 - off] == 0x5A;
+            // first byte after the end of the file, if it is inside the mapping and the last page
+            if (file_size >= off && file_size < off + len && file_size < page_end)
+                ok = ok && b[file_size - off] == 0;
+            l.c(ok ? 'o' : '!');
+            sceKernelMunmap(m, len);
+        }
+        l.c(' ');
+    }
+    l.end();
+    sceKernelClose(fd);
+}
+
+static void run_mfg() {
+    say("== MG end-of-file grid: per size, offsets 0K/16K/32K x lengths 16K/32K/48K/64K");
+    static const uint64_t sizes[] = {1,      0xFFF,  0x1000, 0x1001, 0x2000, 0x3FFF, 0x4000,
+                                     0x4001, 0x6000, 0x7FFF, 0x8000, 0x8001, 0xC000, 0x10000};
+    char id[8] = {'M', 'G', 0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 14; i++) {
+        const int n = i + 1;
+        if (n < 10) {
+            id[2] = (char)('0' + n);
+            id[3] = 0;
+        } else {
+            id[2] = '1';
+            id[3] = (char)('0' + n - 10);
+            id[4] = 0;
+        }
+        mf_grid_line(id, sizes[i]);
+    }
 }
 
 // last of all: an empty file through a read-write fd
@@ -3923,9 +4036,37 @@ static void run_mf16() {
     mf_sized("MF16", "rw fd, empty file, map 64K", 0x0002, 0, 0x10000, 0);
 }
 
+// after MF16: a writable mapping into the partly filled last page of a 10 KiB file
+static void run_mf21() {
+    char path[64];
+    mf_named(path, "dmem_mf3.bin");
+    int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd >= 0) {
+        static unsigned char ones[0x2800];
+        for (uint64_t k = 0; k < sizeof(ones); k++)
+            ones[k] = 0x5A;
+        sceKernelWrite(fd, ones, sizeof(ones));
+        sceKernelClose(fd);
+    }
+    fd = sceKernelOpen(path, 0x0002, 0777);
+    say("MF21 starting");
+    void* m = 0;
+    const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x1, fd, 0, &m) : -1;
+    Line l = head("MF21", "rw fd, 10K file, map 16K read-write");
+    l.c(code(r));
+    if (r == 0) {
+        l.s(" byte0=").hex(*(volatile unsigned char*)m);
+        sceKernelMunmap(m, 0x4000);
+    }
+    l.end();
+    if (fd >= 0)
+        sceKernelClose(fd);
+}
+
 // after the last test: remove the scratch files the mapping tests created
 static void remove_scratch_files() {
-    static const char* names[] = {"dmem_mf.bin", "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin"};
+    static const char* names[] = {"dmem_mf.bin", "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin",
+                                  "dmem_mf4.bin"};
     for (const char* name : names) {
         char path[64];
         mf_named(path, name);
@@ -4086,8 +4227,10 @@ int main(void) {
         run_r();
         run_mf2();
         run_mf3();
+        run_mfg();
         run_u12();
         run_mf16();
+        run_mf21();
         remove_scratch_files();
     }
     say("===== DONE =====");
