@@ -96,6 +96,10 @@ SECTIONS
      committed parts, adjacent reservations from one call site, and names next to the call site
   NU (at the end) edge cases of every call: length 0, unaligned address or length, ranges over
      a hole or over two kinds of mapping, repeated calls, a closed fd; codes and the state after
+  TR in sections U, W, Z, J, L and NU5, every pool call that changes the block counters, with
+     its result and the change of each counter
+  NU8-NU10 each undefined mprotect bit read back, rounding of mprotect and mtypeprotect with an
+     unaligned start, pool commit and decommit edge orderings; NU lines list codes without a letter
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
