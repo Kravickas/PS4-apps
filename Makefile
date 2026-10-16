@@ -4,10 +4,11 @@
 # ============================================================================
 
 # ---- Package identity (fixed) ----
-TITLE       := Homebrew Template
+TITLE       := ShadCube4
 VERSION     := 01.00
-TITLE_ID    := BREW00001
-CONTENT_ID  := IV0000-BREW00001_00-HOMEBREW00000000
+TITLE_ID    := SHAD00004
+CONTENT_ID  := IV0000-SHAD00004_00-SHADCUBE40000000
+
 EXTRAFLAGS  :=
 
 # ---- Toolchain / paths (don't usually need to touch) ----
@@ -20,7 +21,6 @@ CORE_LIBS   := -lc -lkernel -lc++ -lSceLibcInternal
 ALL_STUBS   := $(sort $(patsubst $(TOOLCHAIN)/lib/lib%.so,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.so)) \
                       $(patsubst $(TOOLCHAIN)/lib/lib%.a,-l%,$(wildcard $(TOOLCHAIN)/lib/lib*.a)))
 EXTRA_LIBS  := $(filter-out $(CORE_LIBS),$(ALL_STUBS))
-
 SRCDIR      := src
 INTDIR      := build
 PROJ        := homebrew
@@ -32,7 +32,7 @@ CXX         := clang++
 LD          := ld.lld
 PKG         := $(TOOLCHAIN)/bin/linux
 
-# ---- Sources: any .c / .cpp / .s in src/ ----
+# ---- Sources: any .c / .cpp / .s in src/ (shaders/ holds GPU code: headers only) ----
 CFILES      := $(wildcard $(SRCDIR)/*.c)
 CPPFILES    := $(wildcard $(SRCDIR)/*.cpp)
 SFILES      := $(wildcard $(SRCDIR)/*.s)
@@ -40,18 +40,19 @@ OBJS        := $(patsubst $(SRCDIR)/%.c,$(INTDIR)/%.o,$(CFILES)) \
                $(patsubst $(SRCDIR)/%.cpp,$(INTDIR)/%.o,$(CPPFILES)) \
                $(patsubst $(SRCDIR)/%.s,$(INTDIR)/%.o,$(SFILES))
 
-# Fail immediately with a clear reason instead of letting an empty OBJS reach the
-# linker, where it surfaces as "cannot open output file build/homebrew.elf".
-ifeq ($(strip $(OBJS)),)
-$(error No sources found in $(SRCDIR)/ — expected .c, .cpp or .s (check the file extension))
-endif
-
 # ---- Bundled .prx/.sprx modules (drop libc.prx / libSceFios2.prx here to ship them) ----
 LIBMODULES  := $(wildcard sce_module/*)
 
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) \
-               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
+               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -Ishaders
 CXXFLAGS    := $(CFLAGS) -isystem $(TOOLCHAIN)/include/c++/v1
+# Model parsing (multi-GB text OBJ) is CPU-bound: optimise just the loaders.
+# The renderer (main.o) keeps its hardware-verified default codegen.
+# -fno-builtin: no implicit memset/memcpy calls from loop idioms (no libc dependency).
+$(INTDIR)/loaders.o: CFLAGS += -O2 -fno-strict-aliasing -fno-builtin
+# The atmosphere model (src/atmosphere.c): table lookups at run time; -fno-math-errno lets
+# __builtin_sqrt become sqrtsd (it must not call libm - the object has no undefined symbols).
+$(INTDIR)/atmosphere.o: CFLAGS += -O2 -fno-builtin -fno-math-errno
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(CORE_LIBS) --as-needed $(EXTRA_LIBS) --no-as-needed \
                $(TOOLCHAIN)/lib/crt1.o
@@ -70,9 +71,9 @@ $(INTDIR)/%.o: $(SRCDIR)/%.cpp | $(INTDIR)
 $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-eboot.bin: $(OBJS) | $(INTDIR)
+eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3800000000000011
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@
@@ -87,8 +88,12 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
-	$(PKG)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
+# ---- Packaged assets: every file under assets/ ships at /app0/assets/ (tools/build_assets.py).
+#      tools/make_gp4.py declares every directory (create-gp4's fixed tree breaks nested ones). ----
+ASSETS      := $(shell find assets -type f 2>/dev/null | LC_ALL=C sort)
+
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES) $(ASSETS)
+	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) $^
 
 $(CONTENT_ID).pkg: pkg.gp4
 	$(PKG)/PkgTool.Core pkg_build $< .
