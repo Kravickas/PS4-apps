@@ -3956,7 +3956,7 @@ static void run_mf3() {
 //      16K/32K/48K/64K: o = mapped and contents right, ! = mapped but contents wrong, else the
 //      error code. Only bytes inside the file's last 16 KiB page are read. --------------------------
 
-static void mf_grid_line(const char* id, uint64_t file_size) {
+static void mf_grid_line(const char* id, uint64_t file_size, bool writable = false) {
     char path[64];
     mf_named(path, "dmem_mf4.bin");
     int fd = sceKernelOpen(path, 0x0602, 0777);
@@ -3972,8 +3972,8 @@ static void mf_grid_line(const char* id, uint64_t file_size) {
         }
         sceKernelClose(fd);
     }
-    fd = sceKernelOpen(path, 0x0000, 0777);
-    Line l = head(id, "eof grid");
+    fd = sceKernelOpen(path, writable ? 0x0002 : 0x0000, 0777);
+    Line l = head(id, writable ? "eof grid, read-write" : "eof grid");
     l.s("size=").hex(file_size).c(' ');
     if (fd < 0) {
         l.s("SKIP open").end();
@@ -3986,7 +3986,7 @@ static void mf_grid_line(const char* id, uint64_t file_size) {
         l.dec((long long)(off >> 10)).s("K:");
         for (uint64_t len : lens) {
             void* m = 0;
-            const int32_t r = sceKernelMmap(0, len, 0x1, 0x1, fd, (long)off, &m);
+            const int32_t r = sceKernelMmap(0, len, writable ? 0x3 : 0x1, 0x1, fd, (long)off, &m);
             if (r != 0) {
                 l.c(code(r));
                 continue;
@@ -4011,22 +4011,38 @@ static void mf_grid_line(const char* id, uint64_t file_size) {
     sceKernelClose(fd);
 }
 
+static const uint64_t mg_sizes[] = {1,      0xFFF,  0x1000, 0x1001, 0x2000, 0x3FFF, 0x4000,
+                                    0x4001, 0x6000, 0x7FFF, 0x8000, 0x8001, 0xC000, 0x10000};
+
+static void grid_id(char* id, char a, char b, int n) {
+    id[0] = a;
+    id[1] = b;
+    if (n < 10) {
+        id[2] = (char)('0' + n);
+        id[3] = 0;
+    } else {
+        id[2] = (char)('0' + n / 10);
+        id[3] = (char)('0' + n % 10);
+        id[4] = 0;
+    }
+}
+
+// MW (at the end): the same grid mapped read-write through a read-write fd
+static void run_mfw() {
+    say("== MW end-of-file grid, read-write: same sizes, offsets and lengths as MG");
+    char id[8] = {};
+    for (int i = 0; i < 14; i++) {
+        grid_id(id, 'M', 'W', i + 1);
+        mf_grid_line(id, mg_sizes[i], true);
+    }
+}
+
 static void run_mfg() {
     say("== MG end-of-file grid: per size, offsets 0K/16K/32K x lengths 16K/32K/48K/64K");
-    static const uint64_t sizes[] = {1,      0xFFF,  0x1000, 0x1001, 0x2000, 0x3FFF, 0x4000,
-                                     0x4001, 0x6000, 0x7FFF, 0x8000, 0x8001, 0xC000, 0x10000};
-    char id[8] = {'M', 'G', 0, 0, 0, 0, 0, 0};
+    char id[8] = {};
     for (int i = 0; i < 14; i++) {
-        const int n = i + 1;
-        if (n < 10) {
-            id[2] = (char)('0' + n);
-            id[3] = 0;
-        } else {
-            id[2] = '1';
-            id[3] = (char)('0' + n - 10);
-            id[4] = 0;
-        }
-        mf_grid_line(id, sizes[i]);
+        grid_id(id, 'M', 'G', i + 1);
+        mf_grid_line(id, mg_sizes[i]);
     }
 }
 
@@ -4317,6 +4333,7 @@ int main(void) {
         run_mf16();
         run_mf21();
         run_mf24();
+        run_mfw();
         remove_scratch_files();
     }
     say("===== DONE =====");
