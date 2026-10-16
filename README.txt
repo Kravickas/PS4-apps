@@ -91,6 +91,7 @@ SECTIONS
   MG end-of-file grid: 14 file sizes around the 4 KiB and 16 KiB boundaries (1 byte to 64 KiB),
      each mapped read-only at offsets 0/16K/32K with lengths 16K/32K/48K/64K, contents checked
   MW (at the end) the MG grid mapped read-write through a read-write fd
+  PS the four pool counters before each section from P2 on, to find where totals first differ
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

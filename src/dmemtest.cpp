@@ -1487,6 +1487,17 @@ static Line& stats(Line& l) {
         .hex((uint32_t)st.alloc_flushed).c('/').hex((uint32_t)st.alloc_cached);
 }
 
+// PS: the four pool counters before a section, to find where totals first differ
+static void pool_checkpoint(const char* section) {
+    char name[40] = "before ";
+    int n = 7;
+    for (const char* c = section; *c && n < 39; c++)
+        name[n++] = *c;
+    name[n] = 0;
+    Line l = head("PS", name);
+    stats(l).end();
+}
+
 static void run_p2() {
     say("== P2 pool with 2 MiB reserve; stats = avail flushed/cached, alloc flushed/cached");
     const uint64_t blk = 0x10000;
@@ -4302,37 +4313,69 @@ int main(void) {
         run_h();
         run_h7();
         run_p();
+        pool_checkpoint("p2");
         run_p2();
+        pool_checkpoint("p4");
         run_p4();
+        pool_checkpoint("p7");
         run_p7();
+        pool_checkpoint("p8");
         run_p8();
+        pool_checkpoint("p9");
         run_p9();
+        pool_checkpoint("t");
         run_t();
+        pool_checkpoint("u");
         run_u();
+        pool_checkpoint("w");
         run_w();
+        pool_checkpoint("x");
         run_x();
+        pool_checkpoint("y");
         run_y();
+        pool_checkpoint("z");
         run_z();
+        pool_checkpoint("j");
         run_j();
+        pool_checkpoint("m");
         run_m();
+        pool_checkpoint("n");
         run_n();
+        pool_checkpoint("l");
         run_l();
+        pool_checkpoint("hb");
         run_hb();
+        pool_checkpoint("xc");
         run_xc();
+        pool_checkpoint("cg");
         run_cg();
+        pool_checkpoint("k");
         run_k();
+        pool_checkpoint("p54");
         run_p54();
+        pool_checkpoint("c");
         run_c();
+        pool_checkpoint("g");
         run_g();
+        pool_checkpoint("r");
         run_r();
+        pool_checkpoint("mf2");
         run_mf2();
+        pool_checkpoint("mf3");
         run_mf3();
+        pool_checkpoint("mfg");
         run_mfg();
+        pool_checkpoint("mf25");
         run_mf25();
+        pool_checkpoint("u12");
         run_u12();
+        pool_checkpoint("mf16");
         run_mf16();
+        pool_checkpoint("mf21");
         run_mf21();
+        pool_checkpoint("mf24");
         run_mf24();
+        pool_checkpoint("mfw");
         run_mfw();
         remove_scratch_files();
     }
