@@ -3,14 +3,15 @@
    Records what the display buffer labels do around EOP flips, on hardware and on shadPS4, to
    settle whether label[b] can be 0 when an EOP flip of b completes (shadPS4 asserts it is 1).
 
-   Phases, each followed by a drain:
-     A eop_alt_p1   EOP flips (sceGnmSubmitAndFlipCommandBuffers, plain 0x68750777 marker) of
-                    buffers 0,1,0,1..., next frame only once nothing is pending (control)
-     B eop_alt_p2   the same, up to 2 pending: frame k finishes on the GPU while k-1 waits
-     C eop_alt_p8   the same, up to 8 pending
-     D imm_alt_p2   immediate flips (sceVideoOutSubmitFlip) of 0,1,0,1..., up to 2 pending
-     E eop_same_p2  EOP flips of buffer 0 only, up to 2 pending (re-flipping a buffer)
-     F eop_imm_mix  an EOP flip of the buffer on screen, then an immediate flip of the other
+   Phases, each followed by a drain (durations at 60 Hz; about four minutes in all):
+     A eop_alt_p1   30 s  EOP flips (sceGnmSubmitAndFlipCommandBuffers, plain 0x68750777
+                          marker) of buffers 0,1,0,1..., the next once nothing is pending
+     B eop_alt_p2   60 s  the same, up to 2 pending: frame k finishes on the GPU while k-1 waits
+     C eop_alt_p8   60 s  the same, up to 8 pending
+     D imm_alt_p2   30 s  immediate flips (sceVideoOutSubmitFlip) of 0,1,0,1..., up to 2 pending
+     E eop_same_p2  30 s  EOP flips of buffer 0 only, up to 2 pending (re-flipping a buffer)
+     F eop_imm_mix  30 s  an EOP flip of the buffer on screen, then an immediate flip of the
+                          other
 
    Recorded:
      - per submit: phase, buffer, flip arg, CPU label reads before / after, flip and vblank
@@ -23,15 +24,23 @@
      - every flip event from the equeue;
      - per submit, derived: when the GPU finished it, when it reached the screen, and the label
        values across that span.
-   Output: /user/data/ShadCube4/flipprobe.log, flushed every FP_FLUSH_EVERY submits. */
+   Output: /user/data/ShadCube4/flipprobe.log, flushed every FP_FLUSH_EVERY submits.
+   Screen: both display buffers get the same picture (no flicker): a segment per phase - green
+   done, white filling, grey to come - and an overall bar; all green when it has finished. */
 
 extern uint64_t sceKernelReadTsc(void);
 extern uint64_t sceKernelGetTscFrequency(void);
 extern int sceKernelIsNeoMode(void);
 
-#define FP_MAX_SUBMITS 2048
-#define FP_MAX_EVENTS (1u << 17)
-#define FP_MAX_QEVENTS 4096
+/* Submits per second of a phase: one per vblank at 60 Hz. */
+#ifndef FP_PER_SECOND
+#define FP_PER_SECOND 60
+#endif
+#define FP_MAX_SUBMITS 16384
+#define FP_MAX_EVENTS (1u << 19)
+#define FP_MAX_QEVENTS 32768
+/* The progress screen is redrawn every this many submits. */
+#define FP_SCREEN_EVERY 15
 #define FP_DCB_SLOTS 32
 #define FP_DCB_DWORDS 1024
 #define FP_FLUSH_EVERY 64
@@ -53,9 +62,12 @@ struct fp_phase {
 };
 
 static const struct fp_phase g_fp_phases[] = {
-    {"A eop_alt_p1", FP_EOP_ALT, 1, 180},   {"B eop_alt_p2", FP_EOP_ALT, 2, 300},
-    {"C eop_alt_p8", FP_EOP_ALT, 8, 300},   {"D imm_alt_p2", FP_IMM_ALT, 2, 180},
-    {"E eop_same_p2", FP_EOP_SAME, 2, 180}, {"F eop_imm_mix", FP_EOP_IMM_MIX, 2, 240},
+    {"A eop_alt_p1", FP_EOP_ALT, 1, 30 * FP_PER_SECOND},
+    {"B eop_alt_p2", FP_EOP_ALT, 2, 60 * FP_PER_SECOND},
+    {"C eop_alt_p8", FP_EOP_ALT, 8, 60 * FP_PER_SECOND},
+    {"D imm_alt_p2", FP_IMM_ALT, 2, 30 * FP_PER_SECOND},
+    {"E eop_same_p2", FP_EOP_SAME, 2, 30 * FP_PER_SECOND},
+    {"F eop_imm_mix", FP_EOP_IMM_MIX, 2, 30 * FP_PER_SECOND},
 };
 #define FP_NUM_PHASES ((int)(sizeof(g_fp_phases) / sizeof(g_fp_phases[0])))
 
@@ -130,7 +142,60 @@ static struct {
     unsigned long out_n;
     uint32_t flushed_sub, flushed_ev, flushed_qev;
     uint64_t tsc_hz;
+    uint32_t* fb[2];
+    int32_t
+        last_post[2]; /* last submit whose patched marker block was logged in full, per buffer */
+    int32_t last_pre; /* last submit whose marker block as built was logged in full */
 } g_fp;
+
+/* ---- progress screen, drawn by the CPU into both display buffers alike ---- */
+#define FP_BG 0xFF202428u
+#define FP_TRACK 0xFF454A55u
+#define FP_DONE 0xFF2FA84Fu
+#define FP_FILL 0xFFFFFFFFu
+#define FP_SEG_Y0 470
+#define FP_SEG_Y1 560
+#define FP_ALL_Y0 610
+#define FP_ALL_Y1 640
+#define FP_X0 160
+#define FP_X1 1760
+#define FP_GAP 16
+static void fp_rect(int x0, int y0, int x1, int y1, uint32_t c) {
+    for (int k = 0; k < 2; k++) {
+        uint32_t* b = g_fp.fb[k];
+        if (!b)
+            continue;
+        for (int y = y0; y < y1; y++) {
+            uint32_t* row = b + (long)y * DISPLAY_W;
+            for (int x = x0; x < x1; x++)
+                row[x] = c;
+        }
+    }
+}
+/* Phase `phase` is `done` of `total` through; phase FP_NUM_PHASES means everything is finished. */
+static void fp_screen(int phase, int done, int total) {
+    const int seg_w = (FP_X1 - FP_X0 - FP_GAP * (FP_NUM_PHASES - 1)) / FP_NUM_PHASES;
+    long all_total = 0, all_done = 0;
+    for (int p = 0; p < FP_NUM_PHASES; p++) {
+        int x0 = FP_X0 + p * (seg_w + FP_GAP), x1 = x0 + seg_w;
+        all_total += g_fp_phases[p].submits;
+        if (p < phase) {
+            fp_rect(x0, FP_SEG_Y0, x1, FP_SEG_Y1, FP_DONE);
+            all_done += g_fp_phases[p].submits;
+        } else if (p == phase) {
+            int fx = x0 + (int)((long)seg_w * done / (total > 0 ? total : 1));
+            fp_rect(x0, FP_SEG_Y0, fx, FP_SEG_Y1, FP_FILL);
+            fp_rect(fx, FP_SEG_Y0, x1, FP_SEG_Y1, FP_TRACK);
+            all_done += done;
+        } else {
+            fp_rect(x0, FP_SEG_Y0, x1, FP_SEG_Y1, FP_TRACK);
+        }
+    }
+    int ax = FP_X0 + (int)((long)(FP_X1 - FP_X0) * all_done / (all_total > 0 ? all_total : 1));
+    fp_rect(FP_X0, FP_ALL_Y0, ax, FP_ALL_Y1, phase >= FP_NUM_PHASES ? FP_DONE : FP_FILL);
+    fp_rect(ax, FP_ALL_Y0, FP_X1, FP_ALL_Y1, FP_TRACK);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST); /* the write-combined stores land before a flip */
+}
 
 /* ---- output ---- */
 #define FP_OUT_CAP (1u << 20)
@@ -433,8 +498,35 @@ static void fp_log_submit(const struct fp_submit* s) {
     fp_kv_u("dcb_dwords", s->dcb_dwords);
     fp_s("\n");
     if (s->eop) {
-        fp_dwords("TAIL_PRE ", s->idx, s->tail_pre);
-        fp_dwords("TAIL_POST", s->idx, s->tail_post);
+        /* In full when it differs from the previous one logged (per buffer for the patched
+           block); otherwise the submit it is identical to. */
+        const struct fp_submit* pre = g_fp.last_pre >= 0 ? &g_fp.sub[g_fp.last_pre] : 0;
+        int same_pre = pre != 0;
+        for (int i = 0; same_pre && i < 64; i++)
+            same_pre = pre->tail_pre[i] == s->tail_pre[i];
+        if (same_pre) {
+            fp_s("TAIL_PRE_SAME");
+            fp_kv_u("submit", s->idx);
+            fp_kv_u("as", pre->idx);
+            fp_s("\n");
+        } else {
+            fp_dwords("TAIL_PRE ", s->idx, s->tail_pre);
+            g_fp.last_pre = (int32_t)s->idx;
+        }
+        int b = s->bi & 1;
+        const struct fp_submit* post = g_fp.last_post[b] >= 0 ? &g_fp.sub[g_fp.last_post[b]] : 0;
+        int same_post = post != 0;
+        for (int i = 0; same_post && i < 64; i++)
+            same_post = post->tail_post[i] == s->tail_post[i];
+        if (same_post) {
+            fp_s("TAIL_POST_SAME");
+            fp_kv_u("submit", s->idx);
+            fp_kv_u("as", post->idx);
+            fp_s("\n");
+        } else {
+            fp_dwords("TAIL_POST", s->idx, s->tail_post);
+            g_fp.last_post[b] = (int32_t)s->idx;
+        }
     }
 }
 
@@ -492,7 +584,15 @@ static void fp_analyse(void) {
     for (uint32_t k = 0; k < g_fp.nsub; k++) {
         const struct fp_submit* s = &g_fp.sub[k];
         long long gpu_i = -1, shown_i = -1;
-        for (uint32_t i = 0; i < n; i++) {
+        uint32_t lo = 0, hi = n;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo) / 2;
+            if (g_fp.ev[mid].tsc < s->t_sub0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        for (uint32_t i = lo; i < n; i++) {
             if (gpu_i < 0 && s->eop && g_fp.ev[i].progress >= s->idx + 1 &&
                 g_fp.ev[i].tsc >= s->t_sub0)
                 gpu_i = i;
@@ -510,7 +610,7 @@ static void fp_analyse(void) {
                 lab_at_shown = s->bi ? g_fp.ev[shown_i].lab1 : g_fp.ev[shown_i].lab0;
             long long from = gpu_i >= 0 ? gpu_i : -1;
             if (from < 0) {
-                for (uint32_t i = 0; i < n; i++)
+                for (uint32_t i = lo; i < n; i++)
                     if (g_fp.ev[i].tsc >= s->t_sub1) {
                         from = i;
                         break;
@@ -571,6 +671,10 @@ static int flip_probe_run(int video, void* const* fb, int nfb, void* label_base,
     g_fp.eq = eq;
     g_fp.eq_ok = eq_ok;
     g_fp.tsc_hz = sceKernelGetTscFrequency();
+    g_fp.fb[0] = nfb > 0 ? (uint32_t*)fb[0] : 0;
+    g_fp.fb[1] = nfb > 1 ? (uint32_t*)fb[1] : 0;
+    g_fp.last_post[0] = g_fp.last_post[1] = -1;
+    g_fp.last_pre = -1;
     fp_open();
     g_fp.out = (char*)gpu_alloc(FP_OUT_CAP, 0x4000);
     g_fp.gpu = (struct fp_gpu*)gpu_alloc(sizeof(struct fp_gpu), 0x10000);
@@ -618,13 +722,16 @@ static int flip_probe_run(int video, void* const* fb, int nfb, void* label_base,
     if (!alloc_ok)
         return 3;
 
-    /* Whatever the loading screen queued finishes first. */
+    /* Whatever the loading screen queued finishes first; then both buffers get the same picture,
+       so flipping between them shows no change but the progress. */
     fp_s("PRE_DRAIN");
     fp_kv_i("timeout", fp_drain());
     fp_kv_x("lab0", g_fp.label[0]);
     fp_kv_x("lab1", g_fp.label[1]);
     fp_s("\n");
     fp_flush_out();
+    fp_rect(0, 0, DISPLAY_W, DISPLAY_H, FP_BG);
+    fp_screen(0, 0, g_fp_phases[0].submits);
 
     void* thr = 0;
     int thr_ret = scePthreadCreate(&thr, 0, fp_poller, 0, "flipprobe_poll");
@@ -668,6 +775,8 @@ static int flip_probe_run(int video, void* const* fb, int nfb, void* label_base,
                 break;
             }
             }
+            if ((k % FP_SCREEN_EVERY) == 0)
+                fp_screen(p, k, ph->submits);
             if ((g_fp.nsub % FP_FLUSH_EVERY) == 0)
                 fp_flush_records();
         }
@@ -685,6 +794,8 @@ static int flip_probe_run(int video, void* const* fb, int nfb, void* label_base,
         fp_flush_records();
     }
 
+    /* Both buffers carry the picture, so the one on screen shows it without another flip. */
+    fp_screen(FP_NUM_PHASES, 0, 0);
     g_fp.stop = 1;
     void* rv = 0;
     int join_ret = thr_ret == 0 ? scePthreadJoin(thr, &rv) : -1;
@@ -704,5 +815,6 @@ static int flip_probe_run(int video, void* const* fb, int nfb, void* label_base,
     fp_flush_out();
     if (g_fp.fd >= 0)
         sceKernelClose(g_fp.fd);
+    sceKernelUsleep(2000000);
     return 0;
 }

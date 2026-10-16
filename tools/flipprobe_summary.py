@@ -44,10 +44,17 @@ def parse(path):
             d = {k: num(v) for k, v in KV.findall(line.replace(" phase=" + name, ""))}
             d["phase"] = name
             subs[d["idx"]] = d
+        elif line.startswith("TAIL_PRE_SAME") or line.startswith("TAIL_POST_SAME"):
+            # Identical to an earlier submit's block, which was logged in full.
+            kind = "pre" if line.startswith("TAIL_PRE") else "post"
+            idx = int(re.search(r"submit=(\d+)", line).group(1))
+            ref = int(re.search(r" as=(\d+)", line).group(1))
+            tails[idx][kind] = tails[ref][kind]
         elif line.startswith("TAIL_PRE") or line.startswith("TAIL_POST"):
             kind = "pre" if line.startswith("TAIL_PRE") else "post"
             idx = int(re.search(r"submit=(\d+)", line).group(1))
-            tails[idx][kind] = line.split(" : ")[1].split()
+            parts = line.split(" : ")
+            tails[idx][kind] = parts[1].split() if len(parts) > 1 else []
         elif line.startswith("AN "):
             name = line.split(" phase=")[1].split(" eop=")[0]
             d = {k: num(v) for k, v in KV.findall(line.replace(" phase=" + name, ""))}
