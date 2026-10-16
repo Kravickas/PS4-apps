@@ -1487,7 +1487,7 @@ static Line& stats(Line& l) {
         .hex((uint32_t)st.alloc_flushed).c('/').hex((uint32_t)st.alloc_cached);
 }
 
-// PS: the four pool counters before a section, to find where totals first differ
+// PS: the four pool counters before a section, then again after one idle second
 static void pool_checkpoint(const char* section) {
     char name[40] = "before ";
     int n = 7;
@@ -1495,6 +1495,10 @@ static void pool_checkpoint(const char* section) {
         name[n++] = *c;
     name[n] = 0;
     Line l = head("PS", name);
+    stats(l);
+    // the same counters after one idle second, to see whether they change on their own
+    sceKernelUsleep(1000000);
+    l.s(" +1s ");
     stats(l).end();
 }
 
@@ -3570,6 +3574,121 @@ static void run_cg() {
     cg_case("CG6", "size 14, 12 writable (read-only)", 0x12, 0x14, true);
 }
 
+// ---- VQ: what VirtualQuery reports for pool memory (offset, memory type, separate reservations,
+//      name). Addresses are printed relative to the reservation. -----------------------------------
+
+static void vq_field(Line& l, uint64_t at, uint64_t rel_to) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    const int32_t r = sceKernelVirtualQuery((void*)at, 0, vi, 0x48);
+    if (r != 0) {
+        l.c(code(r));
+        return;
+    }
+    uint64_t st = 0, en = 0, off = 0;
+    for (int k = 7; k >= 0; k--) {
+        st = (st << 8) | vi[k];
+        en = (en << 8) | vi[8 + k];
+        off = (off << 8) | vi[0x10 + k];
+    }
+    const uint32_t mt = (uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) |
+                        ((uint32_t)vi[0x1E] << 16) | ((uint32_t)vi[0x1F] << 24);
+    l.hex(st - rel_to).c('-').hex(en - rel_to).s(" off=").hex(off).s(" type=").hex(mt);
+    l.s(" prot=").hex(vi[0x18]).s(" flags=").hex(vi[0x20]);
+}
+
+static void vq_name(Line& l, uint64_t at) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0) {
+        l.s("?");
+        return;
+    }
+    for (int k = 0; k < 32 && vi[0x21 + k]; k++)
+        l.c(vi[0x21 + k] >= 0x20 && vi[0x21 + k] < 0x7F ? (char)vi[0x21 + k] : '?');
+}
+
+// one call site for every reservation VQ4/VQ6 make
+__attribute__((noinline)) static int32_t vq_reserve(void* hint, int32_t flags, void** out) {
+    *out = hint;
+    return sceKernelMemoryPoolReserve(hint, 0x200000, 0, flags, out);
+}
+
+static void run_vq() {
+    say("== VQ VirtualQuery of pool memory; ranges relative to the reservation");
+    const uint64_t blk = 0x10000;
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    void* rv = 0;
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
+        say("VQ1  SKIP reserve");
+        return;
+    }
+    const uint64_t R = (uint64_t)rv;
+    sceKernelMemoryPoolCommit(rv, blk, 0, 0x3, 0);
+    {
+        Line l = head("VQ1", "commit at start: committed | rest");
+        vq_field(l, R, R);
+        l.s(" | ");
+        vq_field(l, R + blk, R);
+        l.end();
+    }
+    sceKernelMemoryPoolCommit((void*)(R + 2 * blk), blk, 3, 0x1, 0);
+    {
+        Line l = head("VQ2", "type-3 commit in the middle: gap | it | rest");
+        vq_field(l, R + blk, R);
+        l.s(" | ");
+        vq_field(l, R + 2 * blk, R);
+        l.s(" | ");
+        vq_field(l, R + 3 * blk, R);
+        l.end();
+    }
+    sceKernelMemoryPoolDecommit(rv, blk, 0);
+    {
+        Line l = head("VQ3", "first commit decommitted: start");
+        vq_field(l, R, R);
+        l.end();
+    }
+    {
+        Line l = head("VQ5", "middle commit mtypeprotect type 0: it");
+        l.c(code(sceKernelMtypeprotect((void*)(R + 2 * blk), blk, 0, 0x3))).c(' ');
+        vq_field(l, R + 2 * blk, R);
+        l.end();
+    }
+    sceKernelMunmap(rv, 0x200000);
+    // VQ4: two adjacent reservations from the same call site; VQ6: names and the call site
+    void* a = 0;
+    void* b = 0;
+    if (vq_reserve(0, 0, &a) != 0) {
+        say("VQ4  SKIP reserve");
+        return;
+    }
+    const uint64_t A = (uint64_t)a;
+    const int32_t rb = vq_reserve((void*)(A + 0x200000), 0x90, &b);
+    {
+        Line l = head("VQ4", "same call site, adjacent: 2nd | 1st");
+        l.c(code(rb)).c(' ');
+        if (rb == 0) {
+            vq_field(l, A + 0x200000, A);
+            l.s(" | ");
+            vq_field(l, A, A);
+        }
+        l.end();
+    }
+    {
+        Line l = head("VQ6", "names: fn, 1st, 2nd");
+        l.s("fn=").hex((uint64_t)&vq_reserve).s(" ");
+        vq_name(l, A);
+        l.s(" ");
+        if (rb == 0)
+            vq_name(l, A + 0x200000);
+        l.end();
+    }
+    if (rb == 0)
+        sceKernelMunmap(b, 0x200000);
+    sceKernelMunmap(a, 0x200000);
+}
+
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
 
 static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
@@ -4157,6 +4276,292 @@ static void run_mf21() {
         sceKernelClose(fd);
 }
 
+// ---- NU (at the end): edge cases of every call: length 0, unaligned address or length, ranges
+//      over a hole or over two kinds of mapping, repeated calls, use after release. Page state is
+//      the protection read back, or u when the page is unmapped. -----------------------------------
+
+static void nu_page(Line& l, const void* at) {
+    void* st = 0;
+    void* en = 0;
+    int32_t prot = 0;
+    if (sceKernelQueryMemoryProtection((void*)at, &st, &en, &prot) != 0)
+        l.c('u');
+    else
+        l.hex((uint32_t)prot);
+}
+
+// two fresh pages of flexible memory, read-write; nullptr if none
+static uint8_t* nu_flex2() {
+    void* f = 0;
+    return sceKernelMapFlexibleMemory(&f, 2 * PG, 0x3, 0) == 0 ? (uint8_t*)f : nullptr;
+}
+
+static void nu_munmap() {
+    say("NU1 starting");
+    Line l = head("NU1", "munmap: 0 | +1000 | 4001 | +hole | twice | wrap");
+    uint8_t* f = nu_flex2();
+    if (!f)
+        return l.s("SKIP").end();
+    l.c(code(sceKernelMunmap(f, 0))).c(':');
+    nu_page(l, f);
+    l.s(" | ").c(code(sceKernelMunmap(f + 0x1000, PG))).c(':');
+    nu_page(l, f);
+    l.c(',');
+    nu_page(l, f + PG);
+    sceKernelMunmap(f, 2 * PG);
+    if ((f = nu_flex2())) {
+        l.s(" | ").c(code(sceKernelMunmap(f, 0x4001))).c(':');
+        nu_page(l, f);
+        l.c(',');
+        nu_page(l, f + PG);
+        sceKernelMunmap(f, 2 * PG);
+    }
+    if ((f = nu_flex2())) {
+        sceKernelMunmap(f + PG, PG);
+        l.s(" | ").c(code(sceKernelMunmap(f, 2 * PG))).c(':');
+        nu_page(l, f);
+    }
+    if ((f = nu_flex2())) {
+        l.s(" | ").c(code(sceKernelMunmap(f, 2 * PG)));
+        l.c(code(sceKernelMunmap(f, 2 * PG)));
+    }
+    l.s(" | ").c(code(sceKernelMunmap((void*)0xFFFFFFFFFFFFC000ull, 0x8000)));
+    l.end();
+}
+
+static void nu_mprotect() {
+    say("NU2 starting");
+    Line l = head("NU2", "mprotect: 0 | +1000 | 4001 | +hole | flex+dmem | wo | 40,100");
+    uint8_t* f = nu_flex2();
+    if (!f)
+        return l.s("SKIP").end();
+    l.c(code(sceKernelMprotect(f, 0, 0x1))).c(':');
+    nu_page(l, f);
+    l.s(" | ").c(code(sceKernelMprotect(f + 0x1000, 0x1000, 0x1))).c(':');
+    nu_page(l, f);
+    l.c(',');
+    nu_page(l, f + PG);
+    sceKernelMunmap(f, 2 * PG);
+    if ((f = nu_flex2())) {
+        l.s(" | ").c(code(sceKernelMprotect(f, 0x4001, 0x1))).c(':');
+        nu_page(l, f);
+        l.c(',');
+        nu_page(l, f + PG);
+        sceKernelMunmap(f, 2 * PG);
+    }
+    if ((f = nu_flex2())) {
+        sceKernelMunmap(f + PG, PG);
+        l.s(" | ").c(code(sceKernelMprotect(f, 2 * PG, 0x1))).c(':');
+        nu_page(l, f);
+        sceKernelMunmap(f, PG);
+    }
+    // a flexible page followed by a direct page
+    int32_t rr = 0;
+    const long pa = alloc(1, 3, &rr);
+    if (pa >= 0 && (f = nu_flex2())) {
+        sceKernelMunmap(f + PG, PG);
+        void* d = f + PG;
+        const int32_t rd = sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
+        l.s(" | ");
+        if (rd == 0 && d == f + PG) {
+            l.c(code(sceKernelMprotect(f, 2 * PG, 0x1))).c(':');
+            nu_page(l, f);
+            l.c(',');
+            nu_page(l, f + PG);
+            sceKernelMunmap(f + PG, PG);
+        } else {
+            l.s("map ").c(code(rd));
+        }
+        sceKernelMunmap(f, PG);
+    }
+    release_all(pa, 1);
+    if ((f = nu_flex2())) {
+        l.s(" | ").c(code(sceKernelMprotect(f, PG, 0x2))).c(':');
+        nu_page(l, f);
+        l.s(" | ").c(code(sceKernelMprotect(f + PG, PG, 0x41))).c(code(
+            sceKernelMprotect(f + PG, PG, 0x101))).c(':');
+        nu_page(l, f + PG);
+        sceKernelMunmap(f, 2 * PG);
+    }
+    l.end();
+}
+
+static void nu_mtypeprotect() {
+    say("NU3 starting");
+    Line l = head("NU3", "mtypeprotect: +1000 | +hole | flexible | pool reserved");
+    int32_t rr = 0;
+    const long pa = alloc(2, 3, &rr);
+    uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
+    if (!va) {
+        release_all(pa, 2);
+        return l.s("SKIP").end();
+    }
+    l.c(code(sceKernelMtypeprotect(va + 0x1000, PG, 0, 0x3)));
+    sceKernelMunmap(va + PG, PG);
+    l.s(" | ").c(code(sceKernelMtypeprotect(va, 2 * PG, 0, 0x3)));
+    sceKernelMunmap(va, PG);
+    release_all(pa, 2);
+    uint8_t* f = nu_flex2();
+    if (f) {
+        l.s(" | ").c(code(sceKernelMtypeprotect(f, PG, 0, 0x3)));
+        sceKernelMunmap(f, 2 * PG);
+    }
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px);
+    void* rv = 0;
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
+        l.s(" | ").c(code(sceKernelMtypeprotect(rv, 0x10000, 0, 0x3)));
+        sceKernelMunmap(rv, 0x200000);
+    }
+    l.end();
+}
+
+static void nu_release() {
+    say("NU4 starting");
+    Line l = head("NU4", "release: chk twice | rel twice | +1000 | 4001");
+    int32_t rr = 0;
+    long pa = alloc(1, 3, &rr);
+    if (pa >= 0) {
+        l.c(code(sceKernelCheckedReleaseDirectMemory(pa, PG)));
+        l.c(code(sceKernelCheckedReleaseDirectMemory(pa, PG)));
+    }
+    pa = alloc(1, 3, &rr);
+    if (pa >= 0) {
+        l.s(" | ").c(code(sceKernelReleaseDirectMemory(pa, PG)));
+        l.c(code(sceKernelReleaseDirectMemory(pa, PG)));
+    }
+    pa = alloc(2, 3, &rr);
+    if (pa >= 0) {
+        l.s(" | ").c(code(sceKernelReleaseDirectMemory(pa + 0x1000, PG))).c(':');
+        l.c(allocated(pa) ? 'a' : 'f').c(allocated(pa + PG) ? 'a' : 'f');
+        release_all(pa, 2);
+    }
+    pa = alloc(2, 3, &rr);
+    if (pa >= 0) {
+        l.s(" | ").c(code(sceKernelReleaseDirectMemory(pa, 0x4001))).c(':');
+        l.c(allocated(pa) ? 'a' : 'f').c(allocated(pa + PG) ? 'a' : 'f');
+        release_all(pa, 2);
+    }
+    l.end();
+}
+
+static void nu_pool() {
+    say("NU5 starting");
+    Line l = head("NU5", "pool: commit twice | decommit twice | half | 0 | +4000 | 4000 | outside | 2 rsv");
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    void* r1 = 0;
+    if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r1) != 0)
+        return l.s("SKIP").end();
+    uint8_t* R = (uint8_t*)r1;
+    l.c(code(sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0)));
+    l.c(code(sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0)));
+    l.s(" | ").c(code(sceKernelMemoryPoolDecommit(R, blk, 0)));
+    l.c(code(sceKernelMemoryPoolDecommit(R, blk, 0)));
+    sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0);
+    l.s(" | ").c(code(sceKernelMemoryPoolDecommit(R, 2 * blk, 0))).c(' ');
+    stats(l);
+    l.s(" | ").c(code(sceKernelMemoryPoolCommit(R, 0, 0, 0x3, 0)));
+    l.s(" | ").c(code(sceKernelMemoryPoolCommit(R + 0x4000, blk, 0, 0x3, 0)));
+    l.s(" | ").c(code(sceKernelMemoryPoolCommit(R + blk, 0x4000, 0, 0x3, 0)));
+    uint8_t* f = nu_flex2();
+    if (f) {
+        l.s(" | ").c(code(sceKernelMemoryPoolCommit(f, blk, 0, 0x3, 0)));
+        sceKernelMunmap(f, 2 * PG);
+    }
+    void* r2 = R + rsv;
+    const int32_t rb = sceKernelMemoryPoolReserve(r2, rsv, 0, 0x90, &r2);
+    l.s(" | ");
+    if (rb == 0) {
+        const int32_t rc = sceKernelMemoryPoolCommit(R + rsv - blk, 2 * blk, 0, 0x3, 0);
+        l.c(code(rc));
+        if (rc == 0)
+            sceKernelMemoryPoolDecommit(R + rsv - blk, 2 * blk, 0);
+        sceKernelMunmap(r2, rsv);
+    } else {
+        l.s("rsv ").c(code(rb));
+    }
+    sceKernelMunmap(R, rsv);
+    l.end();
+}
+
+static void nu_file() {
+    say("NU6 starting");
+    Line l = head("NU6", "file mmap: len 0 | off 1000 | closed fd | fixed +1000");
+    char path[64];
+    mf_make_10k(path);
+    int fd = sceKernelOpen(path, 0x0000, 0777);
+    if (fd < 0)
+        return l.s("SKIP").end();
+    void* m = 0;
+    int32_t r = sceKernelMmap(0, 0, 0x1, 0x1, fd, 0, &m);
+    l.c(code(r));
+    if (r == 0)
+        sceKernelMunmap(m, PG);
+    r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0x1000, &m);
+    l.s(" | ").c(code(r));
+    if (r == 0)
+        sceKernelMunmap(m, PG);
+    uint8_t* f = nu_flex2();
+    if (f) {
+        m = f + 0x1000;
+        r = sceKernelMmap(f + 0x1000, PG, 0x1, 0x11, fd, 0, &m);
+        l.s(" | fixed ").c(code(r));
+        sceKernelMunmap(f, 2 * PG);
+    }
+    sceKernelClose(fd);
+    r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m);
+    l.s(" | closed ").c(code(r));
+    if (r == 0)
+        sceKernelMunmap(m, PG);
+    l.end();
+}
+
+static void nu_query() {
+    say("NU7 starting");
+    Line l = head("NU7", "query mid-area: dmem +1001 | vq +1234 | vq hole");
+    int32_t rr = 0;
+    const long pa = alloc(2, 3, &rr);
+    uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
+    if (!va) {
+        release_all(pa, 2);
+        return l.s("SKIP").end();
+    }
+    unsigned char info[0x18];
+    my_memset(info, 0, sizeof(info));
+    int32_t r = sceKernelDirectMemoryQuery(pa + 0x1001, 0, info, sizeof(info));
+    l.c(code(r));
+    if (r == 0) {
+        uint64_t st = 0, en = 0;
+        for (int k = 7; k >= 0; k--) {
+            st = (st << 8) | info[k];
+            en = (en << 8) | info[8 + k];
+        }
+        l.c(' ').shex((long long)(st - (uint64_t)pa)).c('-').shex((long long)(en - (uint64_t)pa));
+    }
+    l.s(" | ");
+    vq_field(l, (uint64_t)va + 0x1234, (uint64_t)va);
+    sceKernelMunmap(va + PG, PG);
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    l.s(" | ").c(code(sceKernelVirtualQuery(va + PG, 0, vi, 0x48)));
+    sceKernelMunmap(va, PG);
+    release_all(pa, 2);
+    l.end();
+}
+
+static void run_nu() {
+    say("== NU edge cases of every call (codes; page state = protection or u)");
+    nu_munmap();
+    nu_mprotect();
+    nu_mtypeprotect();
+    nu_release();
+    nu_pool();
+    nu_file();
+    nu_query();
+}
+
 // after the last test: remove the scratch files the mapping tests created
 static void remove_scratch_files() {
     static const char* names[] = {"dmem_mf.bin", "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin",
@@ -4367,6 +4772,8 @@ int main(void) {
         run_mfg();
         pool_checkpoint("mf25");
         run_mf25();
+        pool_checkpoint("vq");
+        run_vq();
         pool_checkpoint("u12");
         run_u12();
         pool_checkpoint("mf16");
@@ -4377,6 +4784,8 @@ int main(void) {
         run_mf24();
         pool_checkpoint("mfw");
         run_mfw();
+        pool_checkpoint("nu");
+        run_nu();
         remove_scratch_files();
     }
     say("===== DONE =====");
