@@ -84,8 +84,10 @@ SECTIONS
      map/close/reopen/map; mapping an empty file through a read-only fd
   MFE mapping past the end of a file: beyond EOF through read-only and read-write fds, exactly the
      file, an offset past EOF, files that do not end on a page boundary, the bytes after the end of the file in its last page,
-     the fd position across a mapping; MF16 an empty file through a read-write fd and MF21 a writable
-     mapping into a partly filled last page run last. The scratch files are deleted after the last test
+     the fd position across a mapping; MF25 whether a read-only mapping into a partly filled last page shows a later write; MF16 an
+     empty file through a read-write fd, MF21 a writable mapping into a partly filled last page, and
+     MF24 writes through such a mapping (inside the file and past its end), mprotect, the file size
+     afterwards and what a new mapping shows, run last. The scratch files are deleted after the last test
   MG end-of-file grid: 14 file sizes around the 4 KiB and 16 KiB boundaries (1 byte to 64 KiB),
      each mapped read-only at offsets 0/16K/32K with lengths 16K/32K/48K/64K, contents checked
   K  address space layout: placement with hints, filling the space below the ceiling and then

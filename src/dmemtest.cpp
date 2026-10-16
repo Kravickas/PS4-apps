@@ -4036,6 +4036,73 @@ static void run_mf16() {
     mf_sized("MF16", "rw fd, empty file, map 64K", 0x0002, 0, 0x10000, 0);
 }
 
+// a 10 KiB file of 0x5A at dmem_mf3.bin
+static void mf_make_10k(char* path) {
+    mf_named(path, "dmem_mf3.bin");
+    const int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd >= 0) {
+        static unsigned char ones[0x2800];
+        for (uint64_t k = 0; k < sizeof(ones); k++)
+            ones[k] = 0x5A;
+        sceKernelWrite(fd, ones, sizeof(ones));
+        sceKernelClose(fd);
+    }
+}
+
+// MF25: a read-only mapping into the partly filled last page, then a write to the file
+static void run_mf25() {
+    char path[64];
+    mf_make_10k(path);
+    const int fd = sceKernelOpen(path, 0x0000, 0777);
+    Line l = head("MF25", "ro 16K map of 10K file, later write: byte0");
+    void* m = 0;
+    const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m) : -1;
+    l.c(code(r));
+    if (r == 0) {
+        const int fw = sceKernelOpen(path, 0x0001, 0777);
+        if (fw >= 0) {
+            const unsigned char v = 0x44;
+            sceKernelWrite(fw, &v, 1);
+            sceKernelClose(fw);
+        }
+        l.c(' ').hex(*(volatile unsigned char*)m);
+        sceKernelMunmap(m, 0x4000);
+    }
+    l.end();
+    if (fd >= 0)
+        sceKernelClose(fd);
+}
+
+// MF24 (after MF21): a writable mapping into the partly filled last page: write inside the file
+// and past its end, make it read-only, unmap; then the file size and what a new mapping shows
+static void run_mf24() {
+    char path[64];
+    mf_make_10k(path);
+    const int fd = sceKernelOpen(path, 0x0002, 0777);
+    say("MF24 starting");
+    Line l = head("MF24", "rw tail map: mprotect, size, byte0, 3000");
+    void* m = 0;
+    const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x1, fd, 0, &m) : -1;
+    l.c(code(r));
+    if (r == 0) {
+        volatile unsigned char* b = (volatile unsigned char*)m;
+        b[0] = 0x77;
+        b[0x3000] = 0x66;
+        l.s(" mprotect=").c(code(sceKernelMprotect(m, 0x4000, 0x1)));
+        sceKernelMunmap(m, 0x4000);
+        l.s(" size=").hex((uint64_t)sceKernelLseek(fd, 0, 2));
+        void* m2 = 0;
+        if (sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m2) == 0) {
+            const volatile unsigned char* c = (const volatile unsigned char*)m2;
+            l.s(" byte0=").hex(c[0]).s(" 3000=").hex(c[0x3000]);
+            sceKernelMunmap(m2, 0x4000);
+        }
+    }
+    l.end();
+    if (fd >= 0)
+        sceKernelClose(fd);
+}
+
 // after MF16: a writable mapping into the partly filled last page of a 10 KiB file
 static void run_mf21() {
     char path[64];
@@ -4228,9 +4295,11 @@ int main(void) {
         run_mf2();
         run_mf3();
         run_mfg();
+        run_mf25();
         run_u12();
         run_mf16();
         run_mf21();
+        run_mf24();
         remove_scratch_files();
     }
     say("===== DONE =====");
