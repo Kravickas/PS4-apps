@@ -4139,6 +4139,23 @@ static void remove_scratch_files() {
         mf_named(path, name);
         sceKernelUnlink(path);
     }
+    // UL1: each scratch file reopened without creating it (N = gone, E = still there), then the
+    // result of unlinking a file that does not exist
+    Line l = head("UL1", "scratch files gone? / unlink missing");
+    for (const char* name : names) {
+        char path[64];
+        mf_named(path, name);
+        const int fd = sceKernelOpen(path, 0x0000, 0777);
+        if (fd >= 0) {
+            l.c('E');
+            sceKernelClose(fd);
+        } else {
+            l.c(code(fd));
+        }
+    }
+    char missing[64];
+    mf_named(missing, "dmem_missing.bin");
+    l.s(" unlink missing=").c(code(sceKernelUnlink(missing))).end();
 }
 
 // U12, last: query info pointing at unmapped memory
