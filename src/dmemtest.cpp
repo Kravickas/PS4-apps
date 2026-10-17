@@ -3675,11 +3675,53 @@ static void vq_name(Line& l, uint64_t at) {
         l.c(vi[0x21 + k] >= 0x20 && vi[0x21 + k] < 0x7F ? (char)vi[0x21 + k] : '?');
 }
 
-// one call site for every reservation VQ4/VQ6 make
+// " rel=" and the name's "anon:" address minus fn, or " rel=-" when the name is not of that form
+static void vq_rel(Line& l, uint64_t at, uint64_t fn) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    l.s(" rel=");
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0 || vi[0x21] != 'a' || vi[0x22] != 'n' ||
+        vi[0x23] != 'o' || vi[0x24] != 'n' || vi[0x25] != ':') {
+        l.c('-');
+        return;
+    }
+    uint64_t v = 0;
+    for (int k = 0x26; k < 0x41 && vi[k]; k++) {
+        const unsigned char c = vi[k];
+        v = (v << 4) | (uint64_t)(c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0');
+    }
+    l.shex((long long)(v - fn));
+}
+
+// one creator per kind of mapping for VQ7
+__attribute__((noinline)) static int32_t vq_mk_flex(void** out) {
+    *out = 0;
+    return sceKernelMapFlexibleMemory(out, 0x4000, 0x3, 0);
+}
+__attribute__((noinline)) static int32_t vq_mk_direct(long pa, void** out) {
+    *out = 0;
+    return sceKernelMapDirectMemory(out, 0x4000, 0x3, 0, pa, 0x4000);
+}
+__attribute__((noinline)) static int32_t vq_mk_anon(void** out) {
+    *out = 0;
+    return sceKernelMmap(0, 0x4000, 0x3, 0x1002, -1, 0, out);
+}
+__attribute__((noinline)) static int32_t vq_mk_file(int fd, void** out) {
+    *out = 0;
+    return sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, out);
+}
+
+// one call site for every reservation VQ4/VQ6 make; it calls the real function, not the tracer,
+// so the reservation is named after this function
+#pragma push_macro("sceKernelMemoryPoolReserve")
+#undef sceKernelMemoryPoolReserve
 __attribute__((noinline)) static int32_t vq_reserve(void* hint, int32_t flags, void** out) {
     *out = hint;
     return sceKernelMemoryPoolReserve(hint, 0x200000, 0, flags, out);
 }
+#pragma pop_macro("sceKernelMemoryPoolReserve")
+
+static void mf_make_10k(char* path);
 
 static void run_vq() {
     say("== VQ VirtualQuery of pool memory; ranges relative to the reservation");
@@ -3743,17 +3785,54 @@ static void run_vq() {
         l.end();
     }
     {
-        Line l = head("VQ6", "names: fn, 1st, 2nd");
+        Line l = head("VQ6", "names: fn, 1st, 2nd, name-fn");
         l.s("fn=").hex((uint64_t)&vq_reserve).s(" ");
         vq_name(l, A);
         l.s(" ");
         if (rb == 0)
             vq_name(l, A + 0x200000);
+        vq_rel(l, A, (uint64_t)&vq_reserve);
         l.end();
     }
     if (rb == 0)
         sceKernelMunmap(b, 0x200000);
     sceKernelMunmap(a, 0x200000);
+    // VQ7: names of other kinds of mapping, each made from its own function
+    Line l = head("VQ7", "names: flexible | direct | mmap anon | mmap file");
+    void* m = 0;
+    if (vq_mk_flex(&m) == 0) {
+        vq_name(l, (uint64_t)m);
+        vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_flex);
+        sceKernelMunmap(m, 0x4000);
+    }
+    int32_t rr = 0;
+    const long pa = alloc(1, 3, &rr);
+    l.s(" | ");
+    if (pa >= 0 && vq_mk_direct(pa, &m) == 0) {
+        vq_name(l, (uint64_t)m);
+        vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_direct);
+        sceKernelMunmap(m, 0x4000);
+    }
+    release_all(pa, 1);
+    l.s(" | ");
+    if (vq_mk_anon(&m) == 0) {
+        vq_name(l, (uint64_t)m);
+        vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_anon);
+        sceKernelMunmap(m, 0x4000);
+    }
+    l.s(" | ");
+    char path[64];
+    mf_make_10k(path);
+    const int fd = sceKernelOpen(path, 0x0000, 0777);
+    if (fd >= 0) {
+        if (vq_mk_file(fd, &m) == 0) {
+            vq_name(l, (uint64_t)m);
+            vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_file);
+            sceKernelMunmap(m, 0x4000);
+        }
+        sceKernelClose(fd);
+    }
+    l.end();
 }
 
 // ---- K: address space layout for non-fixed and fixed mappings -------------------------------
@@ -4705,20 +4784,107 @@ static void nu_poolorder() {
     unk(l).end();
 }
 
+// NU11/NU12 helpers: reservations to commit single blocks into, released at the end
+struct NuPool {
+    uint8_t* r[6] = {};
+    int nr = 0;
+    uint64_t used[6] = {};
+    // commits one 64 KiB block of the given type somewhere; false when nothing is left to use
+    bool commit(int32_t type, uint64_t len = 0x10000) {
+        for (int i = 0; i < 6; i++) {
+            if (i == nr) {
+                void* rv = 0;
+                if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
+                    return false;
+                r[nr++] = (uint8_t*)rv;
+            }
+            if (used[i] + len <= 0x200000) {
+                const int32_t c = sceKernelMemoryPoolCommit(r[i] + used[i], len, type,
+                                                            type == 10 ? 0x1 : 0x3, 0);
+                used[i] += len;
+                return c == 0;
+            }
+        }
+        return false;
+    }
+    void release() {
+        for (int i = 0; i < nr; i++)
+            sceKernelMunmap(r[i], 0x200000);
+        nr = 0;
+    }
+};
+
+static void nu_fewblocks() {
+    say("NU11 starting");
+    Line l = head("NU11", "15G reservation with fewer than 15 blocks: code, stats");
+    NuPool np;
+    for (int k = 0; k < 160; k++) {
+        const PoolStats st = tr_read();
+        if (st.avail_flushed + st.avail_cached < 10)
+            break;
+        if (!np.commit(0))
+            break;
+    }
+    const PoolStats b = tr_read();
+    l.s("avail=").hex((uint32_t)(b.avail_flushed + b.avail_cached)).c(' ');
+    void* rv = 0;
+    const int32_t r = sceKernelMemoryPoolReserve(0, 0x3C0000000ull, 0, 0, &rv);
+    l.c(ncode(r)).c(' ');
+    stats(l);
+    if (r == 0)
+        sceKernelMunmap(rv, 0x3C0000000ull);
+    np.release();
+    unk(l).end();
+}
+
+static void nu_flushedout() {
+    say("NU12 starting");
+    Line l = head("NU12", "no flushed left: t3 1blk | t10 2blk | 1 flushed left: t10 2blk");
+    NuPool np;
+    for (int k = 0; k < 160 && tr_read().avail_flushed > 0; k++)
+        if (!np.commit(3))
+            break;
+    PoolStats b = tr_read();
+    l.s("af=").hex((uint32_t)b.avail_flushed).c(' ');
+    l.c(np.commit(3) ? 'o' : 'x').c(' ');
+    stats(l);
+    l.s(" | ");
+    if (tr_read().avail_flushed == 0) {
+        l.c(np.commit(10, 0x20000) ? 'o' : 'x').c(' ');
+        stats(l);
+    } else {
+        l.s("af>0");
+    }
+    l.s(" | ");
+    for (int k = 0; k < 160 && tr_read().avail_flushed > 1; k++)
+        if (!np.commit(3))
+            break;
+    b = tr_read();
+    l.s("af=").hex((uint32_t)b.avail_flushed).c(' ');
+    if (b.avail_flushed == 1) {
+        l.c(np.commit(10, 0x20000) ? 'o' : 'x').c(' ');
+        stats(l);
+    }
+    np.release();
+    unk(l).end();
+}
+
 static void run_nu() {
     say("== NU edge cases of every call (codes; page state = protection or u)");
+    g_trace = "nu";
     nu_munmap();
     nu_mprotect();
     nu_mtypeprotect();
     nu_release();
-    g_trace = "nu5";
     nu_pool();
-    g_trace = nullptr;
     nu_file();
     nu_query();
     nu_protbits();
     nu_rounding();
     nu_poolorder();
+    nu_fewblocks();
+    nu_flushedout();
+    g_trace = nullptr;
 }
 
 // after the last test: remove the scratch files the mapping tests created
