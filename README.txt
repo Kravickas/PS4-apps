@@ -103,7 +103,8 @@ SECTIONS
   NU8-NU10 each undefined mprotect bit read back, rounding of mprotect and mtypeprotect with an
      unaligned start, pool commit and decommit edge orderings; NU11 a reservation needing more blocks
      than are available; NU12 commits once the flushed blocks run out; NU13 the cached count at which
-     such a commit converts; NU14 mtypeprotect on reserved pool memory; NU lines list codes without a letter
+     such a commit converts (type 3 and type 10); NU14 mtypeprotect on reserved pool memory; NU15 a
+     second type change on the same reserved block; NU lines list codes without a letter
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
