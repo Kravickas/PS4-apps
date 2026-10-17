@@ -94,14 +94,16 @@ SECTIONS
   PS the four pool counters before each section from P2 on, and again after one idle second
   VQ what VirtualQuery reports for pool memory: offsets inside a reservation, memory type of
      committed parts, adjacent reservations from one call site, and names next to the call site
-     (name minus the creating function), also for flexible, direct, anonymous and file mappings
+     (name minus the creating function), also for flexible, direct, anonymous and file mappings,
+     and for a reservation's parts after a commit and a decommit (VQ8)
   NU (at the end) edge cases of every call: length 0, unaligned address or length, ranges over
      a hole or over two kinds of mapping, repeated calls, a closed fd; codes and the state after
   TR in sections U, W, Z, J, L and all of NU, every pool call that changes the block counters, with
      its result and the change of each counter
   NU8-NU10 each undefined mprotect bit read back, rounding of mprotect and mtypeprotect with an
      unaligned start, pool commit and decommit edge orderings; NU11 a reservation needing more blocks
-     than are available; NU12 commits once the flushed blocks run out; NU lines list codes without a letter
+     than are available; NU12 commits once the flushed blocks run out; NU13 the cached count at which
+     such a commit converts; NU14 mtypeprotect on reserved pool memory; NU lines list codes without a letter
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

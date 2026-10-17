@@ -3797,6 +3797,24 @@ static void run_vq() {
     if (rb == 0)
         sceKernelMunmap(b, 0x200000);
     sceKernelMunmap(a, 0x200000);
+    // VQ8: names of a reservation's parts after a commit and a decommit
+    {
+        Line l8 = head("VQ8", "names rel: decommitted | reserved rest | committed");
+        void* c = 0;
+        if (vq_reserve(0, 0, &c) == 0) {
+            uint8_t* C = (uint8_t*)c;
+            sceKernelMemoryPoolCommit(C, 0x10000, 0, 0x3, 0);
+            sceKernelMemoryPoolDecommit(C, 0x10000, 0);
+            sceKernelMemoryPoolCommit(C + 0x20000, 0x10000, 0, 0x3, 0);
+            vq_rel(l8, (uint64_t)C, (uint64_t)&vq_reserve);
+            vq_rel(l8, (uint64_t)C + 0x10000, (uint64_t)&vq_reserve);
+            vq_rel(l8, (uint64_t)C + 0x20000, (uint64_t)&vq_reserve);
+            sceKernelMunmap(c, 0x200000);
+        } else {
+            l8.s("SKIP");
+        }
+        l8.end();
+    }
     // VQ7: names of other kinds of mapping, each made from its own function
     Line l = head("VQ7", "names: flexible | direct | mmap anon | mmap file");
     void* m = 0;
@@ -4869,6 +4887,111 @@ static void nu_flushedout() {
     unk(l).end();
 }
 
+// NU13: does a commit with no flushed block left turn the cached blocks into flushed ones, as a
+// function of how many cached blocks are available? One line per target count T.
+struct NuStock {
+    uint8_t* r[8] = {};
+    int nr = 0;
+    uint32_t next = 0;     // next free block offset in r[nr-1]
+    uint8_t* t0[160] = {}; // committed type 0 blocks, decommitted to give cached ones back
+    int n0 = 0;
+    uint8_t* slot() {
+        if (nr == 0 || next == 0x200000) {
+            void* rv = 0;
+            if (nr == 8 || sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
+                return nullptr;
+            r[nr++] = (uint8_t*)rv;
+            next = 0;
+        }
+        uint8_t* at = r[nr - 1] + next;
+        next += 0x10000;
+        return at;
+    }
+    bool commit(int32_t type) {
+        uint8_t* at = slot();
+        if (!at || sceKernelMemoryPoolCommit(at, 0x10000, type, 0x3, 0) != 0)
+            return false;
+        if (type == 0 && n0 < 160)
+            t0[n0++] = at;
+        return true;
+    }
+    bool give_cached() {
+        if (n0 == 0)
+            return false;
+        return sceKernelMemoryPoolDecommit(t0[--n0], 0x10000, 0) == 0;
+    }
+    void release() {
+        for (int i = 0; i < nr; i++)
+            sceKernelMunmap(r[i], 0x200000);
+        nr = 0;
+    }
+};
+
+static void nu_stats4(Line& l, const PoolStats& s) {
+    l.hex((uint32_t)s.avail_flushed).c('/').hex((uint32_t)s.avail_cached).c('/');
+    l.hex((uint32_t)s.alloc_flushed).c('/').hex((uint32_t)s.alloc_cached);
+}
+
+static void nu_threshold() {
+    say("NU13 starting");
+    const char* saved = g_trace;
+    g_trace = nullptr;
+    NuStock ns;
+    static const int targets[] = {22, 24, 26, 28, 30, 31, 32, 33, 34, 35};
+    for (int t : targets) {
+        Line l = head("NU13", "no flushed left, ac=T, one t3 commit");
+        l.s("T=").dec(t).c(' ');
+        for (int k = 0; k < 400 && tr_read().avail_flushed > 0; k++)
+            if (!ns.commit(3))
+                break;
+        for (int k = 0; k < 400 && tr_read().avail_cached > t; k++)
+            if (!ns.commit(0))
+                break;
+        for (int k = 0; k < 400 && tr_read().avail_cached < t; k++)
+            if (!ns.give_cached())
+                break;
+        const PoolStats b = tr_read();
+        if (b.avail_flushed != 0 || b.avail_cached != t) {
+            l.s("SKIP ");
+            nu_stats4(l, b);
+            l.end();
+            continue;
+        }
+        nu_stats4(l, b);
+        l.s(" -> ").c(ns.commit(3) ? 'o' : 'x').c(' ');
+        const PoolStats a = tr_read();
+        nu_stats4(l, a);
+        l.s(a.avail_flushed > 0 ? " converted" : " kept");
+        l.end();
+    }
+    ns.release();
+    g_trace = saved;
+}
+
+// NU14: mtypeprotect on reserved, uncommitted pool memory; the counter changes show in TR
+static void nu_mtype_reserved() {
+    say("NU14 starting");
+    Line l = head("NU14", "mtypeprotect on reserved: t0 | t3 | t10 | t0 2blk | t0 half");
+    const uint64_t blk = 0x10000;
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &px);
+    void* rv = 0;
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
+        return unk(l.s("SKIP")).end();
+    uint8_t* R = (uint8_t*)rv;
+    l.c(ncode(sceKernelMtypeprotect(R, blk, 0, 0x3)));
+    l.s(" | ").c(ncode(sceKernelMtypeprotect(R + blk, blk, 3, 0x3)));
+    l.s(" | ").c(ncode(sceKernelMtypeprotect(R + 2 * blk, blk, 10, 0x1)));
+    l.s(" | ").c(ncode(sceKernelMtypeprotect(R + 3 * blk, 2 * blk, 0, 0x3)));
+    l.s(" | ");
+    if (sceKernelMemoryPoolCommit(R + 5 * blk, blk, 3, 0x3, 0) == 0)
+        l.c(ncode(sceKernelMtypeprotect(R + 5 * blk, 2 * blk, 0, 0x3)));
+    else
+        l.s("commit failed");
+    sceKernelMunmap(rv, 0x200000);
+    unk(l).end();
+}
+
 static void run_nu() {
     say("== NU edge cases of every call (codes; page state = protection or u)");
     g_trace = "nu";
@@ -4884,6 +5007,8 @@ static void run_nu() {
     nu_poolorder();
     nu_fewblocks();
     nu_flushedout();
+    nu_mtype_reserved();
+    nu_threshold();
     g_trace = nullptr;
 }
 
