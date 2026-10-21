@@ -105,6 +105,15 @@ SECTIONS
      than are available; NU12 commits once the flushed blocks run out; NU13 the cached count at which
      such a commit converts (type 3 and type 10); NU14 mtypeprotect on reserved pool memory; NU15 a
      second type change on the same reserved block; NU lines list codes without a letter
+  RV ReserveVirtualRange: query, validation, mapping into it, partial unmap, mprotect, name
+  NM named direct/flexible mappings (name lengths, empty, null) and SetVirtualRangeName
+  FL flexible memory accounting and ReleaseFlexibleMemory
+  BM BatchMap/BatchMap2: ops, entries processed; BM2 (an invalid op mid-batch) runs after EX
+  PB MemoryPoolBatch: ops, an invalid opcode; PB3 (move) runs after EX
+  PX POSIX mmap/munmap/mprotect/msync/mlock/munlock: result or -1/errno, POSIX mmap name
+  MS MapDirectMemory2, AllocateMainDirectMemory, IsStack, Mlock/Munlock, GetPrtAperture
+  EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
+     the protection read back, and, only when both allow it, the result of running a small stub
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
