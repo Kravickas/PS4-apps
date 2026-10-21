@@ -6047,6 +6047,39 @@ static void run_last() {
     }
 }
 
+// PG2 (last of all): pool memory committed or protected read-only reads back 0x33 on hardware;
+// writing to it shows whether it really is writable. A fault here ends the run.
+static void run_pg2() {
+    say("== PG2 (last): writes to pool memory requested read-only");
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+    void* rv = 0;
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
+        say("PG2  SKIP");
+        return;
+    }
+    uint8_t* R = (uint8_t*)rv;
+    Line l = head("PG2", "commit 1: write, read | commit 3, mprotect 1: write, read");
+    if (sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x1, 0) == 0) {
+        say("PG2  writing to the read-only commit");
+        *(volatile uint32_t*)R = 0x11223344;
+        l.hex(*(volatile uint32_t*)R);
+    } else {
+        l.s("commit failed");
+    }
+    l.s(" | ");
+    if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0 &&
+        sceKernelMprotect(R + 0x10000, 0x10000, 0x1) == 0) {
+        say("PG2  writing after mprotect read-only");
+        *(volatile uint32_t*)(R + 0x10000) = 0x55667788;
+        l.hex(*(volatile uint32_t*)(R + 0x10000));
+    } else {
+        l.s("setup failed");
+    }
+    l.end();
+    sceKernelMunmap(rv, 0x200000);
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -6407,6 +6440,8 @@ int main(void) {
         run_ex();
         g_section = "last";
         run_last();
+        g_section = "pg2";
+        run_pg2();
     }
     say("===== DONE =====");
     for (;;)

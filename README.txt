@@ -117,6 +117,8 @@ SECTIONS
   RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
      and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads
      back), and the same on flexible memory
+  PG2 (after BM2/PB3, the very last probe) writes to pool memory committed read-only and to pool
+     memory protected read-only, both of which read back 0x33 on hardware
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
   K  address space layout: placement with hints, filling the space below the ceiling and then
