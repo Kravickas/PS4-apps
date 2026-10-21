@@ -112,6 +112,11 @@ SECTIONS
   PB MemoryPoolBatch: ops, an invalid opcode; PB3 (move) runs after EX
   PX POSIX mmap/munmap/mprotect/msync/mlock/munlock: result or -1/errno, POSIX mmap name
   MS MapDirectMemory2, AllocateMainDirectMemory, IsStack, Mlock/Munlock, GetPrtAperture
+  PG/RV5/FL3/PX3 pool protection read back, reserve flags one by one, flexible accounting with
+     touched pages and the value of a released page, POSIX mmap name against its caller's frame
+  RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
+     and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads
+     back), and the same on flexible memory
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
   K  address space layout: placement with hints, filling the space below the ceiling and then
@@ -130,3 +135,17 @@ BUILD
   Needs OO_PS4_TOOLCHAIN and sce_sys/about/right.sprx (the CI stages it from the toolchain).
     make all    -> eboot.bin and IV0000-SHAD00090_00-SHADDMEMTEST0000.pkg
 
+
+Silent behaviour (SB lines)
+  Every successful mprotect, direct/flexible/named mapping, mmap, MapDirectMemory2, pool commit,
+  mtypeprotect and SetVirtualRangeName reads back what it set (protection of the first and last
+  page, memory type, name). When that differs from what was asked for, an SB line names the section,
+  the call, and the requested and actual value. Comparing the SB lines of both logs shows every
+  adjustment one machine makes and the other does not.
+
+analysis/
+  coverage.py         which libkernel functions the test calls and from where; with shadPS4's
+                      src/core/libraries/kernel/memory.cpp also the registered ones never called
+  COVERAGE.md         its output for this version of the test
+  compare_results.py  compares the PS4 and the shadPS4 results file: where each run ended, matching
+                      and differing lines per section, SB/PS lines on one side only, TR differences

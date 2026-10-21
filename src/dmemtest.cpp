@@ -85,6 +85,32 @@ int munlock(const void* addr, size_t len);
 int* __error(void);
 }
 
+// ---- SB: silent-behaviour checker. Every successful call below reads back what it set (protection,
+//      memory type, name) and prints an SB line when that differs from what was asked for. The bodies
+//      are defined after head(); these names route every call in the file through them. ---------------
+static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot);
+static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+                             size_t alignment);
+static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
+                              long phys, size_t alignment);
+static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags);
+static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+                                   size_t alignment, const char* name);
+static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
+                                 const char* name);
+static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+                       void** res);
+static int32_t sb_set_name(const void* addr, size_t len, const char* name);
+#define sceKernelMprotect sb_mprotect
+#define sceKernelMapDirectMemory sb_map_direct
+#define sceKernelMapDirectMemory2 sb_map_direct2
+#define sceKernelMapFlexibleMemory sb_map_flex
+#define sceKernelMapNamedDirectMemory sb_map_named_direct
+#define sceKernelMapNamedFlexibleMemory sb_map_named_flex
+#define sceKernelMmap sb_mmap
+#define sceKernelSetVirtualRangeName sb_set_name
+static const char* g_section = "start";
+
 static void* my_memset(void* d, int v, unsigned long n) {
     unsigned char* p = (unsigned char*)d;
     while (n--)
@@ -574,6 +600,167 @@ static Line head(const char* id, const char* name) {
     l.s(id).to(5).s(name).c(' ').to(36);
     return l;
 }
+
+// ---- SB bodies: they call the real functions, then read back -----------------------------------
+#pragma push_macro("sceKernelMprotect")
+#pragma push_macro("sceKernelMapDirectMemory")
+#pragma push_macro("sceKernelMapDirectMemory2")
+#pragma push_macro("sceKernelMapFlexibleMemory")
+#pragma push_macro("sceKernelMapNamedDirectMemory")
+#pragma push_macro("sceKernelMapNamedFlexibleMemory")
+#pragma push_macro("sceKernelMmap")
+#pragma push_macro("sceKernelSetVirtualRangeName")
+#undef sceKernelMprotect
+#undef sceKernelMapDirectMemory
+#undef sceKernelMapDirectMemory2
+#undef sceKernelMapFlexibleMemory
+#undef sceKernelMapNamedDirectMemory
+#undef sceKernelMapNamedFlexibleMemory
+#undef sceKernelMmap
+#undef sceKernelSetVirtualRangeName
+
+static int32_t sb_read_prot(const void* at) {
+    void* s = 0;
+    void* e = 0;
+    int32_t p = 0;
+    return sceKernelQueryMemoryProtection((void*)at, &s, &e, &p) == 0 ? p : -1;
+}
+
+static int32_t sb_read_type(const void* at) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
+        return -1;
+    return (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) | ((uint32_t)vi[0x1E] << 16) |
+                     ((uint32_t)vi[0x1F] << 24));
+}
+
+static bool sb_read_name(const void* at, char* out) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
+        return false;
+    for (int k = 0; k < 32; k++)
+        out[k] = (char)vi[0x21 + k];
+    out[32] = 0;
+    return true;
+}
+
+static void sb_report(const char* op, uint64_t len, const char* what, int64_t req, int64_t got) {
+    Line l;
+    l.s("SB   ").s(g_section).c(' ').s(op).s(" len=").hex(len).c(' ').s(what);
+    l.s(" req=").hex((uint64_t)req).s(" got=");
+    if (got < 0)
+        l.s("unreadable");
+    else
+        l.hex((uint64_t)got);
+    l.end();
+}
+
+// protection of the first and the last page of [at, at+len)
+static void sb_check_prot(const char* op, const void* at, uint64_t len, int32_t req) {
+    const uint8_t* a = (const uint8_t*)((uint64_t)at & ~(uint64_t)0x3FFF);
+    const int32_t first = sb_read_prot(a);
+    if (first != req)
+        sb_report(op, len, "prot", req, first);
+    if (len > 0x4000) {
+        const uint8_t* last = (const uint8_t*)(((uint64_t)at + len - 1) & ~(uint64_t)0x3FFF);
+        const int32_t lp = sb_read_prot(last);
+        if (lp != req)
+            sb_report(op, len, "prot(last)", req, lp);
+    }
+}
+
+static void sb_check_name(const char* op, const void* at, uint64_t len, const char* req) {
+    if (!req || !req[0])
+        return;
+    char got[33];
+    if (!sb_read_name(at, got)) {
+        sb_report(op, len, "name", 0, -1);
+        return;
+    }
+    int k = 0;
+    while (k < 32 && req[k] && req[k] == got[k])
+        k++;
+    if (!(k < 32 && req[k] == 0 && got[k] == 0)) {
+        Line l;
+        l.s("SB   ").s(g_section).c(' ').s(op).s(" len=").hex(len).s(" name req=\"").s(req);
+        l.s("\" got=\"").s(got).c('"').end();
+    }
+}
+
+static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot) {
+    const int32_t r = sceKernelMprotect(addr, len, prot);
+    if (r == 0 && len)
+        sb_check_prot("mprotect", addr, len, prot);
+    return r;
+}
+static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+                             size_t alignment) {
+    const int32_t r = sceKernelMapDirectMemory(addr, len, prot, flags, phys, alignment);
+    if (r == 0)
+        sb_check_prot("map_direct", *addr, len, prot);
+    return r;
+}
+static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
+                              long phys, size_t alignment) {
+    const int32_t r = sceKernelMapDirectMemory2(addr, len, type, prot, flags, phys, alignment);
+    if (r == 0) {
+        sb_check_prot("map_direct2", *addr, len, prot);
+        const int32_t t = sb_read_type(*addr);
+        if (t != type)
+            sb_report("map_direct2", len, "type", type, t);
+    }
+    return r;
+}
+static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags) {
+    const int32_t r = sceKernelMapFlexibleMemory(addr, len, prot, flags);
+    if (r == 0)
+        sb_check_prot("map_flex", *addr, len, prot);
+    return r;
+}
+static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+                                   size_t alignment, const char* name) {
+    const int32_t r =
+        sceKernelMapNamedDirectMemory(addr, len, prot, flags, phys, alignment, name);
+    if (r == 0) {
+        sb_check_prot("map_named_direct", *addr, len, prot);
+        sb_check_name("map_named_direct", *addr, len, name);
+    }
+    return r;
+}
+static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
+                                 const char* name) {
+    const int32_t r = sceKernelMapNamedFlexibleMemory(addr, len, prot, flags, name);
+    if (r == 0) {
+        sb_check_prot("map_named_flex", *addr, len, prot);
+        sb_check_name("map_named_flex", *addr, len, name);
+    }
+    return r;
+}
+static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+                       void** res) {
+    const int32_t r = sceKernelMmap(addr, len, prot, flags, fd, offset, res);
+    if (r == 0)
+        sb_check_prot("mmap", *res, len, prot);
+    return r;
+}
+static int32_t sb_set_name(const void* addr, size_t len, const char* name) {
+    const int32_t r = sceKernelSetVirtualRangeName(addr, len, name);
+    if (r == 0 && len)
+        sb_check_name("set_name", addr, len, name);
+    return r;
+}
+
+#pragma pop_macro("sceKernelMprotect")
+#pragma pop_macro("sceKernelMapDirectMemory")
+#pragma pop_macro("sceKernelMapDirectMemory2")
+#pragma pop_macro("sceKernelMapFlexibleMemory")
+#pragma pop_macro("sceKernelMapNamedDirectMemory")
+#pragma pop_macro("sceKernelMapNamedFlexibleMemory")
+#pragma pop_macro("sceKernelMmap")
+#pragma pop_macro("sceKernelSetVirtualRangeName")
+
 
 static void setup_failed(const char* id, const char* name, const char* what, int32_t r) {
     Line l = head(id, name);
@@ -1545,7 +1732,15 @@ static int32_t tr_done(const char* op, uint64_t len, int32_t type, int32_t r, co
 
 static int32_t tr_commit(void* a, uint64_t len, int32_t type, int32_t prot, int32_t flags) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
-    return tr_done("commit", len, type, sceKernelMemoryPoolCommit(a, len, type, prot, flags), b);
+    const int32_t r =
+        tr_done("commit", len, type, sceKernelMemoryPoolCommit(a, len, type, prot, flags), b);
+    if (r == 0 && len) {
+        sb_check_prot("pool_commit", a, len, prot);
+        const int32_t t = sb_read_type(a);
+        if (t != type)
+            sb_report("pool_commit", len, "type", type, t);
+    }
+    return r;
 }
 static int32_t tr_decommit(void* a, uint64_t len, int32_t flags) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
@@ -1565,7 +1760,15 @@ static int32_t tr_munmap(void* a, size_t len) {
 }
 static int32_t tr_mtypeprotect(const void* a, size_t len, int32_t type, int32_t prot) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
-    return tr_done("mtypeprotect", len, type, sceKernelMtypeprotect(a, len, type, prot), b);
+    const int32_t r =
+        tr_done("mtypeprotect", len, type, sceKernelMtypeprotect(a, len, type, prot), b);
+    if (r == 0 && len) {
+        sb_check_prot("mtypeprotect", a, len, prot);
+        const int32_t t = sb_read_type(a);
+        if (t != type)
+            sb_report("mtypeprotect", len, "type", type, t);
+    }
+    return r;
 }
 #define sceKernelMemoryPoolCommit tr_commit
 #define sceKernelMemoryPoolDecommit tr_decommit
@@ -1587,6 +1790,7 @@ static void pool_checkpoint(const char* section) {
     for (const char* t : traced)
         if (section[0] == t[0] && section[1] == 0)
             g_trace = t;
+    g_section = section;
     Line l = head("PS", name);
     stats(l);
     // the same counters after one idle second, to see whether they change on their own
@@ -3719,7 +3923,13 @@ static void vq_rel(Line& l, uint64_t at, uint64_t fn) {
     l.shex((long long)(v - fn));
 }
 
-// one creator per kind of mapping for VQ7
+// one creator per kind of mapping for VQ7 (they call the real functions, so the names are their own)
+#pragma push_macro("sceKernelMapFlexibleMemory")
+#undef sceKernelMapFlexibleMemory
+#pragma push_macro("sceKernelMapDirectMemory")
+#undef sceKernelMapDirectMemory
+#pragma push_macro("sceKernelMmap")
+#undef sceKernelMmap
 __attribute__((noinline)) static int32_t vq_mk_flex(void** out) {
     *out = 0;
     return sceKernelMapFlexibleMemory(out, 0x4000, 0x3, 0);
@@ -3736,6 +3946,9 @@ __attribute__((noinline)) static int32_t vq_mk_file(int fd, void** out) {
     *out = 0;
     return sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, out);
 }
+#pragma pop_macro("sceKernelMapFlexibleMemory")
+#pragma pop_macro("sceKernelMapDirectMemory")
+#pragma pop_macro("sceKernelMmap")
 
 // one call site for every reservation VQ4/VQ6 make; it calls the real function, not the tracer,
 // so the reservation is named after this function
@@ -5596,6 +5809,181 @@ static void run_ms() {
     }
 }
 
+// ---- PG, RV5, FL3, PX3 (after MS): follow-ups to RV/FL/PX/EX ---------------------------------------
+
+// PX3: POSIX mmap called from a function that records its own return address; name - that = 0 if the
+// name is the return address read through the frame pointer of the function that called mmap
+static uint64_t g_px3_ret = 0;
+__attribute__((noinline)) static void* px3_mk() {
+    g_px3_ret = (uint64_t)__builtin_return_address(0);
+    return mmap(0, 0x4000, 0x3, 0x1002, -1, 0);
+}
+
+static void run_followups() {
+    say("== PG pool protection read back, RV5 reserve flags, FL3 touched flexible pages, PX3");
+    {
+        say("PG1 starting");
+        Line l = head("PG1", "pool: commit 1 | commit 3 | mprotect 1 | 13 | 30");
+        uint64_t px = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        void* rv = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
+            uint8_t* R = (uint8_t*)rv;
+            l.c(ncode(sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x1, 0))).c(' ');
+            rv_prot(l, R);
+            l.s(" | ").c(ncode(sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0))).c(' ');
+            rv_prot(l, R + 0x10000);
+            static const int32_t prots[] = {0x1, 0x13, 0x30};
+            for (int32_t p : prots) {
+                l.s(" | ").c(ncode(sceKernelMprotect(R + 0x10000, 0x10000, p))).c(' ');
+                rv_prot(l, R + 0x10000);
+            }
+            sceKernelMunmap(rv, 0x200000);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    {
+        say("RV5 starting");
+        Line l = head("RV5", "reserve flags: 2 4 8 20 40 100 400 1000 2000");
+        static const int32_t fl[] = {0x2, 0x4, 0x8, 0x20, 0x40, 0x100, 0x400, 0x1000, 0x2000};
+        for (int32_t f : fl) {
+            rv_try(l, 0, 0x200000, f, 0);
+            l.c(' ');
+        }
+        unk(l).end();
+    }
+    {
+        say("FL3 starting");
+        Line l = head("FL3", "64K flexible touched: avail -map, -touch | release 16K: avail, value");
+        size_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+        sceKernelAvailableFlexibleMemorySize(&a0);
+        void* m = 0;
+        if (sceKernelMapFlexibleMemory(&m, 0x10000, 0x3, 0) == 0) {
+            sceKernelAvailableFlexibleMemorySize(&a1);
+            for (int k = 0; k < 4; k++)
+                *(volatile uint32_t*)((uint8_t*)m + k * PG) = 0xABCD0000u + k;
+            sceKernelAvailableFlexibleMemorySize(&a2);
+            l.hex((uint64_t)(a0 - a1)).s(" ").hex((uint64_t)(a1 - a2));
+            l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(m, PG)));
+            sceKernelAvailableFlexibleMemorySize(&a3);
+            l.s(" +").hex((uint64_t)(a3 - a2)).c(' ');
+            void* s = 0;
+            void* e = 0;
+            int32_t p = 0;
+            if (sceKernelQueryMemoryProtection(m, &s, &e, &p) == 0 && (p & 0x1))
+                l.hex(*(volatile uint32_t*)m);
+            else
+                l.s("unreadable");
+            sceKernelMunmap(m, 0x10000);
+        }
+        unk(l).end();
+    }
+    {
+        say("PX3 starting");
+        Line l = head("PX3", "POSIX mmap name - return address of the function calling mmap");
+        void* m = px3_mk();
+        if (m == (void*)-1) {
+            px_ret(l, -1);
+        } else {
+            l.s("ok");
+            vq_rel(l, (uint64_t)m, g_px3_ret);
+            munmap(m, 0x4000);
+        }
+        l.end();
+    }
+}
+
+// ---- RG: the dmem_regprig homebrew, step by step, with every result read back. The JIT stub (the
+//      homebrew's "call [rip+1]; ret; <function pointer>") runs only if execute reads back. ------------
+static volatile int g_rg_called = 0;
+__attribute__((noinline)) static void rg_target() {
+    g_rg_called = 1;
+}
+
+struct __attribute__((packed)) RgCall {
+    uint16_t callq; // FF 15
+    uint32_t offset;
+    uint8_t ret; // C3
+    void* ptr;
+};
+
+static void rg_jit(Line& l, uint8_t* m) {
+    const int32_t p = sb_read_prot(m);
+    l.s(" prot=").hex((uint32_t)p);
+    if (p < 0 || (p & 0x4) == 0 || (p & 0x2) == 0) {
+        l.s(" no-run");
+        return;
+    }
+    RgCall c;
+    c.callq = 0x15FF;
+    c.offset = 0x01;
+    c.ret = 0xC3;
+    c.ptr = (void*)&rg_target;
+    const uint8_t* src = (const uint8_t*)&c;
+    for (unsigned k = 0; k < sizeof(c); k++)
+        m[k] = src[k];
+    Line run = head("RG", "running the homebrew's call stub");
+    run.end();
+    g_rg_called = 0;
+    ((void (*)())m)();
+    l.s(" called=").dec(g_rg_called);
+}
+
+static void run_rg() {
+    say("== RG dmem_regprig: alloc WB_ONION, map RW+GPU RW, mprotect +exec, query, JIT stub");
+    int32_t rr = 0;
+    {
+        say("RG1 starting");
+        Line l = head("RG1", "sceKernelMprotect 0x37: code | vq | stub");
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x33, 0, pa, PG) == 0) {
+            l.c(ncode(sceKernelMprotect(m, PG, 0x37))).s(" | ");
+            vq_field(l, (uint64_t)m, (uint64_t)m);
+            l.s(" |");
+            rg_jit(l, (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        say("RG2 starting");
+        Line l = head("RG2", "POSIX mprotect 0x37 (the commented-out path): ret | stub");
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x33, 0, pa, PG) == 0) {
+            px_ret(l, mprotect(m, PG, 0x37));
+            l.s(" |");
+            rg_jit(l, (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 1);
+        l.end();
+    }
+    {
+        say("RG3 starting");
+        Line l = head("RG3", "the same on flexible memory: code | vq | stub");
+        void* m = 0;
+        if (sceKernelMapFlexibleMemory(&m, PG, 0x33, 0) == 0) {
+            l.c(ncode(sceKernelMprotect(m, PG, 0x37))).s(" | ");
+            vq_field(l, (uint64_t)m, (uint64_t)m);
+            l.s(" |");
+            rg_jit(l, (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+}
+
 // BM2 and PB3 run after EX, last of all: shadPS4 stops on an unknown BatchMap operation and on the
 // MemoryPoolBatch move, which it does not implement.
 static void run_last() {
@@ -5996,15 +6384,28 @@ int main(void) {
         run_mfw();
         pool_checkpoint("nu");
         run_nu();
+        g_section = "rv";
         run_rv();
+        g_section = "nm";
         run_nm();
+        g_section = "fl";
         run_fl();
+        g_section = "bm";
         run_bm();
+        g_section = "pb";
         run_pb();
+        g_section = "px";
         run_px();
+        g_section = "ms";
         run_ms();
+        g_section = "followups";
+        run_followups();
+        g_section = "rg";
+        run_rg();
         remove_scratch_files();
+        g_section = "ex";
         run_ex();
+        g_section = "last";
         run_last();
     }
     say("===== DONE =====");
