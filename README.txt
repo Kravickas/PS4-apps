@@ -123,6 +123,10 @@ SECTIONS
      back), and the same on flexible memory
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
+  BP (first) the devs' blockpool homebrew call by call on an empty pool, each result and the pool
+     counters compared with their hardware log (blog.txt): "= blog" or "DIFFERS from blog"
+  BT (before the cleanup) every bit of every flags/protection parameter, every value of every type
+     parameter and every power-of-two alignment, one call each, one result code per bit or value
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

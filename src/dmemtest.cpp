@@ -6212,6 +6212,338 @@ static void run_last() {
     }
 }
 
+// ---- BP (first of all, on an empty pool): the devs' blockpool homebrew, call by call. Each step
+//      prints its result and the pool counters and compares both with their hardware log (blog.txt).
+static void bp_step(const char* id, const char* name, int32_t r, int32_t want_r, const char* want_st) {
+    Line l = head(id, name);
+    l.c(ncode(r)).c(' ');
+    PoolStats st = tr_read();
+    char got[48];
+    int n = 0;
+    auto put = [&](uint32_t v) {
+        char tmp[12];
+        int k = 0;
+        do {
+            const uint32_t d = v & 0xF;
+            tmp[k++] = (char)(d < 10 ? '0' + d : 'A' + d - 10);
+            v >>= 4;
+        } while (v);
+        while (k)
+            got[n++] = tmp[--k];
+    };
+    put((uint32_t)st.avail_flushed);
+    got[n++] = '/';
+    put((uint32_t)st.avail_cached);
+    got[n++] = '/';
+    put((uint32_t)st.alloc_flushed);
+    got[n++] = '/';
+    put((uint32_t)st.alloc_cached);
+    got[n] = 0;
+    l.s("stats=").s(got);
+    bool same = r == want_r;
+    if (want_st) {
+        int k = 0;
+        while (want_st[k] && got[k] == want_st[k])
+            k++;
+        same = same && want_st[k] == 0 && got[k] == 0;
+    }
+    l.s(same ? " = blog" : " DIFFERS from blog: ");
+    if (!same) {
+        l.c(ncode(want_r));
+        if (want_st)
+            l.c(' ').s(want_st);
+    }
+    unk(l).end();
+}
+
+static void run_bp() {
+    say("== BP blockpool homebrew (devs' blog.txt), on an empty pool: result, counters, = blog");
+    const int32_t OK = 0, ENOMEM_ = (int32_t)0x8002000C, EACCES_ = (int32_t)0x8002000D,
+                  ENOENT_ = (int32_t)0x80020002;
+    const uint64_t blk = 0x10000;
+    {
+        Line l = head("BP0", "counters before");
+        stats(l).end();
+    }
+    uint64_t px1 = 0, px2 = 0;
+    bp_step("BP1", "expand 20000 from 20000", sceKernelMemoryPoolExpand(0x20000, g_dmem, 0x20000, 0, &px1), OK, "2/0/0/0");
+    void* a1 = 0;
+    bp_step("BP2", "reserve 2M", sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &a1), OK, "1/0/0/1");
+    uint8_t* bp = (uint8_t*)a1;
+    bp_step("BP3", "commit bp+0 t0 rw", sceKernelMemoryPoolCommit(bp, blk, 0, 0x3, 0), OK, "0/0/0/2");
+    bp_step("BP4", "commit bp+10000 t0 rw", sceKernelMemoryPoolCommit(bp + blk, blk, 0, 0x3, 0), ENOMEM_, "0/0/0/2");
+    bp_step("BP5", "expand 20000 again", sceKernelMemoryPoolExpand(0x20000, g_dmem, 0x20000, 0, &px2), OK, "2/0/0/2");
+    void* a2 = 0;
+    bp_step("BP6", "reserve 2M again", sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &a2), OK, "1/0/0/3");
+    uint8_t* bp2 = (uint8_t*)a2;
+    bp_step("BP7", "commit bp2+0 t3 r", sceKernelMemoryPoolCommit(bp2, blk, 3, 0x1, 0), OK, nullptr);
+    bp_step("BP8", "commit bp2+10000 t3 r", sceKernelMemoryPoolCommit(bp2 + blk, blk, 3, 0x1, 0), ENOMEM_, "0/0/1/3");
+    {
+        Line l = head("BPX", "expand results (blog: 20000, 40000)");
+        l.hex(px1).c(' ').hex(px2).end();
+    }
+    void* m = 0;
+    bp_step("BP9", "map direct the pool block", sceKernelMapDirectMemory(&m, blk, 0x3, 0, (long)px1, 0), EACCES_, nullptr);
+    long pa = -1;
+    // the log prints only the result of this call (0x60000), not its arguments
+    bp_step("BP10", "allocate 64K (args not in the log)", sceKernelAllocateDirectMemory(0, g_dmem, blk, blk, 0, &pa), OK, nullptr);
+    bp_step("BP11", "checked release the pool block", sceKernelCheckedReleaseDirectMemory((long)px1, blk), ENOENT_, nullptr);
+    unsigned char info[0x18];
+    bp_step("BP12", "dmem query 0 the pool block", sceKernelDirectMemoryQuery((long)px1, 0, info, sizeof(info)), EACCES_, nullptr);
+    bp_step("BP13", "dmem query 1 the pool block", sceKernelDirectMemoryQuery((long)px1, 1, info, sizeof(info)), EACCES_, nullptr);
+    int32_t t = 0;
+    long s0 = 0, e0 = 0;
+    bp_step("BP14", "get type the pool block", sceKernelGetDirectMemoryType((long)px1, &t, &s0, &e0), ENOENT_, nullptr);
+    bp_step("BP15", "decommit bp+0", sceKernelMemoryPoolDecommit(bp, blk, 0), OK, "0/1/1/2");
+    bp_step("BP16", "munmap bp", sceKernelMunmap(bp, 0x200000), OK, "0/2/1/1");
+    bp_step("BP17", "commit bp2+10000 t3 r", sceKernelMemoryPoolCommit(bp2 + blk, blk, 3, 0x1, 0), OK, "0/1/2/1");
+    {
+        Line l = head("BPQ", "vq bp2 after commits: +0 | +10000 | +20000");
+        vq_field(l, (uint64_t)bp2, (uint64_t)bp2);
+        l.s(" | ");
+        vq_field(l, (uint64_t)bp2 + blk, (uint64_t)bp2);
+        l.s(" | ");
+        vq_field(l, (uint64_t)bp2 + 2 * blk, (uint64_t)bp2);
+        l.end();
+    }
+    bp_step("BP18", "mtypeprotect bp2 2M t3 rw", sceKernelMtypeprotect(bp2, 0x200000, 3, 0x3), OK, "0/1/2/1");
+    bp_step("BP19", "mprotect bp2 2M rw+gpu rw", sceKernelMprotect(bp2, 0x200000, 0x33), OK, "0/1/2/1");
+    bp_step("BP20", "munmap bp2-10000 2M+10000", sceKernelMunmap(bp2 - blk, 0x200000 + blk), OK, "2/2/0/0");
+    if (pa >= 0)
+        sceKernelReleaseDirectMemory(pa, blk);
+}
+
+// ---- BT (near the end): every bit of every flags/protection parameter, every value of every type
+//      parameter and every power-of-two alignment, one call each. Each line holds one result code per
+//      bit or value, lowest first; codes without a letter are listed in hex at the end. Protection,
+//      type and name changes the call made silently show as SB lines (section bt). --------------------
+static void bt_bits(const char* id, const char* name, int count, int32_t (*call)(int idx)) {
+    say(id);
+    Line l = head(id, name);
+    for (int i = 0; i < count; i++) {
+        l.c(ncode(call(i)));
+        if (i % 8 == 7 && i + 1 < count)
+            l.c('.');
+    }
+    unk(l).end();
+}
+
+static long g_bt_pa = -1;
+static uint8_t* g_bt_flex = nullptr;
+static uint8_t* g_bt_dmem = nullptr;
+static uint8_t* g_bt_pool = nullptr;
+
+static int32_t bt_unmap_ret(int32_t r, void* m, uint64_t len) {
+    if (r == 0 && m)
+        sceKernelMunmap(m, len);
+    return r;
+}
+
+static void run_bt() {
+    say("== BT every bit / value / alignment, one call each (bit 0 first, '.' every 8)");
+    int32_t rr = 0;
+    g_bt_pa = alloc(1, 0, &rr);
+    {
+        void* f = 0;
+        g_bt_flex = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) == 0 ? (uint8_t*)f : nullptr;
+    }
+    {
+        const long pd = alloc(1, 0, &rr);
+        g_bt_dmem = pd >= 0 ? map(pd, 1, &rr) : nullptr;
+    }
+    // enough pool blocks that the pool sweeps are not decided by running out of them
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 0x80000, 0x10000, &px);
+    {
+        void* rv = 0;
+        g_bt_pool = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0 ? (uint8_t*)rv : nullptr;
+        if (g_bt_pool && sceKernelMemoryPoolCommit(g_bt_pool, 0x10000, 0, 0x3, 0) != 0)
+            g_bt_pool = nullptr;
+    }
+    bt_bits("BT1", "ReserveVirtualRange flags bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelReserveVirtualRange(&v, 0x200000, (int32_t)(1u << b), 0), v, 0x200000);
+    });
+    bt_bits("BT2", "ReserveVirtualRange alignment 1<<k", 40, [](int k) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelReserveVirtualRange(&v, 0x200000, 0, 1ull << k), v, 0x200000);
+    });
+    bt_bits("BT3", "MapFlexibleMemory flags bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMapFlexibleMemory(&v, PG, 0x3, (int32_t)(1u << b)), v, PG);
+    });
+    bt_bits("BT4", "MapFlexibleMemory prot bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMapFlexibleMemory(&v, PG, (int32_t)(1u << b), 0), v, PG);
+    });
+    bt_bits("BT5", "MapDirectMemory flags bit", 32, [](int b) {
+        void* v = 0;
+        return g_bt_pa < 0 ? -1 : bt_unmap_ret(sceKernelMapDirectMemory(&v, PG, 0x3, (int32_t)(1u << b), g_bt_pa, PG), v, PG);
+    });
+    bt_bits("BT6", "MapDirectMemory prot bit", 32, [](int b) {
+        void* v = 0;
+        return g_bt_pa < 0 ? -1 : bt_unmap_ret(sceKernelMapDirectMemory(&v, PG, (int32_t)(1u << b), 0, g_bt_pa, PG), v, PG);
+    });
+    bt_bits("BT7", "MapDirectMemory alignment 1<<k", 40, [](int k) {
+        void* v = 0;
+        return g_bt_pa < 0 ? -1 : bt_unmap_ret(sceKernelMapDirectMemory(&v, PG, 0x3, 0, g_bt_pa, 1ull << k), v, PG);
+    });
+    bt_bits("BT8", "MapDirectMemory2 type value", 32, [](int t) {
+        void* v = 0;
+        return g_bt_pa < 0 ? -1 : bt_unmap_ret(sceKernelMapDirectMemory2(&v, PG, t, 0x3, 0, g_bt_pa, PG), v, PG);
+    });
+    bt_bits("BT9", "mmap anon: flags 1002|bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMmap(0, PG, 0x3, 0x1002 | (int32_t)(1u << b), -1, 0, &v), v, PG);
+    });
+    bt_bits("BT10", "mmap anon: prot bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMmap(0, PG, (int32_t)(1u << b), 0x1002, -1, 0, &v), v, PG);
+    });
+    bt_bits("BT11", "mprotect flexible: prot bit", 32, [](int b) {
+        if (!g_bt_flex)
+            return -1;
+        const int32_t r = sceKernelMprotect(g_bt_flex, PG, (int32_t)(1u << b));
+        sceKernelMprotect(g_bt_flex, PG, 0x3);
+        return r;
+    });
+    bt_bits("BT12", "mprotect direct: prot bit", 32, [](int b) {
+        if (!g_bt_dmem)
+            return -1;
+        const int32_t r = sceKernelMprotect(g_bt_dmem, PG, (int32_t)(1u << b));
+        sceKernelMprotect(g_bt_dmem, PG, 0x3);
+        return r;
+    });
+    bt_bits("BT13", "mprotect pool committed: prot bit", 32, [](int b) {
+        if (!g_bt_pool)
+            return -1;
+        const int32_t r = sceKernelMprotect(g_bt_pool, 0x10000, (int32_t)(1u << b));
+        sceKernelMprotect(g_bt_pool, 0x10000, 0x3);
+        return r;
+    });
+    bt_bits("BT14", "mtypeprotect direct t0: prot bit", 32, [](int b) {
+        if (!g_bt_dmem)
+            return -1;
+        const int32_t r = sceKernelMtypeprotect(g_bt_dmem, PG, 0, (int32_t)(1u << b));
+        sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3);
+        return r;
+    });
+    bt_bits("BT15", "mtypeprotect direct rw: type value", 32, [](int t) {
+        if (!g_bt_dmem)
+            return -1;
+        const int32_t r = sceKernelMtypeprotect(g_bt_dmem, PG, t, 0x3);
+        sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3);
+        return r;
+    });
+    bt_bits("BT16", "PoolReserve flags bit", 32, [](int b) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMemoryPoolReserve(0, 0x200000, 0, (int32_t)(1u << b), &v), v, 0x200000);
+    });
+    bt_bits("BT17", "PoolReserve alignment 1<<k", 40, [](int k) {
+        void* v = 0;
+        return bt_unmap_ret(sceKernelMemoryPoolReserve(0, 0x200000, 1ull << k, 0, &v), v, 0x200000);
+    });
+    bt_bits("BT18", "PoolCommit flags bit", 32, [](int b) {
+        if (!g_bt_pool)
+            return -1;
+        const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, 0, 0x3, (int32_t)(1u << b));
+        if (r == 0)
+            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+        return r;
+    });
+    bt_bits("BT19", "PoolCommit t0: prot bit", 32, [](int b) {
+        if (!g_bt_pool)
+            return -1;
+        const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, 0, (int32_t)(1u << b), 0);
+        if (r == 0)
+            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+        return r;
+    });
+    bt_bits("BT20", "PoolCommit read: type value", 32, [](int t) {
+        if (!g_bt_pool)
+            return -1;
+        const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, t, 0x1, 0);
+        if (r == 0)
+            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+        return r;
+    });
+    bt_bits("BT21", "PoolDecommit flags bit", 32, [](int b) {
+        if (!g_bt_pool || sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, 0, 0x3, 0) != 0)
+            return -1;
+        const int32_t r = sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, (int32_t)(1u << b));
+        if (r != 0)
+            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+        return r;
+    });
+    bt_bits("BT22", "AllocateDirectMemory: type value", 32, [](int t) {
+        long p = -1;
+        const int32_t r = sceKernelAllocateDirectMemory(0, g_dmem, PG, PG, t, &p);
+        if (r == 0)
+            sceKernelReleaseDirectMemory(p, PG);
+        return r;
+    });
+    bt_bits("BT23", "AllocateDirectMemory: alignment 1<<k", 40, [](int k) {
+        long p = -1;
+        const int32_t r = sceKernelAllocateDirectMemory(0, g_dmem, PG, 1ull << k, 0, &p);
+        if (r == 0)
+            sceKernelReleaseDirectMemory(p, PG);
+        return r;
+    });
+    bt_bits("BT24", "VirtualQuery flags bit", 32, [](int b) {
+        unsigned char vi[0x60];
+        my_memset(vi, 0, sizeof(vi));
+        return g_bt_flex ? sceKernelVirtualQuery(g_bt_flex, (int32_t)(1u << b), vi, 0x48) : -1;
+    });
+    bt_bits("BT25", "DirectMemoryQuery flags bit", 32, [](int b) {
+        unsigned char info[0x18];
+        return g_bt_pa < 0 ? -1 : sceKernelDirectMemoryQuery(g_bt_pa, (int32_t)(1u << b), info, sizeof(info));
+    });
+    bt_bits("BT26", "BatchMap2 (one protect entry) flags bit", 32, [](int b) {
+        if (!g_bt_flex)
+            return -1;
+        BmEntry e = {g_bt_flex, 0, PG, 0x3, 0, 0, 2};
+        int32_t n = -1;
+        return sceKernelBatchMap2(&e, 1, &n, (int32_t)(1u << b));
+    });
+    bt_bits("BT27", "MemoryPoolBatch (one protect entry) flags bit", 32, [](int b) {
+        if (!g_bt_pool)
+            return -1;
+        PbEntry e = pb(3, g_bt_pool, 0x10000, 0x3, 0);
+        int32_t n = -1;
+        return sceKernelMemoryPoolBatch(&e, 1, &n, (int32_t)(1u << b));
+    });
+    bt_bits("BT28", "AvailableDirectMemorySize alignment 1<<k", 40, [](int k) {
+        long p = 0;
+        size_t sz = 0;
+        return sceKernelAvailableDirectMemorySize(0, g_dmem, 1ull << k, &p, &sz);
+    });
+    {
+        // POSIX mmap: the errno of each failing call as a letter
+        say("BT29");
+        Line l = head("BT29", "POSIX mmap anon: flags 1002|bit (errno)");
+        for (int b = 0; b < 32; b++) {
+            void* v = mmap(0, PG, 0x3, 0x1002 | (int)(1u << b), -1, 0);
+            if (v == (void*)-1) {
+                const int e = *__error();
+                l.c(e == 22 ? 'I' : e == 12 ? 'M' : e == 13 ? 'A' : e == 14 ? 'F' : e == 9 ? 'B' : '?');
+            } else {
+                l.c('o');
+                munmap(v, PG);
+            }
+            if (b % 8 == 7 && b < 31)
+                l.c('.');
+        }
+        l.end();
+    }
+    if (g_bt_pool)
+        sceKernelMunmap(g_bt_pool, 0x200000);
+    if (g_bt_dmem)
+        sceKernelMunmap(g_bt_dmem, PG);
+    if (g_bt_flex)
+        sceKernelMunmap(g_bt_flex, PG);
+    release_all(g_bt_pa, 1);
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -6471,6 +6803,9 @@ int main(void) {
     say("== S  probes");
     if (sanity()) {
         neighbours();
+        g_section = "bp";
+        run_bp();
+        g_section = "start";
         run_a();
         run_b();
         run_d();
@@ -6567,6 +6902,8 @@ int main(void) {
         run_followups();
         g_section = "rg";
         run_rg();
+        g_section = "bt";
+        run_bt();
         remove_scratch_files();
         g_section = "ex";
         run_ex();
