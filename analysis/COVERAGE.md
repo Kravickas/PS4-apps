@@ -27,7 +27,7 @@ Generated from `src/dmemtest.cpp`.
 | `sceKernelGetPrtAperture` | run_ms |
 | `sceKernelIsStack` | run_ms |
 | `sceKernelLseek` | run_mf24, run_mf3 |
-| `sceKernelMapDirectMemory` | e_map, fill_default, fixed_probe, g_case, map, nu_mprotect, run_ex, run_j, run_k, run_l, run_m, run_n, run_rg, run_rv, run_t, run_u, run_w, vq_mk_direct |
+| `sceKernelMapDirectMemory` | e_map, fill_default, fixed_probe, g_case, map, nu_mprotect, run_ex, run_followups, run_j, run_k, run_l, run_m, run_n, run_rg, run_rv, run_t, run_u, run_w, vq_mk_direct |
 | `sceKernelMapDirectMemory2` | run_ms |
 | `sceKernelMapFlexibleMemory` | nu_flex2, run_ex, run_fl, run_followups, run_k, run_rg, run_rv, run_w, run_xc, run_y, sb_map_flex, vq_mk_flex |
 | `sceKernelMapNamedDirectMemory` | run_nm |
@@ -48,11 +48,11 @@ Generated from `src/dmemtest.cpp`.
 | `sceKernelQueryMemoryProtection` | ex_try, mapped, nu_page, run_followups, run_last, rv_prot, sb_read_prot |
 | `sceKernelReleaseDirectMemory` | a_free, b_alias, b_split, build, d_outside_mapped, g_case, neighbours, nu_release, release, release_all, run_c, run_e, run_f, run_h, run_h7, run_ms, run_p, run_p2, run_p54, run_r, run_t, run_u, run_xc |
 | `sceKernelReleaseFlexibleMemory` | run_fl, run_followups |
-| `sceKernelReserveVirtualRange` | run_bm, run_last, run_rv, rv_mk, rv_try |
+| `sceKernelReserveVirtualRange` | run_bm, run_followups, run_last, run_rv, rv_mk, rv_try |
 | `sceKernelSetVirtualRangeName` | run_nm, sb_set_name |
 | `sceKernelUnlink` | remove_scratch_files |
 | `sceKernelUsleep` | main, pool_checkpoint, run_p8, series |
-| `sceKernelVirtualQuery` | nm_show, nu_query, nu_vtype, run_t, sb_read_name, sb_read_type, sb_read_vprot, vq_field, vq_name, vq_rel, vq_walk |
+| `sceKernelVirtualQuery` | nm_show, nu_query, nu_vtype, run_followups, run_t, sb_read_name, sb_read_type, sb_read_vprot, vq_field, vq_name, vq_rel, vq_walk |
 | `sceKernelWrite` | emit, mf_grid_line, mf_make_10k, mf_open, run_mf2, run_mf21, run_mf25, run_mf3 |
 
 ## Registered in shadPS4 (`/home/claude/mc/src/core/libraries/kernel/memory.cpp`) but never called by the test

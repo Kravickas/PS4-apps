@@ -112,7 +112,9 @@ SECTIONS
   PB MemoryPoolBatch: ops, an invalid opcode; PB3 (move) runs after EX
   PX POSIX mmap/munmap/mprotect/msync/mlock/munlock: result or -1/errno, POSIX mmap name
   MS MapDirectMemory2, AllocateMainDirectMemory, IsStack, Mlock/Munlock, GetPrtAperture
-  PG/PG3/RV5/FL3/PX3 pool protection read back (PG3: VirtualQuery's, without writing), reserve flags one by one, flexible accounting with
+  PG/PG3/RV5/FL3/PX3 pool protection read back (PG3: VirtualQuery's, without writing); VQ9 VirtualQuery
+     and QueryMemoryProtection at fixed direct mappings across the address space; FL4 absolute
+     available flexible size around a 16 MiB map; reserve flags one by one, flexible accounting with
      touched pages and the value of a released page, POSIX mmap name against its caller's frame
   RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
      and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads

@@ -5914,6 +5914,57 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("VQ9 starting");
+        Line l = head("VQ9", "fixed dmem at: map | vq0 | vq1 | qprot");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        void* a0 = 0;
+        const bool have_low = sceKernelReserveVirtualRange(&a0, PG, 0, 0) == 0;
+        if (have_low)
+            sceKernelMunmap(a0, PG);
+        const uint64_t at[] = {have_low ? (uint64_t)a0 : 0, 0x7EEC00000ull, 0x7EF000000ull,
+                               0x880000000ull, 0x900000000ull, 0x1000000000ull, 0x3F00000000ull};
+        for (uint64_t x : at) {
+            if (!x || pa < 0)
+                continue;
+            void* m = (void*)x;
+            const int32_t r = sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG);
+            l.hex(x >> 20).s("M:").c(ncode(r));
+            if (r == 0) {
+                unsigned char vi[0x60];
+                my_memset(vi, 0, sizeof(vi));
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+                l.c(ncode(sceKernelVirtualQuery(m, 1, vi, 0x48)));
+                void* s0 = 0;
+                void* e0 = 0;
+                int32_t p = 0;
+                l.c(ncode(sceKernelQueryMemoryProtection(m, &s0, &e0, &p)));
+                sceKernelMunmap(m, PG);
+            }
+            l.c(' ');
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        say("FL4 starting");
+        Line l = head("FL4", "avail flexible: before | after 16M map + touch | after unmap");
+        size_t a0 = 0, a1 = 0, a2 = 0;
+        l.c(ncode(sceKernelAvailableFlexibleMemorySize(&a0))).c(':').hex((uint64_t)a0);
+        void* m = 0;
+        if (sceKernelMapFlexibleMemory(&m, 0x1000000, 0x3, 0) == 0) {
+            *(volatile uint32_t*)m = 1;
+            sceKernelAvailableFlexibleMemorySize(&a1);
+            l.s(" | ").hex((uint64_t)a1);
+            sceKernelMunmap(m, 0x1000000);
+            sceKernelAvailableFlexibleMemorySize(&a2);
+            l.s(" | ").hex((uint64_t)a2);
+        } else {
+            l.s(" | map failed");
+        }
+        unk(l).end();
+    }
+    {
         say("PX3 starting");
         Line l = head("PX3", "POSIX mmap name - return address of the function calling mmap");
         void* m = px3_mk();
