@@ -127,6 +127,9 @@ SECTIONS
      counters compared with their hardware log (blog.txt): "= blog" or "DIFFERS from blog"
   BT (before the cleanup) every bit of every flags/protection parameter, every value of every type
      parameter and every power-of-two alignment, one call each, one result code per bit or value
+  SF findings of the OpenOrbis-Unit-Tests memory_test homebrew (MapMemoryTest), retested: flexible
+     sizes, mmap edge cases (length 0, anon/void with offset or fd, stack rules, fixed offsets, a
+     directory), every named anon flag, MapDirectMemory2 checks; SF8 (after EX) dmem aliasing
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
@@ -155,5 +158,7 @@ analysis/
   coverage.py         which libkernel functions the test calls and from where; with shadPS4's
                       src/core/libraries/kernel/memory.cpp also the registered ones never called
   COVERAGE.md         its output for this version of the test
+  FINDINGS.md         every finding of other homebrews (memory_test, blockpool, dmem_regprig) with
+                      the DmemTest probe that retests it, or todo
   compare_results.py  compares the PS4 and the shadPS4 results file: where each run ended, matching
                       and differing lines per section, SB/PS lines on one side only, TR differences
