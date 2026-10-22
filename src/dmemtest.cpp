@@ -5888,6 +5888,35 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("RV6 starting");
+        Line l = head("RV6", "reserve flags: 800 4000 8000 10000 20000 40000 80000 100000 200000 400000");
+        static const int32_t fl[] = {0x800,   0x4000,  0x8000,   0x10000,  0x20000,
+                                     0x40000, 0x80000, 0x100000, 0x200000, 0x400000};
+        for (int32_t f : fl) {
+            rv_try(l, 0, 0x200000, f, 0);
+            l.c(' ');
+        }
+        unk(l).end();
+    }
+    {
+        say("NU16 starting");
+        Line l = head("NU16", "mprotect 1|bit read back: 800 1000 2000 4000 10000");
+        uint8_t* f = nu_flex2();
+        if (f) {
+            static const int32_t bits[] = {0x800, 0x1000, 0x2000, 0x4000, 0x10000};
+            for (int32_t b : bits) {
+                sceKernelMprotect(f, PG, 0x3);
+                l.c(ncode(sceKernelMprotect(f, PG, 0x1 | b))).c(':');
+                nu_page(l, f);
+                l.c(' ');
+            }
+            sceKernelMunmap(f, 2 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    {
         say("FL3 starting");
         Line l = head("FL3", "64K flexible touched: avail -map, -touch | release 16K: avail, value");
         size_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
