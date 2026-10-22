@@ -635,6 +635,15 @@ static int32_t sb_read_type(const void* at) {
                      ((uint32_t)vi[0x1F] << 24));
 }
 
+static int32_t sb_read_vprot(const void* at) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
+        return -1;
+    return (int32_t)((uint32_t)vi[0x18] | ((uint32_t)vi[0x19] << 8) | ((uint32_t)vi[0x1A] << 16) |
+                     ((uint32_t)vi[0x1B] << 24));
+}
+
 static bool sb_read_name(const void* at, char* out) {
     unsigned char vi[0x60];
     my_memset(vi, 0, sizeof(vi));
@@ -663,6 +672,10 @@ static void sb_check_prot(const char* op, const void* at, uint64_t len, int32_t 
     const int32_t first = sb_read_prot(a);
     if (first != req)
         sb_report(op, len, "prot", req, first);
+    // VirtualQuery's protection field, which can differ from QueryMemoryProtection's
+    const int32_t vfirst = sb_read_vprot(a);
+    if (vfirst != req)
+        sb_report(op, len, "vprot", req, vfirst);
     if (len > 0x4000) {
         const uint8_t* last = (const uint8_t*)(((uint64_t)at + len - 1) & ~(uint64_t)0x3FFF);
         const int32_t lp = sb_read_prot(last);
@@ -5845,6 +5858,26 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("PG3 starting");
+        Line l = head("PG3", "pool vq: commit 1 | commit 3, mprotect 1 (no writes)");
+        uint64_t px = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        void* rv = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
+            uint8_t* R = (uint8_t*)rv;
+            if (sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x1, 0) == 0)
+                vq_field(l, (uint64_t)R, (uint64_t)R);
+            l.s(" | ");
+            if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0 &&
+                sceKernelMprotect(R + 0x10000, 0x10000, 0x1) == 0)
+                vq_field(l, (uint64_t)R + 0x10000, (uint64_t)R);
+            sceKernelMunmap(rv, 0x200000);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    {
         say("RV5 starting");
         Line l = head("RV5", "reserve flags: 2 4 8 20 40 100 400 1000 2000");
         static const int32_t fl[] = {0x2, 0x4, 0x8, 0x20, 0x40, 0x100, 0x400, 0x1000, 0x2000};
@@ -6045,39 +6078,6 @@ static void run_last() {
             sceKernelMunmap(rv, 0x200000);
         }
     }
-}
-
-// PG2 (last of all): pool memory committed or protected read-only reads back 0x33 on hardware;
-// writing to it shows whether it really is writable. A fault here ends the run.
-static void run_pg2() {
-    say("== PG2 (last): writes to pool memory requested read-only");
-    uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
-    void* rv = 0;
-    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
-        say("PG2  SKIP");
-        return;
-    }
-    uint8_t* R = (uint8_t*)rv;
-    Line l = head("PG2", "commit 1: write, read | commit 3, mprotect 1: write, read");
-    if (sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x1, 0) == 0) {
-        say("PG2  writing to the read-only commit");
-        *(volatile uint32_t*)R = 0x11223344;
-        l.hex(*(volatile uint32_t*)R);
-    } else {
-        l.s("commit failed");
-    }
-    l.s(" | ");
-    if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0 &&
-        sceKernelMprotect(R + 0x10000, 0x10000, 0x1) == 0) {
-        say("PG2  writing after mprotect read-only");
-        *(volatile uint32_t*)(R + 0x10000) = 0x55667788;
-        l.hex(*(volatile uint32_t*)(R + 0x10000));
-    } else {
-        l.s("setup failed");
-    }
-    l.end();
-    sceKernelMunmap(rv, 0x200000);
 }
 
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
@@ -6440,8 +6440,6 @@ int main(void) {
         run_ex();
         g_section = "last";
         run_last();
-        g_section = "pg2";
-        run_pg2();
     }
     say("===== DONE =====");
     for (;;)
