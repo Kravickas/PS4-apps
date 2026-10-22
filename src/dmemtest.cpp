@@ -5965,6 +5965,58 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("VQ10 starting");
+        Line l = head("VQ10", "addr(M): map | vq0 vq1 mapped | vq0 vq1 free");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        const uint64_t at[] = {0x7F0000000ull, 0x8C0000000ull, 0x8F0000000ull, 0x900000000ull,
+                               0x940000000ull, 0x980000000ull, 0xA00000000ull, 0xC00000000ull,
+                               0xF00000000ull, 0xFC0000000ull, 0x1000000000ull,
+                               0x8000000000ull, 0x10000000000ull};
+        for (uint64_t x : at) {
+            unsigned char vi[0x60];
+            l.hex(x >> 20).s("M:");
+            void* m = (void*)x;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+            l.c(ncode(r));
+            if (r == 0) {
+                my_memset(vi, 0, sizeof(vi));
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+                l.c(ncode(sceKernelVirtualQuery(m, 1, vi, 0x48)));
+                sceKernelMunmap(m, PG);
+            } else {
+                l.s("--");
+            }
+            // the same address with nothing mapped there
+            my_memset(vi, 0, sizeof(vi));
+            l.c(ncode(sceKernelVirtualQuery((void*)x, 0, vi, 0x48)));
+            l.c(ncode(sceKernelVirtualQuery((void*)x, 1, vi, 0x48)));
+            l.c(' ');
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        say("FL5 starting");
+        Line l = head("FL5", "avail drop: 64K 1M 2M 2M+16K 4M 4M+16K (hex)");
+        static const uint64_t sizes[] = {0x10000, 0x100000, 0x200000, 0x204000, 0x400000, 0x404000};
+        for (uint64_t sz : sizes) {
+            size_t a0 = 0, a1 = 0;
+            sceKernelAvailableFlexibleMemorySize(&a0);
+            void* m = 0;
+            if (sceKernelMapFlexibleMemory(&m, sz, 0x3, 0) == 0) {
+                *(volatile uint32_t*)m = 1;
+                sceKernelAvailableFlexibleMemorySize(&a1);
+                l.hex((uint64_t)(a0 - a1));
+                sceKernelMunmap(m, sz);
+            } else {
+                l.s("x");
+            }
+            l.c(' ');
+        }
+        unk(l).end();
+    }
+    {
         say("PX3 starting");
         Line l = head("PX3", "POSIX mmap name - return address of the function calling mmap");
         void* m = px3_mk();

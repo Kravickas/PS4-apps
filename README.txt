@@ -114,7 +114,8 @@ SECTIONS
   MS MapDirectMemory2, AllocateMainDirectMemory, IsStack, Mlock/Munlock, GetPrtAperture
   PG/PG3/RV5/FL3/PX3 pool protection read back (PG3: VirtualQuery's, without writing); VQ9 VirtualQuery
      and QueryMemoryProtection at fixed direct mappings across the address space; FL4 absolute
-     available flexible size around a 16 MiB map; reserve flags one by one, flexible accounting with
+     available flexible size around a 16 MiB map; VQ10 VirtualQuery codes across 0x7F0000000-
+     0x10000000000, mapped and free; FL5 the available-size drop for flexible maps of several sizes; reserve flags one by one, flexible accounting with
      touched pages and the value of a released page, POSIX mmap name against its caller's frame
   RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
      and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads
