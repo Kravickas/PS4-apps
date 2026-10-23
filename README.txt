@@ -121,6 +121,10 @@ SECTIONS
   RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
      and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads
      back), and the same on flexible memory
+  PT3, XR (last of all) does code really run: flexible, direct (0x37 as dmem_regprig, and 0x7), pool,
+     a file mapped r+x and mprotect r+x, and direct without execute as the control that must fault.
+     A fault on the stub is caught (SIGSEGV/SIGBUS handler returns to the caller) and printed
+     'faulted'; the readback alone cannot tell, since execute can be hidden from it
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
   BP (first) the devs' blockpool homebrew call by call on an empty pool, each result and the pool

@@ -6173,6 +6173,60 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("VQ11 starting");
+        Line l = head("VQ11", "fixed dmem, vq0 when mapped: FC00 FD00 FE00 FF00 FF80 FFC0 FFF0 FFFFC (x1M) 10000");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        const uint64_t at[] = {0xFC0000000ull, 0xFD0000000ull, 0xFE0000000ull, 0xFF0000000ull,
+                               0xFF8000000ull, 0xFFC000000ull, 0xFFF000000ull, 0xFFFFFC000ull,
+                               0x1000000000ull};
+        for (uint64_t x : at) {
+            void* m = (void*)x;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+            l.c(ncode(r));
+            if (r == 0) {
+                unsigned char vi[0x60];
+                my_memset(vi, 0, sizeof(vi));
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+                sceKernelMunmap(m, PG);
+            }
+            l.c(' ');
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        say("FL6 starting");
+        Line l = head("FL6", "avail drop: 16 maps of 64K | one 1M | 17 maps of 64K");
+        static void* maps[17];
+        size_t a0 = 0, a1 = 0;
+        static const int counts[] = {16, 0, 17};
+        for (int n : counts) {
+            sceKernelAvailableFlexibleMemorySize(&a0);
+            int made = 0;
+            void* one = 0;
+            if (n == 0) {
+                made = sceKernelMapFlexibleMemory(&one, 0x100000, 0x3, 0) == 0;
+            } else {
+                for (int i = 0; i < n; i++)
+                    made += sceKernelMapFlexibleMemory(&maps[i], 0x10000, 0x3, 0) == 0;
+            }
+            sceKernelAvailableFlexibleMemorySize(&a1);
+            l.dec(made).c(':').hex((uint64_t)(a0 - a1)).c(' ');
+            if (n == 0) {
+                if (one)
+                    sceKernelMunmap(one, 0x100000);
+            } else {
+                for (int i = 0; i < n; i++)
+                    if (maps[i])
+                        sceKernelMunmap(maps[i], 0x10000);
+            }
+            for (int i = 0; i < 17; i++)
+                maps[i] = 0;
+        }
+        unk(l).end();
+    }
+    {
         say("PX3 starting");
         Line l = head("PX3", "POSIX mmap name - return address of the function calling mmap");
         void* m = px3_mk();
@@ -7786,41 +7840,6 @@ static void run_pt_tp() {
         unk(l).end();
     }
     {
-        // :3852 a file holding "mov eax, 256; ret": mmap r+x, then mprotect r+x; the code runs only if
-        // execute reads back
-        say("PT3 starting");
-        Line l = head("PT3", ":3861 file mmap r+x: prot, ran | :3873 mprotect r+x: prot, ran");
-        char path[64];
-        mf_named(path, "dmem_pt.bin");
-        const int fd = sceKernelOpen(path, 0x0602, 0777);
-        if (fd >= 0) {
-            static unsigned char code[0x4000];
-            const unsigned char fn[] = {0xB8, 0x00, 0x01, 0x00, 0x00, 0xC3};
-            for (unsigned k = 0; k < sizeof(fn); k++)
-                code[k] = fn[k];
-            sceKernelWrite(fd, code, sizeof(code));
-            void* m = 0;
-            const int32_t r = sceKernelMmap(0, PG, 0x5, 0x1, fd, 0, &m);
-            l.c(ncode(r));
-            auto run = [&]() {
-                const int32_t p = sb_read_prot(m);
-                l.s(" p=").hex((uint32_t)p);
-                if (p >= 0 && (p & 0x4))
-                    l.s(((int (*)())m)() == 256 ? " 256" : " bad");
-                else
-                    l.s(" no-run");
-            };
-            if (r == 0) {
-                run();
-                l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
-                run();
-                sceKernelMunmap(m, PG);
-            }
-            sceKernelClose(fd);
-        }
-        unk(l).end();
-    }
-    {
         // :3996 mprotect alignment: from +3000 for 10000, and from +1000 for F000; pages 0-5 after
         say("PT4 starting");
         Line l = head("PT4", ":4011 mprotect r +3000 len 10000: pages 0-5 | :4033 +1000 len F000");
@@ -8338,6 +8357,214 @@ static void run_fw_tl_tf() {
     }
 }
 
+// ---- XR (last of all): does code really run? Each case writes "mov eax, 42; ret" where it may, sets the
+//      protection, and calls it. A fault on the stub's first instruction is caught: the SIGSEGV/SIGBUS
+//      handler returns to the caller with eax = FA17ED ("faulted"). Layouts from FreeBSD 9.0
+//      (sys/amd64/include/ucontext.h, sys/sys/ucontext.h, sys/sys/signal.h). Any other fault is not
+//      touched. ----------------------------------------------------------------------------------------
+struct XrSigaction {
+    void* handler;
+    int flags;
+    uint32_t mask[4];
+};
+extern "C" int sigaction(int sig, const XrSigaction* act, XrSigaction* old);
+
+static volatile uint64_t g_xr_stub = 0;
+
+static void xr_handler(int sig, void*, void* uc) {
+    uint8_t* mc = (uint8_t*)uc + 16; // uc_mcontext, after the 16-byte uc_sigmask
+    uint64_t* rip = (uint64_t*)(mc + 160);
+    uint64_t* rsp = (uint64_t*)(mc + 184);
+    uint64_t* rax = (uint64_t*)(mc + 56);
+    if (*rip != g_xr_stub) {
+        // not ours: back to the default handling first, so the fault repeats and ends the process
+        // as it would have without this handler (instead of faulting here again forever)
+        XrSigaction dfl;
+        dfl.handler = nullptr; // SIG_DFL
+        dfl.flags = 0;
+        dfl.mask[0] = dfl.mask[1] = dfl.mask[2] = dfl.mask[3] = 0;
+        sigaction(sig, &dfl, nullptr);
+        return;
+    }
+    *rip = *(uint64_t*)*rsp; // the return address the call pushed
+    *rsp += 8;
+    *rax = 0xFA17ED;
+}
+
+static void xr_run(Line& l, const char* id, uint8_t* code) {
+    l.s(" vprot=").hex((uint32_t)sb_read_vprot(code)).s(" qprot=").hex((uint32_t)sb_read_prot(code));
+    Line run = head(id, "running the stub");
+    run.end();
+    g_xr_stub = (uint64_t)code;
+    const uint32_t r = (uint32_t)((int (*)())code)();
+    g_xr_stub = 0;
+    if (r == 42)
+        l.s(" ran");
+    else if (r == 0xFA17ED)
+        l.s(" faulted");
+    else
+        l.s(" other=").hex(r);
+}
+
+static const unsigned char g_xr_code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+
+static void xr_write(uint8_t* m) {
+    for (unsigned k = 0; k < sizeof(g_xr_code); k++)
+        m[k] = g_xr_code[k];
+}
+
+static void run_xr() {
+    say("== XR does code run: caught faults print 'faulted' (last section)");
+    XrSigaction act, old_segv, old_bus;
+    act.handler = (void*)&xr_handler;
+    act.flags = 0x40 | 0x10; // SA_SIGINFO | SA_NODEFER
+    act.mask[0] = act.mask[1] = act.mask[2] = act.mask[3] = 0;
+    const int s1 = sigaction(11, &act, &old_segv);
+    const int s2 = sigaction(10, &act, &old_bus);
+    {
+        Line l = head("XR0", "handlers installed (SIGSEGV, SIGBUS)");
+        l.c(s1 == 0 ? 'o' : 'x').c(s2 == 0 ? 'o' : 'x').end();
+    }
+    int32_t rr = 0;
+    {
+        say("XR1 starting");
+        Line l = head("XR1", "flexible rw, mprotect rwx");
+        void* m = 0;
+        if (sceKernelMapFlexibleMemory(&m, PG, 0x3, 0) == 0) {
+            xr_write((uint8_t*)m);
+            l.c(ncode(sceKernelMprotect(m, PG, 0x7)));
+            xr_run(l, "XR1", (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        }
+        l.end();
+    }
+    {
+        say("XR2 starting");
+        Line l = head("XR2", "direct rw+gpu rw, mprotect +x (0x37, dmem_regprig)");
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x33, 0, pa, PG) == 0) {
+            xr_write((uint8_t*)m);
+            l.c(ncode(sceKernelMprotect(m, PG, 0x37)));
+            xr_run(l, "XR2", (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 1);
+        l.end();
+    }
+    {
+        say("XR3 starting");
+        Line l = head("XR3", "direct rw, mprotect rwx (0x7)");
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG) == 0) {
+            xr_write((uint8_t*)m);
+            l.c(ncode(sceKernelMprotect(m, PG, 0x7)));
+            xr_run(l, "XR3", (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 1);
+        l.end();
+    }
+    {
+        say("XR4 starting");
+        Line l = head("XR4", "pool committed rw, mprotect rwx");
+        uint64_t px = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        void* rv = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
+            uint8_t* R = (uint8_t*)rv;
+            if (sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x3, 0) == 0) {
+                xr_write(R);
+                l.c(ncode(sceKernelMprotect(R, 0x10000, 0x7)));
+                xr_run(l, "XR4", R);
+            }
+            sceKernelMunmap(rv, 0x200000);
+        }
+        l.end();
+    }
+    {
+        // the control: direct memory that was never given execute must fault, or the handler is not
+        // working and the other results mean nothing
+        say("XR5 starting");
+        Line l = head("XR5", "control: direct rw, no execute (must fault)");
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG) == 0) {
+            xr_write((uint8_t*)m);
+            xr_run(l, "XR5", (uint8_t*)m);
+            sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 1);
+        l.end();
+    }
+    {
+        // a file holding the stub: mapped r+x, then mprotect r+x
+        say("XR6 starting");
+        Line l = head("XR6", "file mmap r+x | mprotect r+x");
+        char path[64];
+        mf_named(path, "dmem_xr.bin");
+        const int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            static unsigned char page[0x4000];
+            for (unsigned k = 0; k < sizeof(g_xr_code); k++)
+                page[k] = g_xr_code[k];
+            sceKernelWrite(fd, page, sizeof(page));
+            void* m = 0;
+            if (sceKernelMmap(0, PG, 0x5, 0x1, fd, 0, &m) == 0) {
+                xr_run(l, "XR6", (uint8_t*)m);
+                l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
+                xr_run(l, "XR6", (uint8_t*)m);
+                sceKernelMunmap(m, PG);
+            }
+            sceKernelClose(fd);
+            sceKernelUnlink(path);
+        }
+        l.end();
+    }
+    sigaction(11, &old_segv, nullptr);
+    sigaction(10, &old_bus, nullptr);
+}
+
+// PT3 (near the end): its mprotect of a file mapping to execute stopped shadPS4 before
+static void run_pt3() {
+    {
+        // :3852 a file holding "mov eax, 256; ret": mmap r+x, then mprotect r+x; the code runs only if
+        // execute reads back
+        say("PT3 starting");
+        Line l = head("PT3", ":3861 file mmap r+x: prot, ran | :3873 mprotect r+x: prot, ran");
+        char path[64];
+        mf_named(path, "dmem_pt.bin");
+        const int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            static unsigned char code[0x4000];
+            const unsigned char fn[] = {0xB8, 0x00, 0x01, 0x00, 0x00, 0xC3};
+            for (unsigned k = 0; k < sizeof(fn); k++)
+                code[k] = fn[k];
+            sceKernelWrite(fd, code, sizeof(code));
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, PG, 0x5, 0x1, fd, 0, &m);
+            l.c(ncode(r));
+            auto run = [&]() {
+                const int32_t p = sb_read_prot(m);
+                l.s(" p=").hex((uint32_t)p);
+                if (p >= 0 && (p & 0x4))
+                    l.s(((int (*)())m)() == 256 ? " 256" : " bad");
+                else
+                    l.s(" no-run");
+            };
+            if (r == 0) {
+                run();
+                l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
+                run();
+                sceKernelMunmap(m, PG);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -8731,6 +8958,10 @@ int main(void) {
         run_sf8();
         g_section = "last";
         run_last();
+        g_section = "pt3";
+        run_pt3();
+        g_section = "xr";
+        run_xr();
         // the cross-check scratch file, kept open until here (not part of UL1's list)
         if (g_xc_fd >= 0) {
             sceKernelClose(g_xc_fd);
