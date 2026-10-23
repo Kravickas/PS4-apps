@@ -34,11 +34,11 @@ Generated from `src/dmemtest.cpp`.
 | `sceKernelMapNamedDirectMemory` | run_fw_tl_tf, run_nm |
 | `sceKernelMapNamedFlexibleMemory` | run_nm |
 | `sceKernelMemoryPoolBatch` | run_bt, run_last, run_pb |
-| `sceKernelMemoryPoolCommit` | nu_mtype_reserved, nu_pool, nu_poolorder, p9_case, run_bp, run_bt, run_ex, run_followups, run_j, run_last, run_m, run_p, run_p2, run_p4, run_p7, run_p8, run_t, run_u, run_vq, run_w, run_x, run_xr, run_y, run_z, tr_commit |
+| `sceKernelMemoryPoolCommit` | nu_mtype_reserved, nu_pool, nu_poolorder, p9_case, run_bp, run_bt, run_ex, run_followups, run_j, run_last, run_m, run_p, run_p2, run_p4, run_p7, run_p8, run_t, run_u, run_vq, run_w, run_x, run_y, run_z, tr_commit |
 | `sceKernelMemoryPoolDecommit` | nu_pool, nu_poolorder, p9_case, run_bp, run_bt, run_j, run_m, run_p, run_p2, run_p4, run_p7, run_p8, run_pb, run_t, run_u, run_vq, run_w, run_x, run_y, run_z, tr_decommit |
-| `sceKernelMemoryPoolExpand` | nu_mtype_reserved, nu_mtypeprotect, nu_pool, nu_poolorder, run_bp, run_bt, run_ex, run_followups, run_last, run_nm, run_p, run_p2, run_p4, run_p54, run_p7, run_p8, run_p9, run_pb, run_t, run_u, run_vq, run_xc, run_xr, tr_expand |
+| `sceKernelMemoryPoolExpand` | nu_mtype_reserved, nu_mtypeprotect, nu_pool, nu_poolorder, run_bp, run_bt, run_ex, run_followups, run_last, run_nm, run_p, run_p2, run_p4, run_p54, run_p7, run_p8, run_p9, run_pb, run_t, run_u, run_vq, run_xc, tr_expand |
 | `sceKernelMemoryPoolGetBlockStats` | ps, run_t, stats, tr_read |
-| `sceKernelMemoryPoolReserve` | fill_default, hint_line, max_reserve, nu_fewblocks, nu_mtype_reserved, nu_mtype_reserved_twice, nu_mtypeprotect, nu_pool, nu_poolorder, p9_case, reserve_sizes, run_bp, run_bt, run_ex, run_followups, run_fw_tl_tf, run_hb, run_j, run_k, run_l, run_last, run_m, run_n, run_nm, run_p, run_p2, run_p4, run_p7, run_p8, run_pb, run_t, run_u, run_vq, run_w, run_x, run_xc, run_xr, run_y, run_z, tr_reserve, vq_reserve |
+| `sceKernelMemoryPoolReserve` | fill_default, hint_line, max_reserve, nu_fewblocks, nu_mtype_reserved, nu_mtype_reserved_twice, nu_mtypeprotect, nu_pool, nu_poolorder, p9_case, reserve_sizes, run_bp, run_bt, run_ex, run_followups, run_fw_tl_tf, run_hb, run_j, run_k, run_l, run_last, run_m, run_n, run_nm, run_p, run_p2, run_p4, run_p7, run_p8, run_pb, run_t, run_u, run_vq, run_w, run_x, run_xc, run_y, run_z, tr_reserve, vq_reserve |
 | `sceKernelMlock` | run_ms |
 | `sceKernelMmap` | fw6_a, fw6_b, fw6_c, fw6_d, fw6_e, mf_grid_line, mf_line, nu_file, run_bt, run_co, run_df, run_ex, run_fm_fx, run_fw_tl_tf, run_mf2, run_mf21, run_mf24, run_mf25, run_mf3, run_pt3, run_pt_tp, run_sf, run_xr, vq_mk_anon, vq_mk_file |
 | `sceKernelMprotect` | cg_case, nu_mprotect, nu_protbits, nu_rounding, run_bp, run_bt, run_ex, run_f, run_followups, run_fw_tl_tf, run_mf24, run_pt3, run_pt_tp, run_rg, run_rv, run_xc, run_xr, sb_mprotect |

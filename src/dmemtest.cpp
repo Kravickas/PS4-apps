@@ -6196,6 +6196,29 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("VQ12 starting");
+        Line l = head("VQ12", "fixed dmem, map+vq0: FD40 FD80 FDC0 FDF0 FDFF FE00 FE80 FEFF FF00 (x1M)");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        const uint64_t at[] = {0xFD4000000ull, 0xFD8000000ull, 0xFDC000000ull,
+                               0xFDF000000ull, 0xFDFFFC000ull, 0xFE0000000ull,
+                               0xFE8000000ull, 0xFEFFFC000ull, 0xFF0000000ull};
+        for (uint64_t x : at) {
+            void* m = (void*)x;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+            l.c(ncode(r));
+            if (r == 0) {
+                unsigned char vi[0x60];
+                my_memset(vi, 0, sizeof(vi));
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+                sceKernelMunmap(m, PG);
+            }
+            l.c(' ');
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
         say("FL6 starting");
         Line l = head("FL6", "avail drop: 16 maps of 64K | one 1M | 17 maps of 64K");
         static void* maps[17];
@@ -8358,50 +8381,18 @@ static void run_fw_tl_tf() {
 }
 
 // ---- XR (last of all): does code really run? Each case writes "mov eax, 42; ret" where it may, sets the
-//      protection, and calls it. A fault on the stub's first instruction is caught: the SIGSEGV/SIGBUS
-//      handler returns to the caller with eax = FA17ED ("faulted"). Layouts from FreeBSD 9.0
-//      (sys/amd64/include/ucontext.h, sys/sys/ucontext.h, sys/sys/signal.h). Any other fault is not
-//      touched. ----------------------------------------------------------------------------------------
-struct XrSigaction {
-    void* handler;
-    int flags;
-    uint32_t mask[4];
-};
-extern "C" int sigaction(int sig, const XrSigaction* act, XrSigaction* old);
-
-static volatile uint64_t g_xr_stub = 0;
-
-static void xr_handler(int sig, void*, void* uc) {
-    uint8_t* mc = (uint8_t*)uc + 16; // uc_mcontext, after the 16-byte uc_sigmask
-    uint64_t* rip = (uint64_t*)(mc + 160);
-    uint64_t* rsp = (uint64_t*)(mc + 184);
-    uint64_t* rax = (uint64_t*)(mc + 56);
-    if (*rip != g_xr_stub) {
-        // not ours: back to the default handling first, so the fault repeats and ends the process
-        // as it would have without this handler (instead of faulting here again forever)
-        XrSigaction dfl;
-        dfl.handler = nullptr; // SIG_DFL
-        dfl.flags = 0;
-        dfl.mask[0] = dfl.mask[1] = dfl.mask[2] = dfl.mask[3] = 0;
-        sigaction(sig, &dfl, nullptr);
-        return;
-    }
-    *rip = *(uint64_t*)*rsp; // the return address the call pushed
-    *rsp += 8;
-    *rax = 0xFA17ED;
-}
-
+//      protection, and calls it. A fault cannot be caught (the PS4 ends the process even with SIGSEGV
+//      and SIGBUS handlers installed), so the only case that may fault (the file) runs last, and a run
+//      that stops at "XRn running the stub" means that case did not run. Measured so far: flexible and
+//      direct memory run code (direct while hiding execute); pool memory given execute does not (the
+//      process is ended), so it is not run again. ---------------------------------------------------
 static void xr_run(Line& l, const char* id, uint8_t* code) {
     l.s(" vprot=").hex((uint32_t)sb_read_vprot(code)).s(" qprot=").hex((uint32_t)sb_read_prot(code));
     Line run = head(id, "running the stub");
     run.end();
-    g_xr_stub = (uint64_t)code;
     const uint32_t r = (uint32_t)((int (*)())code)();
-    g_xr_stub = 0;
     if (r == 42)
         l.s(" ran");
-    else if (r == 0xFA17ED)
-        l.s(" faulted");
     else
         l.s(" other=").hex(r);
 }
@@ -8414,17 +8405,7 @@ static void xr_write(uint8_t* m) {
 }
 
 static void run_xr() {
-    say("== XR does code run: caught faults print 'faulted' (last section)");
-    XrSigaction act, old_segv, old_bus;
-    act.handler = (void*)&xr_handler;
-    act.flags = 0x40 | 0x10; // SA_SIGINFO | SA_NODEFER
-    act.mask[0] = act.mask[1] = act.mask[2] = act.mask[3] = 0;
-    const int s1 = sigaction(11, &act, &old_segv);
-    const int s2 = sigaction(10, &act, &old_bus);
-    {
-        Line l = head("XR0", "handlers installed (SIGSEGV, SIGBUS)");
-        l.c(s1 == 0 ? 'o' : 'x').c(s2 == 0 ? 'o' : 'x').end();
-    }
+    say("== XR does code run (last section; the file case may end the run)");
     int32_t rr = 0;
     {
         say("XR1 starting");
@@ -8467,38 +8448,6 @@ static void run_xr() {
         l.end();
     }
     {
-        say("XR4 starting");
-        Line l = head("XR4", "pool committed rw, mprotect rwx");
-        uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
-        void* rv = 0;
-        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
-            uint8_t* R = (uint8_t*)rv;
-            if (sceKernelMemoryPoolCommit(R, 0x10000, 0, 0x3, 0) == 0) {
-                xr_write(R);
-                l.c(ncode(sceKernelMprotect(R, 0x10000, 0x7)));
-                xr_run(l, "XR4", R);
-            }
-            sceKernelMunmap(rv, 0x200000);
-        }
-        l.end();
-    }
-    {
-        // the control: direct memory that was never given execute must fault, or the handler is not
-        // working and the other results mean nothing
-        say("XR5 starting");
-        Line l = head("XR5", "control: direct rw, no execute (must fault)");
-        const long pa = alloc(1, 0, &rr);
-        void* m = 0;
-        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG) == 0) {
-            xr_write((uint8_t*)m);
-            xr_run(l, "XR5", (uint8_t*)m);
-            sceKernelMunmap(m, PG);
-        }
-        release_all(pa, 1);
-        l.end();
-    }
-    {
         // a file holding the stub: mapped r+x, then mprotect r+x
         say("XR6 starting");
         Line l = head("XR6", "file mmap r+x | mprotect r+x");
@@ -8522,8 +8471,6 @@ static void run_xr() {
         }
         l.end();
     }
-    sigaction(11, &old_segv, nullptr);
-    sigaction(10, &old_bus, nullptr);
 }
 
 // PT3 (near the end): its mprotect of a file mapping to execute stopped shadPS4 before

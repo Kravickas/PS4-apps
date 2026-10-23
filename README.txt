@@ -121,10 +121,11 @@ SECTIONS
   RG the dmem_regprig homebrew step by step (WB_ONION direct memory, map RW+GPU RW, sceKernelMprotect
      and POSIX mprotect to +execute, every VirtualQuery field, its call stub only if execute reads
      back), and the same on flexible memory
-  PT3, XR (last of all) does code really run: flexible, direct (0x37 as dmem_regprig, and 0x7), pool,
-     a file mapped r+x and mprotect r+x, and direct without execute as the control that must fault.
-     A fault on the stub is caught (SIGSEGV/SIGBUS handler returns to the caller) and printed
-     'faulted'; the readback alone cannot tell, since execute can be hidden from it
+  PT3, XR (last of all) does code really run: flexible, direct (0x37 as dmem_regprig, and 0x7), and
+     last a file mapped r+x and mprotect r+x. A fault cannot be caught on the PS4 (it ends the
+     process), so a run stopping at "XRn running the stub" means that case did not run. Measured:
+     flexible and direct run code (direct while hiding execute), pool memory does not
+  VQ11/VQ12 where VirtualQuery refuses (EACCES) even mapped addresses
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
   BP (first) the devs' blockpool homebrew call by call on an empty pool, each result and the pool
