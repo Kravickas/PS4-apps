@@ -417,21 +417,26 @@ static void emit(const char* s, int n) {
     }
 }
 
+// One result line. A line that does not fit ends in "[TRUNCATED]" rather than losing its tail silently.
 struct Line {
-    char b[200];
+    static constexpr int kCap = 4000;
+    char b[kCap + 32];
     int p = 0;
+    bool cut = false;
     Line& s(const char* t) {
-        while (*t && p < 190)
-            b[p++] = *t++;
+        while (*t)
+            c(*t++);
         return *this;
     }
     Line& c(char ch) {
-        if (p < 190)
+        if (p < kCap)
             b[p++] = ch;
+        else
+            cut = true;
         return *this;
     }
     Line& to(int col) {
-        while (p < col && p < 190)
+        while (p < col && p < kCap)
             b[p++] = ' ';
         return *this;
     }
@@ -478,6 +483,10 @@ struct Line {
     void end() {
         while (p > 0 && b[p - 1] == ' ')
             p--;
+        if (cut) {
+            for (const char* t = " [TRUNCATED]"; *t; t++)
+                b[p++] = *t;
+        }
         b[p++] = '\n';
         emit(b, p);
     }
@@ -6219,6 +6228,28 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        say("VQ13 starting");
+        Line l = head("VQ13", "fixed dmem, map+vq0: 7EF04 7EF40 7EF80 7EFC0 7EFFC 7F000 (x64K)");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        const uint64_t at[] = {0x7EF004000ull, 0x7EF400000ull, 0x7EF800000ull,
+                               0x7EFC00000ull, 0x7EFFFC000ull, 0x7F0000000ull};
+        for (uint64_t x : at) {
+            void* m = (void*)x;
+            const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+            l.c(ncode(r));
+            if (r == 0) {
+                unsigned char vi[0x60];
+                my_memset(vi, 0, sizeof(vi));
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+                sceKernelMunmap(m, PG);
+            }
+            l.c(' ');
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
         say("FL6 starting");
         Line l = head("FL6", "avail drop: 16 maps of 64K | one 1M | 17 maps of 64K");
         static void* maps[17];
@@ -8342,7 +8373,7 @@ static void run_fw_tl_tf() {
     }
     {
         say("TF4 starting");
-        Line l = head("TF4", ":435 read-only file: rw shared | rw private | rw none | w shared | r shared private none | shared r, mprotect rw (no write) | :483 private r, mprotect rw, write: file still 1");
+        Line l = head("TF4", ":435 ro file: rw sh|pr|none, w sh, r sh|pr|none | sh r, mprotect rw (no write) | :483 pr r, mprotect rw, write: file still 1");
         reset_file();
         const int fd = sceKernelOpen(path, 0x0, 0);
         if (fd >= 0) {
@@ -8380,12 +8411,11 @@ static void run_fw_tl_tf() {
     }
 }
 
-// ---- XR (last of all): does code really run? Each case writes "mov eax, 42; ret" where it may, sets the
-//      protection, and calls it. A fault cannot be caught (the PS4 ends the process even with SIGSEGV
-//      and SIGBUS handlers installed), so the only case that may fault (the file) runs last, and a run
-//      that stops at "XRn running the stub" means that case did not run. Measured so far: flexible and
-//      direct memory run code (direct while hiding execute); pool memory given execute does not (the
-//      process is ended), so it is not run again. ---------------------------------------------------
+// ---- XR (last of all): does code really run? Each case writes "mov eax, 42; ret", sets the protection
+//      and calls it. A fault cannot be caught on the PS4 (it ends the process), so only cases known to
+//      run are kept, as a check that they still do. Measured: flexible and direct memory run code
+//      (direct while hiding execute); pool memory and a file mapping given execute do not (the process
+//      is ended), so those are not run again. -------------------------------------------------------
 static void xr_run(Line& l, const char* id, uint8_t* code) {
     l.s(" vprot=").hex((uint32_t)sb_read_vprot(code)).s(" qprot=").hex((uint32_t)sb_read_prot(code));
     Line run = head(id, "running the stub");
@@ -8405,7 +8435,7 @@ static void xr_write(uint8_t* m) {
 }
 
 static void run_xr() {
-    say("== XR does code run (last section; the file case may end the run)");
+    say("== XR does code run (cases known to run)");
     int32_t rr = 0;
     {
         say("XR1 starting");
@@ -8445,30 +8475,6 @@ static void run_xr() {
             sceKernelMunmap(m, PG);
         }
         release_all(pa, 1);
-        l.end();
-    }
-    {
-        // a file holding the stub: mapped r+x, then mprotect r+x
-        say("XR6 starting");
-        Line l = head("XR6", "file mmap r+x | mprotect r+x");
-        char path[64];
-        mf_named(path, "dmem_xr.bin");
-        const int fd = sceKernelOpen(path, 0x0602, 0777);
-        if (fd >= 0) {
-            static unsigned char page[0x4000];
-            for (unsigned k = 0; k < sizeof(g_xr_code); k++)
-                page[k] = g_xr_code[k];
-            sceKernelWrite(fd, page, sizeof(page));
-            void* m = 0;
-            if (sceKernelMmap(0, PG, 0x5, 0x1, fd, 0, &m) == 0) {
-                xr_run(l, "XR6", (uint8_t*)m);
-                l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
-                xr_run(l, "XR6", (uint8_t*)m);
-                sceKernelMunmap(m, PG);
-            }
-            sceKernelClose(fd);
-            sceKernelUnlink(path);
-        }
         l.end();
     }
 }
