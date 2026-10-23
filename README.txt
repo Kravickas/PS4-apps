@@ -130,6 +130,21 @@ SECTIONS
   SF findings of the OpenOrbis-Unit-Tests memory_test homebrew (MapMemoryTest), retested: flexible
      sizes, mmap edge cases (length 0, anon/void with offset or fd, stack rules, fixed offsets, a
      directory), every named anon flag, MapDirectMemory2 checks; SF8 (after EX) dmem aliasing
+  AV/AL memory_test AvailableDirectMemorySize / AllocateDirectMemory findings inside a free 4 MiB area
+  DF (after EX) memory_test device file findings: /dev/dmem1, /dev/gc, flexible budget (no writes)
+  FM/FX memory_test file mapping (private/shared writes, unaligned offsets) and flexible findings
+     (budget for 1 MiB maps of each kind, VirtualQuery, contents after unmap/remap/overwrite)
+  DT memory_test DirectTest findings: double mappings, contents after release, partial release,
+     backing per type, type changes and which direct memory areas merge
+  CO memory_test coalescing findings: for each kind of mapping, the areas after outside-in mapping,
+     a middle mapping, a rename, an mprotect and an mlock
+  PT/TP memory_test protect / type protect findings: reserved splits, one mprotect over several
+     kinds, execute on a file mapping, mprotect alignment, mtypeprotect with type 10, splits and
+     merges by type, and where mtypeprotect fails (never GPU protection on reserved memory)
+  FW/TL/TF memory_test per-SDK rules at our SDK version (1.70 null+fixed, 2.00 re-merging, 2.50
+     overlap and MAP_STACK, 3.00 0xFC00000000 limits, 3.50 ENOMEM, 5.50 call sites), the TLOU2
+     pattern at 64 MiB, and every file open mode with every mapping kind (no write through a shared
+     mapping of a read-only file)
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments
@@ -147,6 +162,14 @@ BUILD
     make all    -> eboot.bin and IV0000-SHAD00090_00-SHADDMEMTEST0000.pkg
 
 
+Cross-checks (SB lines too), for every call in every section
+  access(read)/access(write)  VirtualQuery says the CPU may read/write a page, but the kernel cannot
+                              (checked with a one-byte sceKernelWrite from / sceKernelRead into the
+                              page through a scratch file: EFAULT instead of a fault; the byte written
+                              back is the byte read, and file/device mappings are never written)
+  failed but ... changed      a call that failed changed protection, VirtualQuery protection or name
+  type: vq vs dmem            VirtualQuery's memory type differs from GetDirectMemoryType's
+
 Silent behaviour (SB lines)
   Every successful mprotect, direct/flexible/named mapping, mmap, MapDirectMemory2, pool commit,
   mtypeprotect and SetVirtualRangeName reads back what it set (protection of the first and last
@@ -160,5 +183,6 @@ analysis/
   COVERAGE.md         its output for this version of the test
   FINDINGS.md         every finding of other homebrews (memory_test, blockpool, dmem_regprig) with
                       the DmemTest probe that retests it, or todo
+  findings.py         generates FINDINGS.md from the memory_test sources and its coverage table
   compare_results.py  compares the PS4 and the shadPS4 results file: where each run ended, matching
                       and differing lines per section, SB/PS lines on one side only, TR differences

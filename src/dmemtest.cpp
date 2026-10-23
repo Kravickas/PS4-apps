@@ -72,6 +72,9 @@ int32_t sceKernelMemoryPoolBatch(const void* entries, int32_t count, int32_t* pr
 int32_t sceKernelMapDirectMemory2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
                                   long phys, size_t alignment);
 int32_t sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int32_t type, long* phys);
+const char* sceKernelGetFsSandboxRandomWord(void);
+long sceKernelRead(int fd, void* buf, unsigned long nbytes);
+int getpagesize(void);
 int32_t sceKernelIsStack(void* addr, void** start, void** end);
 int32_t sceKernelMlock(void* addr, size_t len);
 int32_t sceKernelMunlock(void* addr, size_t len);
@@ -667,6 +670,112 @@ static void sb_report(const char* op, uint64_t len, const char* what, int64_t re
 }
 
 // protection of the first and the last page of [at, at+len)
+// ---- cross-checks: real access through the kernel (a copy that fails with EFAULT instead of faulting),
+//      no side effects of a failed call, memory type from two sources --------------------------------
+static int g_xc_fd = -1; // a one-byte scratch file
+// file and device mappings: the writable check never writes into them
+static uint64_t g_xc_file_lo[256], g_xc_file_hi[256];
+static int g_xc_file_n = 0;
+
+static void xc_note_file_map(const void* at, uint64_t len) {
+    const int i = g_xc_file_n++ & 255;
+    g_xc_file_lo[i] = (uint64_t)at & ~(uint64_t)0x3FFF;
+    g_xc_file_hi[i] = (uint64_t)at + len;
+}
+
+static bool xc_in_file_map(const void* at) {
+    const uint64_t a = (uint64_t)at;
+    const int n = g_xc_file_n < 256 ? g_xc_file_n : 256;
+    for (int i = 0; i < n; i++)
+        if (a >= g_xc_file_lo[i] && a < g_xc_file_hi[i])
+            return true;
+    return false;
+}
+
+// 1 if the kernel can read a byte at a, 0 if not, -1 if not checked
+static int xc_can_read(const void* a) {
+    if (g_xc_fd < 0)
+        return -1;
+    sceKernelLseek(g_xc_fd, 0, 0);
+    return sceKernelWrite(g_xc_fd, a, 1) == 1 ? 1 : 0;
+}
+
+// 1 if the kernel can write the byte at a (it writes back the byte it just read, so the contents stay
+// the same), 0 if not, -1 if not checked
+static int xc_can_write(void* a) {
+    if (g_xc_fd < 0 || xc_in_file_map(a) || xc_can_read(a) != 1)
+        return -1;
+    sceKernelLseek(g_xc_fd, 0, 0);
+    return sceKernelRead(g_xc_fd, a, 1) == 1 ? 1 : 0;
+}
+
+// what VirtualQuery says the CPU may do must also be what the kernel can actually do
+static void xc_check_access(const char* op, uint64_t len, const void* page, int32_t vprot) {
+    if (vprot < 0)
+        return;
+    if (vprot & 0x1) {
+        const int r = xc_can_read(page);
+        if (r == 0)
+            sb_report(op, len, "access(read)", vprot, 0);
+    }
+    if (vprot & 0x2) {
+        const int w = xc_can_write((void*)page);
+        if (w == 0)
+            sb_report(op, len, "access(write)", vprot, 0);
+    }
+}
+
+struct XcSnap {
+    int32_t prot, vprot;
+    char name[33];
+};
+
+static XcSnap xc_snap(const void* at) {
+    XcSnap s;
+    const void* a = (const void*)((uint64_t)at & ~(uint64_t)0x3FFF);
+    s.prot = sb_read_prot(a);
+    s.vprot = sb_read_vprot(a);
+    if (!sb_read_name(a, s.name))
+        s.name[0] = 0;
+    return s;
+}
+
+// a failed call must leave protection, real protection and name as they were
+static void xc_check_unchanged(const char* op, uint64_t len, const void* at, const XcSnap& before) {
+    const XcSnap after = xc_snap(at);
+    if (after.prot != before.prot)
+        sb_report(op, len, "failed but prot changed", before.prot, after.prot);
+    if (after.vprot != before.vprot)
+        sb_report(op, len, "failed but vprot changed", before.vprot, after.vprot);
+    int k = 0;
+    while (k < 32 && before.name[k] == after.name[k] && before.name[k])
+        k++;
+    if (before.name[k] != after.name[k]) {
+        Line l;
+        l.s("SB   ").s(g_section).c(' ').s(op).s(" len=").hex(len).s(" failed but name changed \"");
+        l.s(before.name).s("\" -> \"").s(after.name).c('"').end();
+    }
+}
+
+// direct memory: VirtualQuery's type must match GetDirectMemoryType for the same physical address
+static void xc_check_type_sources(const char* op, uint64_t len, const void* at) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0 || (vi[0x20] & 0x2) == 0)
+        return;
+    uint64_t st = 0, off = 0;
+    for (int k = 7; k >= 0; k--) {
+        st = (st << 8) | vi[k];
+        off = (off << 8) | vi[0x10 + k];
+    }
+    const int32_t vt = (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8));
+    int32_t t = -1;
+    long s0 = 0, e0 = 0;
+    const long phys = (long)(off + ((uint64_t)at - st));
+    if (sceKernelGetDirectMemoryType(phys, &t, &s0, &e0) == 0 && t != vt)
+        sb_report(op, len, "type: vq vs dmem", vt, t);
+}
+
 static void sb_check_prot(const char* op, const void* at, uint64_t len, int32_t req) {
     const uint8_t* a = (const uint8_t*)((uint64_t)at & ~(uint64_t)0x3FFF);
     const int32_t first = sb_read_prot(a);
@@ -676,6 +785,7 @@ static void sb_check_prot(const char* op, const void* at, uint64_t len, int32_t 
     const int32_t vfirst = sb_read_vprot(a);
     if (vfirst != req)
         sb_report(op, len, "vprot", req, vfirst);
+    xc_check_access(op, len, a, vfirst);
     if (len > 0x4000) {
         const uint8_t* last = (const uint8_t*)(((uint64_t)at + len - 1) & ~(uint64_t)0x3FFF);
         const int32_t lp = sb_read_prot(last);
@@ -703,9 +813,12 @@ static void sb_check_name(const char* op, const void* at, uint64_t len, const ch
 }
 
 static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot) {
+    const XcSnap before = xc_snap(addr);
     const int32_t r = sceKernelMprotect(addr, len, prot);
     if (r == 0 && len)
         sb_check_prot("mprotect", addr, len, prot);
+    else if (r != 0)
+        xc_check_unchanged("mprotect", len, addr, before);
     return r;
 }
 static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
@@ -719,6 +832,7 @@ static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t pro
                               long phys, size_t alignment) {
     const int32_t r = sceKernelMapDirectMemory2(addr, len, type, prot, flags, phys, alignment);
     if (r == 0) {
+        xc_check_type_sources("map_direct2", len, *addr);
         sb_check_prot("map_direct2", *addr, len, prot);
         const int32_t t = sb_read_type(*addr);
         if (t != type)
@@ -753,15 +867,24 @@ static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t 
 }
 static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                        void** res) {
+    const bool fixed = (flags & 0x10) != 0 && addr;
+    const XcSnap before = fixed ? xc_snap(addr) : XcSnap{};
     const int32_t r = sceKernelMmap(addr, len, prot, flags, fd, offset, res);
+    if (r == 0 && fd >= 0)
+        xc_note_file_map(*res, len);
     if (r == 0)
         sb_check_prot("mmap", *res, len, prot);
+    else if (fixed)
+        xc_check_unchanged("mmap fixed", len, addr, before);
     return r;
 }
 static int32_t sb_set_name(const void* addr, size_t len, const char* name) {
+    const XcSnap before = xc_snap(addr);
     const int32_t r = sceKernelSetVirtualRangeName(addr, len, name);
     if (r == 0 && len)
         sb_check_name("set_name", addr, len, name);
+    else if (r != 0)
+        xc_check_unchanged("set_name", len, addr, before);
     return r;
 }
 
@@ -1772,10 +1895,14 @@ static int32_t tr_munmap(void* a, size_t len) {
     return tr_done("munmap", len, -1, sceKernelMunmap(a, len), b);
 }
 static int32_t tr_mtypeprotect(const void* a, size_t len, int32_t type, int32_t prot) {
+    const XcSnap before = xc_snap(a);
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     const int32_t r =
         tr_done("mtypeprotect", len, type, sceKernelMtypeprotect(a, len, type, prot), b);
+    if (r != 0)
+        xc_check_unchanged("mtypeprotect", len, a, before);
     if (r == 0 && len) {
+        xc_check_type_sources("mtypeprotect", len, a);
         sb_check_prot("mtypeprotect", a, len, prot);
         const int32_t t = sb_read_type(a);
         if (t != type)
@@ -6791,6 +6918,1426 @@ static void run_sf8() {
     unk(l).end();
 }
 
+// ---- AV / AL: memory_test AvailableDirectMemoryTest (test_100.cpp :1270) and
+//      AllocateDirectMemoryTest (:1388) findings, inside a 4 MiB free area R that each probe makes
+//      itself; addresses print relative to R. ----------------------------------------------------------
+
+// a 2 MiB aligned 4 MiB area of free direct memory, or -1
+static long av_free_area() {
+    long r = -1;
+    if (sceKernelAllocateDirectMemory(0, g_dmem, 0x400000, 0x200000, 0, &r) != 0)
+        return -1;
+    sceKernelReleaseDirectMemory(r, 0x400000);
+    return r;
+}
+
+static void av_line(Line& l, long R, long s, long e, size_t align) {
+    long p = 0;
+    size_t sz = 0;
+    const int32_t r = sceKernelAvailableDirectMemorySize(s, e, align, &p, &sz);
+    l.c(ncode(r));
+    if (r == 0)
+        l.c(':').shex((long long)(p - R)).c('+').hex((uint64_t)sz);
+    l.c(' ');
+}
+
+static void run_av_al() {
+    say("== AV/AL memory_test available/allocate findings, relative to a free 4 MiB area R");
+    const long R = av_free_area();
+    if (R < 0) {
+        say("AV   SKIP no free area");
+        return;
+    }
+    {
+        say("AV1 starting");
+        Line l = head("AV1", ":1298 align 1 | 3 | 6000 | :1350 2000 (window R..R+40000)");
+        av_line(l, R, R, R + 0x40000, 0x1);
+        av_line(l, R, R, R + 0x40000, 0x3);
+        av_line(l, R, R, R + 0x40000, 0x6000);
+        av_line(l, R, R + 0x2000, R + 0x40000, 0x2000);
+        unk(l).end();
+    }
+    {
+        say("AV2 starting");
+        Line l = head("AV2", ":1307 start>end | :1311 outside dmem | :1338 start+6000 | :1344 end+6000");
+        av_line(l, R, R + 0x40000, R, 0x4000);
+        av_line(l, R, (long)g_dmem, (long)g_dmem + 0x400000, 0x4000);
+        av_line(l, R, R + 0x6000, R + 0x40000, 0x4000);
+        av_line(l, R, R, R + 0x6000, 0x4000);
+        unk(l).end();
+    }
+    {
+        say("AV3 starting");
+        Line l = head("AV3", ":1357 align 20000 from R+4000 | :1363 largest area after a middle allocation");
+        av_line(l, R, R + 0x4000, R + 0x400000, 0x20000);
+        long mid = -1;
+        if (sceKernelAllocateDirectMemory(R + 0x100000, R + 0x104000, 0x4000, 0x4000, 0, &mid) == 0) {
+            av_line(l, R, R, R + 0x400000, 0x4000);
+            sceKernelReleaseDirectMemory(mid, 0x4000);
+            av_line(l, R, R, R + 0x400000, 0x4000); // :1381 after the release
+        }
+        unk(l).end();
+    }
+    auto al = [&](Line& l, long s, long e, size_t len, size_t align, int32_t type) {
+        long p = -1;
+        const int32_t r = sceKernelAllocateDirectMemory(s, e, len, align, type, &p);
+        l.c(ncode(r));
+        if (r == 0) {
+            int32_t t = 0;
+            long rs = 0, re = 0;
+            sceKernelGetDirectMemoryType(p, &t, &rs, &re);
+            l.c(':').shex((long long)(p - R)).c('+').hex((uint64_t)(re - rs));
+            sceKernelReleaseDirectMemory(p, len);
+        }
+        l.c(' ');
+    };
+    {
+        say("AL1 starting");
+        Line l = head("AL1", ":1404 start<0 end<0 | :1411 len0 | :1415 al c000 | :1420 al 2000 len 2000 | :1426 t11 t-1");
+        al(l, -0x4000, R + 0x40000, 0x4000, 0x4000, 0);
+        al(l, R, -0x4000, 0x4000, 0x4000, 0);
+        al(l, R, R + 0x40000, 0, 0x4000, 0);
+        al(l, R, R + 0x40000, 0x4000, 0xc000, 0);
+        al(l, R, R + 0x40000, 0x4000, 0x2000, 0);
+        al(l, R, R + 0x40000, 0x2000, 0x4000, 0);
+        al(l, R, R + 0x40000, 0x4000, 0x4000, 11);
+        al(l, R, R + 0x40000, 0x4000, 0x4000, -1);
+        unk(l).end();
+    }
+    {
+        say("AL2 starting");
+        Line l = head("AL2", ":1434 end<=start | :1438 end<len | :1442 end-len<start");
+        al(l, R + 0x4000, R + 0x4000, 0x4000, 0x4000, 0);
+        al(l, 0, 0x4000, 0x8000, 0x4000, 0);
+        al(l, R, R + 0x4000, 0x8000, 0x4000, 0);
+        unk(l).end();
+    }
+    {
+        say("AL3 starting");
+        Line l = head("AL3", ":1458 align 20000 from R+4000 | :1487 start R+8000 | :1496 R taken, align 20000");
+        al(l, R + 0x4000, R + 0x400000, 0x4000, 0x20000, 0);
+        al(l, R + 0x8000, R + 0x400000, 0x4000, 0x4000, 0);
+        long first = -1;
+        if (sceKernelAllocateDirectMemory(R, R + 0x4000, 0x4000, 0x4000, 0, &first) == 0) {
+            al(l, R, R + 0x400000, 0x4000, 0x20000, 0);
+            sceKernelReleaseDirectMemory(first, 0x4000);
+        }
+        unk(l).end();
+    }
+}
+
+// ---- DF (after EX): memory_test DeviceFileTest (test_100.cpp :1056) findings: /dev/dmem1 and /dev/gc
+//      mappings and the flexible budget. Nothing is written into device memory. -------------------------
+static void df_vq(Line& l, const void* at, uint64_t rel_to) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    const int32_t r = sceKernelVirtualQuery((void*)at, 0, vi, 0x48);
+    l.c(ncode(r));
+    if (r != 0)
+        return;
+    uint64_t off = 0;
+    for (int k = 7; k >= 0; k--)
+        off = (off << 8) | vi[0x10 + k];
+    const uint32_t mt = (uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8);
+    l.s(" off=").shex((long long)(off - rel_to)).s(" p=").hex(vi[0x18]).s(" t=").hex(mt);
+    l.s(" f=").hex(vi[0x20]);
+}
+
+static void run_df() {
+    say("== DF memory_test device file findings (no writes into device memory)");
+    const int32_t dfd = sceKernelOpen("/dev/dmem1", 0x2, 0777);
+    {
+        say("DF1 starting");
+        Line l = head("DF1", ":1061 /dev/dmem1 t10 r: open | map | vq | :1098 release, vq");
+        l.c(dfd > 0 ? 'o' : ncode(dfd));
+        long pa = -1;
+        if (dfd > 0 && sceKernelAllocateMainDirectMemory(0x10000, 0x10000, 10, &pa) == 0) {
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, 0x10000, 0x1, 0x1, dfd, pa, &m);
+            l.s(" | ").c(ncode(r));
+            if (r == 0) {
+                l.s(" | ");
+                df_vq(l, m, (uint64_t)pa);
+                l.s(" | ").c(ncode(sceKernelReleaseDirectMemory(pa, 0x10000))).c(' ');
+                unsigned char vi[0x60];
+                l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
+            } else {
+                sceKernelReleaseDirectMemory(pa, 0x10000);
+            }
+        }
+        unk(l).end();
+    }
+    {
+        say("DF2 starting");
+        Line l = head("DF2", ":1102 wb garlic 800001, prot 1 (vq) | 2 | 3 | 10 | 20 | 30");
+        long pa = -1;
+        if (dfd > 0 && sceKernelAllocateMainDirectMemory(0x10000, 0x10000, 10, &pa) == 0) {
+            static const int32_t prots[] = {0x1, 0x2, 0x3, 0x10, 0x20, 0x30};
+            for (int32_t p : prots) {
+                void* m = 0;
+                const int32_t r = sceKernelMmap(0, 0x10000, p, 0x800001, dfd, pa, &m);
+                l.hex((uint32_t)p).c(':').c(ncode(r));
+                if (r == 0) {
+                    if (p == 0x1) {
+                        l.c(' ');
+                        df_vq(l, m, (uint64_t)pa);
+                    }
+                    sceKernelMunmap(m, 0x10000);
+                }
+                l.c(' ');
+            }
+            sceKernelReleaseDirectMemory(pa, 0x10000);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    if (dfd > 0)
+        sceKernelClose(dfd);
+    const int32_t gfd = sceKernelOpen("/dev/gc", 0x602, 0666);
+    {
+        say("DF3 starting");
+        Line l = head("DF3", ":1165 /dev/gc rw: open | map | vq | :1208 private");
+        l.c(gfd > 0 ? 'o' : ncode(gfd));
+        if (gfd > 0) {
+            void* m = 0;
+            int32_t r = sceKernelMmap(0, 0x4000, 0x3, 0, gfd, 0, &m);
+            l.s(" | ").c(ncode(r));
+            if (r == 0) {
+                l.s(" | ");
+                df_vq(l, m, 0);
+                sceKernelMunmap(m, 0x4000);
+            }
+            m = 0;
+            r = sceKernelMmap(0, 0x4000, 0x3, 0x2, gfd, 0, &m);
+            l.s(" | ").c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, 0x4000);
+        }
+        unk(l).end();
+    }
+    {
+        // :1215 with the whole flexible budget used, a device mapping and a mapping of a system file
+        // still work
+        say("DF4 starting");
+        Line l = head("DF4", ":1231 budget used: avail | :1237 /dev/gc map | :1247 system libc.sprx map");
+        static void* maps[2048];
+        static uint64_t lens[2048];
+        int n = 0;
+        static const uint64_t chunks[] = {0x1000000ull, 0x4000ull};
+        for (uint64_t chunk : chunks) {
+            while (n < 2048) {
+                void* m = 0;
+                if (sceKernelMapFlexibleMemory(&m, chunk, 0x3, 0) != 0)
+                    break;
+                maps[n] = m;
+                lens[n++] = chunk;
+            }
+        }
+        size_t avail = 1;
+        sceKernelAvailableFlexibleMemorySize(&avail);
+        l.s("maps=").dec(n).s(" avail=").hex((uint64_t)avail);
+        if (gfd > 0) {
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, 0x4000, 0x3, 0, gfd, 0, &m);
+            l.s(" | ").c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, 0x4000);
+        }
+        char path[96];
+        const char* word = sceKernelGetFsSandboxRandomWord();
+        int k = 0;
+        path[k++] = '/';
+        for (const char* c = word; c && *c && k < 40; c++)
+            path[k++] = *c;
+        for (const char* c = "/common/lib/libc.sprx"; *c; c++)
+            path[k++] = *c;
+        path[k] = 0;
+        const int32_t sfd = sceKernelOpen(path, 0, 0666);
+        l.s(" | open ").c(sfd >= 0 ? 'o' : ncode(sfd));
+        if (sfd >= 0) {
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, 0x4000, 0x3, 0, sfd, 0, &m);
+            l.c(' ').c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, 0x4000);
+            sceKernelClose(sfd);
+        }
+        for (int i = 0; i < n; i++)
+            sceKernelMunmap(maps[i], lens[i]);
+        unk(l).end();
+    }
+    if (gfd > 0)
+        sceKernelClose(gfd);
+}
+
+// ---- FM / FX: memory_test FileMappingTest (test_100.cpp :1604) and FlexibleTest (:1895) findings ---
+
+// a 128 KiB file of byte k = (k * 7) & 0xFF, opened read-write
+static int fm_file(char* path) {
+    mf_named(path, "dmem_fm.bin");
+    const int fd = sceKernelOpen(path, 0x0602, 0777);
+    if (fd < 0)
+        return fd;
+    static unsigned char buf[0x4000];
+    for (int part = 0; part < 8; part++) {
+        for (int k = 0; k < 0x4000; k++)
+            buf[k] = (unsigned char)(((part * 0x4000 + k) * 7) & 0xFF);
+        sceKernelWrite(fd, buf, sizeof(buf));
+    }
+    return fd;
+}
+
+static int fm_read_at(int fd, long off, unsigned char* out, unsigned long n) {
+    sceKernelLseek(fd, off, 0);
+    return (int)sceKernelRead(fd, out, n);
+}
+
+static void run_fm_fx() {
+    say("== FM/FX memory_test file mapping and flexible findings");
+    char path[64];
+    {
+        say("FM1 starting");
+        Line l = head("FM1", ":1616 flags 0 rw: map | mem write | :1644 file unchanged");
+        const int fd = fm_file(path);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0, fd, 0, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            volatile unsigned char* b = (volatile unsigned char*)m;
+            for (int k = 0; k < 16; k++)
+                b[k] = 0;
+            l.s(" | ").c(b[0] == 0 ? 'y' : 'n');
+            unsigned char got[16];
+            fm_read_at(fd, 0, got, 16);
+            l.s(" | ").c(got[1] == 7 ? 'y' : 'n');
+            sceKernelMunmap(m, 0x4000);
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
+    {
+        say("FM2 starting");
+        Line l = head("FM2", ":1667 off 5000 len C000: page off | vq range | vq off | byte0 = file[5000]");
+        const int fd = fm_file(path);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0xC000, 0x1, 0x1, fd, 0x5000, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            const uint64_t a = (uint64_t)m;
+            const uint64_t base = a & ~(uint64_t)0x3FFF;
+            l.s(" ").hex(a & 0x3FFF).s(" | ");
+            unsigned char vi[0x60];
+            my_memset(vi, 0, sizeof(vi));
+            if (sceKernelVirtualQuery((void*)base, 0, vi, 0x48) == 0) {
+                uint64_t st = 0, en = 0, off = 0;
+                for (int k = 7; k >= 0; k--) {
+                    st = (st << 8) | vi[k];
+                    en = (en << 8) | vi[8 + k];
+                    off = (off << 8) | vi[0x10 + k];
+                }
+                l.shex((long long)(st - base)).c('-').shex((long long)(en - base)).s(" | ").hex(off);
+            }
+            l.s(" | ").c(*(volatile unsigned char*)m == (unsigned char)((0x5000 * 7) & 0xFF) ? 'y' : 'n');
+            sceKernelMunmap((void*)base, 0x10000);
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
+    {
+        say("FM3 starting");
+        Line l = head("FM3", ":1841 shared rw: map | mem write | file has it");
+        const int fd = fm_file(path);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x1, fd, 0, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            volatile unsigned char* b = (volatile unsigned char*)m;
+            for (int k = 0; k < 16; k++)
+                b[k] = 0;
+            l.s(" | ").c(b[1] == 0 ? 'y' : 'n');
+            sceKernelMunmap(m, 0x4000);
+            unsigned char got[16];
+            fm_read_at(fd, 0, got, 16);
+            l.s(" | ").c(got[1] == 0 ? 'y' : 'n');
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
+    {
+        // :1920-:1958 and :2077-:2132, with 1 MiB mappings (their measuring size)
+        say("FX1 starting");
+        Line l = head("FX1", "budget drop for 1M: flex | anon | stack | void | 64K /data file");
+        auto drop = [&](int32_t (*mk)(void**)) {
+            size_t a0 = 0, a1 = 0;
+            sceKernelAvailableFlexibleMemorySize(&a0);
+            void* m = 0;
+            const int32_t r = mk(&m);
+            l.c(ncode(r));
+            if (r == 0) {
+                sceKernelAvailableFlexibleMemorySize(&a1);
+                l.c(':').hex((uint64_t)(a0 - a1));
+            }
+            return m;
+        };
+        void* m = drop([](void** o) { return sceKernelMapFlexibleMemory(o, 0x100000, 0x3, 0); });
+        if (m) sceKernelMunmap(m, 0x100000);
+        l.s(" | ");
+        m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x3, 0x1002, -1, 0, o); });
+        if (m) sceKernelMunmap(m, 0x100000);
+        l.s(" | ");
+        m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x3, 0x1402, -1, 0, o); });
+        if (m) sceKernelMunmap(m, 0x100000);
+        l.s(" | ");
+        m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x0, 0x102, -1, 0, o); });
+        if (m) sceKernelMunmap(m, 0x100000);
+        l.s(" | ");
+        const int fd = fm_file(path);
+        if (fd >= 0) {
+            size_t a0 = 0, a1 = 0;
+            sceKernelAvailableFlexibleMemorySize(&a0);
+            void* f = 0;
+            const int32_t r = sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &f);
+            l.c(ncode(r));
+            if (r == 0) {
+                sceKernelAvailableFlexibleMemorySize(&a1);
+                l.c(':').hex((uint64_t)(a0 - a1));
+                sceKernelMunmap(f, 0x10000);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+    {
+        say("FX2 starting");
+        Line l = head("FX2", ":1993 flexible 16K rw: vq");
+        void* m = 0;
+        if (sceKernelMapFlexibleMemory(&m, PG, 0x3, 0) == 0) {
+            vq_field(l, (uint64_t)m, (uint64_t)m);
+            sceKernelMunmap(m, PG);
+        }
+        unk(l).end();
+    }
+    {
+        say("FX3 starting");
+        Line l = head("FX3", ":2031 unmap middle: rest kept | :2047 fixed remap has old | :2056 overwrite has old");
+        void* v = 0;
+        if (sceKernelMapFlexibleMemory(&v, 3 * PG, 0x3, 0) == 0) {
+            uint8_t* m = (uint8_t*)v;
+            for (int p = 0; p < 3; p++)
+                *(volatile uint32_t*)(m + p * PG) = 0x11111111;
+            sceKernelMunmap(m + PG, PG);
+            const bool kept = *(volatile uint32_t*)m == 0x11111111 &&
+                              *(volatile uint32_t*)(m + 2 * PG) == 0x11111111;
+            l.c(kept ? 'y' : 'n');
+            void* h = m + PG;
+            const int32_t r = sceKernelMapFlexibleMemory(&h, PG, 0x3, 0x10);
+            l.s(" | ").c(ncode(r));
+            if (r == 0)
+                l.c(' ').c(*(volatile uint32_t*)(m + PG) == 0x11111111 ? 'y' : 'n');
+            for (int p = 0; p < 3; p++)
+                *(volatile uint32_t*)(m + p * PG) = 0x11111111;
+            void* w = m;
+            const int32_t r2 = sceKernelMapFlexibleMemory(&w, 3 * PG, 0x3, 0x10);
+            l.s(" | ").c(ncode(r2));
+            if (r2 == 0)
+                l.c(' ').c(*(volatile uint32_t*)m == 0x11111111 ? 'y' : 'n');
+            sceKernelMunmap(m, 3 * PG);
+        }
+        unk(l).end();
+    }
+}
+
+// ---- DT: memory_test DirectTest (test_100.cpp :2138) findings, inside a free 4 MiB area R. A
+//      direct memory area prints as t<type>:<start>-<end> relative to R. ---------------------------------
+
+static void dt_area(Line& l, long R, long at) {
+    int32_t t = -1;
+    long s = 0, e = 0;
+    const int32_t r = sceKernelGetDirectMemoryType(at, &t, &s, &e);
+    if (r != 0) {
+        l.c(ncode(r));
+        return;
+    }
+    l.c('t').dec(t).c(':').shex((long long)(s - R)).c('-').shex((long long)(e - R));
+}
+
+static long dt_alloc_at(long at, int32_t type) {
+    long p = -1;
+    return sceKernelAllocateDirectMemory(at, at + PG, PG, PG, type, &p) == 0 ? p : -1;
+}
+
+static void run_dt() {
+    say("== DT memory_test DirectTest findings, relative to a free 4 MiB area R");
+    const long R = av_free_area();
+    if (R < 0) {
+        say("DT   SKIP no free area");
+        return;
+    }
+    {
+        say("DT1 starting");
+        Line l = head("DT1", ":2149 MapDirectMemory2 unallocated | :2184 vq of a direct map (off rel phys)");
+        void* m = 0;
+        int32_t r = sceKernelMapDirectMemory2(&m, PG, 0, 0x3, 0, R, PG);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        const long p = dt_alloc_at(R, 0);
+        m = 0;
+        if (p >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, p, PG) == 0) {
+            l.s(" | ");
+            vq_field(l, (uint64_t)m, (uint64_t)m);
+            unsigned char vi[0x60];
+            my_memset(vi, 0, sizeof(vi));
+            sceKernelVirtualQuery(m, 0, vi, 0x48);
+            uint64_t off = 0;
+            for (int k = 7; k >= 0; k--)
+                off = (off << 8) | vi[0x10 + k];
+            l.s(" off-phys=").shex((long long)(off - (uint64_t)p));
+            sceKernelMunmap(m, PG);
+        }
+        if (p >= 0)
+            sceKernelReleaseDirectMemory(p, PG);
+        unk(l).end();
+    }
+    {
+        say("DT2 starting");
+        Line l = head("DT2", ":2194 same phys twice: map2 | mirror | :2208 chk release: both u | :2223 contents after");
+        const long p = dt_alloc_at(R, 0);
+        void* a = 0;
+        void* b = 0;
+        if (p >= 0 && sceKernelMapDirectMemory(&a, PG, 0x3, 0, p, PG) == 0) {
+            *(volatile uint32_t*)a = 0x5A5A1234;
+            const int32_t r2 = sceKernelMapDirectMemory(&b, PG, 0x3, 0, p, PG);
+            l.c(ncode(r2));
+            if (r2 == 0)
+                l.s(" | ").c(*(volatile uint32_t*)b == 0x5A5A1234 ? 'y' : 'n');
+            l.s(" | ").c(ncode(sceKernelCheckedReleaseDirectMemory(p, PG))).c(' ');
+            nu_page(l, a);
+            if (r2 == 0) {
+                l.c(',');
+                nu_page(l, b);
+            }
+            const long q = dt_alloc_at(p, 0);
+            void* c = 0;
+            if (q == p && sceKernelMapDirectMemory(&c, PG, 0x3, 0, q, PG) == 0) {
+                l.s(" | ").c(*(volatile uint32_t*)c == 0x5A5A1234 ? 'y' : 'n');
+                sceKernelMunmap(c, PG);
+            }
+            if (q >= 0)
+                sceKernelReleaseDirectMemory(q, PG);
+        } else {
+            l.s("SKIP");
+            if (p >= 0)
+                sceKernelReleaseDirectMemory(p, PG);
+        }
+        unk(l).end();
+    }
+    {
+        say("DT3 starting");
+        Line l = head("DT3", ":2227 release middle page: pages | :2252 remap all: map | map2");
+        long p = -1;
+        void* m = 0;
+        if (sceKernelAllocateDirectMemory(R, R + 3 * PG, 3 * PG, PG, 0, &p) == 0 &&
+            sceKernelMapDirectMemory(&m, 3 * PG, 0x3, 0, p, PG) == 0) {
+            sceKernelReleaseDirectMemory(p + PG, PG);
+            uint8_t* b = (uint8_t*)m;
+            nu_page(l, b);
+            l.c(',');
+            nu_page(l, b + PG);
+            l.c(',');
+            nu_page(l, b + 2 * PG);
+            sceKernelMunmap(m, 3 * PG);
+            void* m1 = 0;
+            int32_t r = sceKernelMapDirectMemory(&m1, 3 * PG, 0x3, 0, p, PG);
+            l.s(" | ").c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m1, 3 * PG);
+            m1 = 0;
+            r = sceKernelMapDirectMemory2(&m1, 3 * PG, -1, 0x3, 0, p, PG);
+            l.c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m1, 3 * PG);
+            sceKernelReleaseDirectMemory(p, 3 * PG);
+        } else {
+            l.s("SKIP");
+            if (p >= 0)
+                sceKernelReleaseDirectMemory(p, 3 * PG);
+        }
+        unk(l).end();
+    }
+    {
+        say("DT4 starting");
+        Line l = head("DT4", ":2264 backing for types 0-10: write, unmap, remap, same data");
+        for (int32_t t = 0; t <= 10; t++) {
+            const long p = dt_alloc_at(R, t);
+            if (p < 0) {
+                l.c('x');
+                continue;
+            }
+            void* m = 0;
+            const int32_t prot = t == 10 ? 0x1 : 0x3;
+            if (sceKernelMapDirectMemory(&m, PG, prot, 0, p, PG) == 0) {
+                if (t == 10) {
+                    l.c('-'); // type 10 cannot be written by the CPU
+                } else {
+                    *(volatile uint32_t*)m = 0xC0DE0000u + (uint32_t)t;
+                    sceKernelMunmap(m, PG);
+                    m = 0;
+                    if (sceKernelMapDirectMemory(&m, PG, prot, 0, p, PG) == 0)
+                        l.c(*(volatile uint32_t*)m == 0xC0DE0000u + (uint32_t)t ? 'y' : 'n');
+                    else
+                        l.c('m');
+                }
+                if (m)
+                    sceKernelMunmap(m, PG);
+            } else {
+                l.c('m');
+            }
+            sceKernelReleaseDirectMemory(p, PG);
+        }
+        unk(l).end();
+    }
+    {
+        say("DT5 starting");
+        Line l = head("DT5", ":2323 map2 t3 on t0 page next to t3 page: areas | :2342 after munmap");
+        const long a = dt_alloc_at(R, 0);
+        const long b = dt_alloc_at(R + PG, 3);
+        if (a >= 0 && b >= 0) {
+            void* m = 0;
+            const int32_t r = sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, a, PG);
+            l.c(ncode(r)).c(' ');
+            dt_area(l, R, a);
+            l.c(' ');
+            dt_area(l, R, b);
+            if (r == 0)
+                sceKernelMunmap(m, PG);
+            l.s(" | ");
+            dt_area(l, R, a);
+        } else {
+            l.s("SKIP");
+        }
+        if (a >= 0)
+            sceKernelReleaseDirectMemory(a, PG);
+        if (b >= 0)
+            sceKernelReleaseDirectMemory(b, PG);
+        unk(l).end();
+    }
+    {
+        say("DT6 starting");
+        Line l = head("DT6", ":2370 type 10: map rw | r | gpu w | :2413 map2 to t10 with rw");
+        const long p = dt_alloc_at(R, 10);
+        static const int32_t prots[] = {0x3, 0x1, 0x20};
+        for (int32_t pr : prots) {
+            void* m = 0;
+            const int32_t r = p >= 0 ? sceKernelMapDirectMemory(&m, PG, pr, 0, p, PG) : -1;
+            l.c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, PG);
+        }
+        if (p >= 0)
+            sceKernelReleaseDirectMemory(p, PG);
+        const long q = dt_alloc_at(R, 0);
+        void* m = 0;
+        const int32_t r = q >= 0 ? sceKernelMapDirectMemory2(&m, PG, 10, 0x3, 0, q, PG) : -1;
+        l.s(" | ").c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        if (q >= 0)
+            sceKernelReleaseDirectMemory(q, PG);
+        unk(l).end();
+    }
+    {
+        // :2492 a t0 page whose type map2 makes 3, a t3 page, a gap, a t3 page; then a t3 allocation in
+        // the gap: which areas merge
+        say("DT7 starting");
+        Line l = head("DT7", ":2492 areas after filling the gap: R | R+4000 | R+8000 | R+C000");
+        const long a1 = dt_alloc_at(R, 0);
+        const long a2 = dt_alloc_at(R + PG, 3);
+        const long a4 = dt_alloc_at(R + 3 * PG, 3);
+        void* m = 0;
+        if (a1 >= 0 && sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, a1, PG) == 0)
+            sceKernelMunmap(m, PG);
+        const long a3 = dt_alloc_at(R + 2 * PG, 3);
+        for (int i = 0; i < 4; i++) {
+            dt_area(l, R, R + i * PG);
+            l.c(' ');
+        }
+        // :2483 a checked release over all of them
+        l.s("| ").c(ncode(sceKernelCheckedReleaseDirectMemory(R, 4 * PG)));
+        (void)a2;
+        (void)a3;
+        (void)a4;
+        sceKernelReleaseDirectMemory(R, 4 * PG);
+        unk(l).end();
+    }
+    {
+        say("DT8 starting");
+        Line l = head("DT8", ":2569 two unmerged t3 areas, one map2 -1 | :2587 one map2 t3: areas");
+        const long a = dt_alloc_at(R, 0);
+        const long b = dt_alloc_at(R + PG, 3);
+        void* m = 0;
+        if (a >= 0 && sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, a, PG) == 0)
+            sceKernelMunmap(m, PG);
+        if (a >= 0 && b >= 0) {
+            m = 0;
+            int32_t r = sceKernelMapDirectMemory2(&m, 2 * PG, -1, 0x3, 0, a, PG);
+            l.c(ncode(r)).c(' ');
+            dt_area(l, R, R);
+            l.c(' ');
+            dt_area(l, R, R + PG);
+            if (r == 0)
+                sceKernelMunmap(m, 2 * PG);
+            m = 0;
+            r = sceKernelMapDirectMemory2(&m, 2 * PG, 3, 0x3, 0, a, PG);
+            l.s(" | ").c(ncode(r)).c(' ');
+            dt_area(l, R, R);
+            l.c(' ');
+            dt_area(l, R, R + PG);
+            if (r == 0)
+                sceKernelMunmap(m, 2 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        sceKernelReleaseDirectMemory(R, 2 * PG);
+        unk(l).end();
+    }
+}
+
+// ---- CO: memory_test CoalescingTest (test_100.cpp :2610) findings. For each kind of mapping: two
+//      outer pieces and two inner ones, then the middle one (outside-in), then a rename, an mprotect and
+//      an mlock of the whole range. After each step the areas VirtualQuery reports inside the range
+//      print as <start>-<end> in units of 0x1000 relative to the range. -------------------------------
+
+static void co_scan(Line& l, uint64_t base, uint64_t size) {
+    uint64_t cur = base;
+    int n = 0;
+    while (cur < base + size && n < 12) {
+        unsigned char vi[0x60];
+        my_memset(vi, 0, sizeof(vi));
+        if (sceKernelVirtualQuery((void*)cur, 1, vi, 0x48) != 0)
+            break;
+        uint64_t st = 0, en = 0;
+        for (int k = 7; k >= 0; k--) {
+            st = (st << 8) | vi[k];
+            en = (en << 8) | vi[8 + k];
+        }
+        if (st >= base + size)
+            break;
+        if (n)
+            l.c(',');
+        const uint64_t s0 = st < base ? base : st;
+        const uint64_t e0 = en > base + size ? base + size : en;
+        l.hex((s0 - base) >> 12).c('-').hex((e0 - base) >> 12);
+        cur = en;
+        n++;
+    }
+    if (n == 0)
+        l.c('-');
+}
+
+// one kind: map(i) maps piece i (0..4) at its fixed place; pieces are mapped 0, 4, 1, 3, then 2
+static void co_kind(const char* id, const char* name, uint64_t piece, int32_t (*map)(uint64_t at, int i),
+                    int32_t mprot) {
+    say(id);
+    Line l = head(id, name);
+    void* a = 0;
+    if (sceKernelReserveVirtualRange(&a, 5 * piece, 0, 0) != 0) {
+        l.s("SKIP").end();
+        return;
+    }
+    const uint64_t base = (uint64_t)a;
+    static const int order[] = {0, 4, 1, 3};
+    for (int i : order)
+        l.c(ncode(map(base + i * piece, i)));
+    l.c(' ');
+    co_scan(l, base, 5 * piece);
+    l.s(" | ").c(ncode(map(base + 2 * piece, 2))).c(' ');
+    co_scan(l, base, 5 * piece);
+    l.s(" | name ").c(ncode(sceKernelSetVirtualRangeName((void*)base, 5 * piece, "Mapping"))).c(' ');
+    co_scan(l, base, 5 * piece);
+    l.s(" | prot ").c(ncode(sceKernelMprotect((void*)base, 5 * piece, mprot))).c(' ');
+    co_scan(l, base, 5 * piece);
+    l.s(" | mlock ").c(ncode(sceKernelMlock((void*)base, 5 * piece))).c(' ');
+    co_scan(l, base, 5 * piece);
+    sceKernelMunmap((void*)base, 5 * piece);
+    unk(l).end();
+}
+
+static int g_co_fd = -1;
+static long g_co_R = -1;
+
+static void run_co() {
+    say("== CO memory_test coalescing findings: areas after each step, in 0x1000 units");
+    co_kind("CO1", ":2683 anon 1010 p33", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0x33, 0x1010, -1, 0, &o);
+    }, 0x3);
+    co_kind("CO2", ":2860 reserve 111 (void+shared)", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0, 0x111, -1, 0, &o);
+    }, 0x3);
+    co_kind("CO3", ":2929 reserve 110 (void, no shared)", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0, 0x110, -1, 0, &o);
+    }, 0x3);
+    g_co_R = av_free_area();
+    if (g_co_R >= 0) {
+        co_kind("CO4", ":2986 direct 10 p33 (neighbouring phys)", 0x20000, [](uint64_t at, int i) {
+            long p = -1;
+            const long want = g_co_R + i * 0x20000;
+            int32_t r = sceKernelAllocateDirectMemory(want, want + 0x20000, 0x20000, 0x20000, 0, &p);
+            if (r != 0)
+                return r;
+            void* o = (void*)at;
+            r = sceKernelMapDirectMemory(&o, 0x20000, 0x33, 0x10, p, 0);
+            if (r != 0)
+                sceKernelReleaseDirectMemory(p, 0x20000);
+            return r;
+        }, 0x3);
+        sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000);
+    }
+    char path[64];
+    mf_named(path, "dmem_co.bin");
+    g_co_fd = sceKernelOpen(path, 0x0602, 0777);
+    if (g_co_fd >= 0) {
+        static unsigned char buf[0x4000];
+        for (int k = 0; k < 0x4000; k++)
+            buf[k] = (unsigned char)k;
+        for (int part = 0; part < 0x40000 / 0x4000; part++)
+            sceKernelWrite(g_co_fd, buf, sizeof(buf));
+        co_kind("CO5", ":3169 file 10 rw (no shared)", 0x4000, [](uint64_t at, int i) {
+            void* o = 0;
+            return sceKernelMmap((void*)at, 0x4000, 0x3, 0x10, g_co_fd, 0x20000 + i * 0x4000, &o);
+        }, 0x1);
+        co_kind("CO6", ":3344 file 11 rw (shared)", 0x4000, [](uint64_t at, int i) {
+            void* o = 0;
+            return sceKernelMmap((void*)at, 0x4000, 0x3, 0x11, g_co_fd, 0x20000 + i * 0x4000, &o);
+        }, 0x1);
+        co_kind("CO7", ":3392 file 10 r (no shared)", 0x4000, [](uint64_t at, int i) {
+            void* o = 0;
+            return sceKernelMmap((void*)at, 0x4000, 0x1, 0x10, g_co_fd, 0x20000 + i * 0x4000, &o);
+        }, 0x1);
+        sceKernelClose(g_co_fd);
+    }
+    // :3441 NoCoalesce reservations, the middle one without the flag
+    co_kind("CO8", ":3441 reserve 400111, middle 111", 0x20000, [](uint64_t at, int i) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0, i == 2 ? 0x111 : 0x400111, -1, 0, &o);
+    }, 0x3);
+}
+
+// ---- PT / TP: memory_test ProtectTest (test_100.cpp :3568) and TypeProtectTest (:4054) findings. No
+//      GPU protection is ever given to reserved memory (:3689: that hangs the whole PS4). Areas print as
+//      in CO. -----------------------------------------------------------------------------------------
+
+static void run_pt_tp() {
+    say("== PT/TP memory_test protect / type protect findings");
+    {
+        say("PT1 starting");
+        Line l = head("PT1", ":3663 reserved: mprotect piece 2 rw | pieces 1,3 rw | whole 0 (areas, prot of piece 2)");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 5 * 0x20000, 0, 0) == 0) {
+            const uint64_t b = (uint64_t)a;
+            l.c(ncode(sceKernelMprotect((void*)(b + 2 * 0x20000), 0x20000, 0x3))).c(' ');
+            co_scan(l, b, 5 * 0x20000);
+            l.s(" p=").hex((uint32_t)sb_read_vprot((void*)(b + 2 * 0x20000)));
+            l.s(" | ").c(ncode(sceKernelMprotect((void*)(b + 0x20000), 0x20000, 0x3)));
+            l.c(ncode(sceKernelMprotect((void*)(b + 3 * 0x20000), 0x20000, 0x3))).c(' ');
+            co_scan(l, b, 5 * 0x20000);
+            l.s(" | ").c(ncode(sceKernelMprotect((void*)b, 5 * 0x20000, 0x0))).c(' ');
+            co_scan(l, b, 5 * 0x20000);
+            sceKernelMunmap(a, 5 * 0x20000);
+        }
+        unk(l).end();
+    }
+    {
+        // :3899 one mprotect over a flexible, a direct and an anon mapping with a free gap and spare
+        // space after them
+        say("PT2 starting");
+        Line l = head("PT2", ":3899 mprotect r over flex, direct, gap, anon: prot of each | areas");
+        void* a = 0;
+        int32_t rr = 0;
+        const long pa = alloc(1, 0, &rr);
+        if (pa >= 0 && sceKernelReserveVirtualRange(&a, 5 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            sceKernelMunmap(a, 5 * PG);
+            void* f = b;
+            void* d = b + PG;
+            void* n = b + 3 * PG;
+            sceKernelMapFlexibleMemory(&f, PG, 0x3, 0x10);
+            sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
+            sceKernelMmap(b + 3 * PG, PG, 0x3, 0x1012, -1, 0, &n);
+            l.c(ncode(sceKernelMprotect(b, 5 * PG, 0x1))).c(' ');
+            for (int i = 0; i < 4; i++) {
+                nu_page(l, b + i * PG);
+                l.c(i < 3 ? ',' : ' ');
+            }
+            l.s("| ");
+            co_scan(l, (uint64_t)b, 5 * PG);
+            sceKernelMunmap(b, 5 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        // :3852 a file holding "mov eax, 256; ret": mmap r+x, then mprotect r+x; the code runs only if
+        // execute reads back
+        say("PT3 starting");
+        Line l = head("PT3", ":3861 file mmap r+x: prot, ran | :3873 mprotect r+x: prot, ran");
+        char path[64];
+        mf_named(path, "dmem_pt.bin");
+        const int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            static unsigned char code[0x4000];
+            const unsigned char fn[] = {0xB8, 0x00, 0x01, 0x00, 0x00, 0xC3};
+            for (unsigned k = 0; k < sizeof(fn); k++)
+                code[k] = fn[k];
+            sceKernelWrite(fd, code, sizeof(code));
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, PG, 0x5, 0x1, fd, 0, &m);
+            l.c(ncode(r));
+            auto run = [&]() {
+                const int32_t p = sb_read_prot(m);
+                l.s(" p=").hex((uint32_t)p);
+                if (p >= 0 && (p & 0x4))
+                    l.s(((int (*)())m)() == 256 ? " 256" : " bad");
+                else
+                    l.s(" no-run");
+            };
+            if (r == 0) {
+                run();
+                l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
+                run();
+                sceKernelMunmap(m, PG);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+    {
+        // :3996 mprotect alignment: from +3000 for 10000, and from +1000 for F000; pages 0-5 after
+        say("PT4 starting");
+        Line l = head("PT4", ":4011 mprotect r +3000 len 10000: pages 0-5 | :4033 +1000 len F000");
+        void* v = 0;
+        if (sceKernelMapFlexibleMemory(&v, 6 * PG, 0x3, 0) == 0) {
+            uint8_t* b = (uint8_t*)v;
+            l.c(ncode(sceKernelMprotect(b + 0x3000, 0x10000, 0x1))).c(' ');
+            for (int i = 0; i < 6; i++)
+                nu_page(l, b + i * PG);
+            sceKernelMprotect(b, 6 * PG, 0x3);
+            l.s(" | ").c(ncode(sceKernelMprotect(b + 0x1000, 0xF000, 0x1))).c(' ');
+            for (int i = 0; i < 6; i++)
+                nu_page(l, b + i * PG);
+            sceKernelMunmap(b, 6 * PG);
+        }
+        unk(l).end();
+    }
+    {
+        say("TP1 starting");
+        Line l = head("TP1", ":4183 mtypeprotect t10 r | mprotect rw | :4196 mtypeprotect t0 rw | type");
+        int32_t rr = 0;
+        const long pa = alloc(1, 0, &rr);
+        void* m = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG) == 0) {
+            l.c(ncode(sceKernelMtypeprotect(m, PG, 10, 0x1)));
+            l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x3)));
+            l.s(" | ").c(ncode(sceKernelMtypeprotect(m, PG, 0, 0x3)));
+            int32_t t = -1;
+            long s0 = 0, e0 = 0;
+            sceKernelGetDirectMemoryType(pa, &t, &s0, &e0);
+            l.s(" | t").dec(t);
+            sceKernelMunmap(m, PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        // :4205 one direct mapping of 3 pages, type 3 on the middle page, then type 1 on all
+        say("TP2 starting");
+        Line l = head("TP2", ":4213 middle t3: vm areas, dmem areas | :4261 all t1: vm areas, dmem areas");
+        const long R = av_free_area();
+        long p = -1;
+        void* m = 0;
+        if (R >= 0 && sceKernelAllocateDirectMemory(R, R + 3 * PG, 3 * PG, PG, 0, &p) == 0 &&
+            sceKernelMapDirectMemory(&m, 3 * PG, 0x3, 0, p, PG) == 0) {
+            uint8_t* b = (uint8_t*)m;
+            l.c(ncode(sceKernelMtypeprotect(b + PG, PG, 3, 0x3))).c(' ');
+            co_scan(l, (uint64_t)b, 3 * PG);
+            l.c(' ');
+            for (int i = 0; i < 3; i++) {
+                dt_area(l, R, p + i * PG);
+                l.c(i < 2 ? ',' : ' ');
+            }
+            l.s("| ").c(ncode(sceKernelMtypeprotect(b, 3 * PG, 1, 0x3))).c(' ');
+            co_scan(l, (uint64_t)b, 3 * PG);
+            l.c(' ');
+            for (int i = 0; i < 3; i++) {
+                dt_area(l, R, p + i * PG);
+                l.c(i < 2 ? ',' : ' ');
+            }
+            sceKernelMunmap(m, 3 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        if (p >= 0)
+            sceKernelReleaseDirectMemory(p, 3 * PG);
+        unk(l).end();
+    }
+    {
+        say("TP3 starting");
+        Line l = head("TP3", ":4301 flex t11 | flex t0 | :4316 reserved t0 | :4323 free t0");
+        void* f = 0;
+        if (sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) == 0) {
+            l.c(ncode(sceKernelMtypeprotect(f, PG, 11, 0x3)));
+            l.c(ncode(sceKernelMtypeprotect(f, PG, 0, 0x3)));
+            sceKernelMunmap(f, PG);
+        }
+        void* r = 0;
+        if (sceKernelReserveVirtualRange(&r, PG, 0, 0) == 0) {
+            l.c(ncode(sceKernelMtypeprotect(r, PG, 0, 0x3)));
+            sceKernelMunmap(r, PG);
+            l.c(ncode(sceKernelMtypeprotect(r, PG, 0, 0x3)));
+        }
+        unk(l).end();
+    }
+}
+
+// ---- FW / TL / TF: memory_test per-SDK findings (test_170..test_550.cpp) at our SDK version, the
+//      TLOU2 pattern (test_550.cpp :148, scaled from 4 GiB to 64 MiB) and TestFileMappings (:242). -----
+
+// FW6: five creators at five call sites, calling the real function (not through SB), so their mappings
+// get five different caller names
+#pragma push_macro("sceKernelMmap")
+#undef sceKernelMmap
+__attribute__((noinline)) static int32_t fw6_a(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x3, 0x1012, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fw6_b(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x3, 0x1012, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fw6_c(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x3, 0x1012, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fw6_d(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x3, 0x1012, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fw6_e(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x3, 0x1012, -1, 0, &o);
+}
+#pragma pop_macro("sceKernelMmap")
+
+// the whole flexible budget used up: 16 MiB pieces, then 16 KiB pieces; returns the count
+static int fw_use_budget(void** maps, uint64_t* lens, int cap) {
+    int n = 0;
+    static const uint64_t chunks[] = {0x1000000ull, 0x4000ull};
+    for (uint64_t chunk : chunks) {
+        while (n < cap) {
+            void* m = 0;
+            if (sceKernelMapFlexibleMemory(&m, chunk, 0x3, 0) != 0)
+                break;
+            maps[n] = m;
+            lens[n++] = chunk;
+        }
+    }
+    return n;
+}
+
+static void run_fw_tl_tf() {
+    say("== FW/TL/TF memory_test per-SDK findings at our SDK version, TLOU2 pattern, file mappings");
+    {
+        say("FW1 starting");
+        Line l = head("FW1", "170:21 null+fixed: mmap | flex | direct | pool reserve | reserve range");
+        void* m = 0;
+        int32_t r = sceKernelMmap(0, PG, 0x3, 0x1012, -1, 0, &m);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        m = 0;
+        r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0x10);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        int32_t rr = 0;
+        const long pa = alloc(1, 0, &rr);
+        m = 0;
+        r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x10, pa, PG) : -1;
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        release_all(pa, 1);
+        m = 0;
+        r = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0x10, &m);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, 0x200000);
+        m = 0;
+        r = sceKernelReserveVirtualRange(&m, 0x200000, 0x10, 0);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, 0x200000);
+        unk(l).end();
+    }
+    {
+        say("FW2 starting");
+        Line l = head("FW2", "200:118 one dmem map of 4 pages: areas | mprotect p1 r: areas, qp range | back | mtype p1 t3 | back");
+        const long R = av_free_area();
+        long p = -1;
+        void* m = 0;
+        if (R >= 0 && sceKernelAllocateDirectMemory(R, R + 4 * PG, 4 * PG, PG, 0, &p) == 0 &&
+            sceKernelMapDirectMemory(&m, 4 * PG, 0x3, 0, p, PG) == 0) {
+            const uint64_t b = (uint64_t)m;
+            co_scan(l, b, 4 * PG);
+            l.s(" | ").c(ncode(sceKernelMprotect((void*)(b + PG), PG, 0x1))).c(' ');
+            co_scan(l, b, 4 * PG);
+            void* s0 = 0;
+            void* e0 = 0;
+            int32_t pr = 0;
+            if (sceKernelQueryMemoryProtection((void*)(b + PG), &s0, &e0, &pr) == 0)
+                l.s(" qp ").hex(((uint64_t)s0 - b) >> 12).c('-').hex(((uint64_t)e0 + 1 - b) >> 12);
+            l.s(" | ").c(ncode(sceKernelMprotect((void*)(b + PG), PG, 0x3))).c(' ');
+            co_scan(l, b, 4 * PG);
+            l.s(" | ").c(ncode(sceKernelMtypeprotect((void*)(b + PG), PG, 3, 0x3))).c(' ');
+            co_scan(l, b, 4 * PG);
+            l.s(" | ").c(ncode(sceKernelMtypeprotect((void*)(b + PG), PG, 0, 0x3))).c(' ');
+            co_scan(l, b, 4 * PG);
+            sceKernelMunmap(m, 4 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        if (p >= 0)
+            sceKernelReleaseDirectMemory(p, 4 * PG);
+        unk(l).end();
+    }
+    {
+        say("FW3 starting");
+        Line l = head("FW3", "250:24 page mapped, again: direct | named | direct+stack | named+stack");
+        int32_t rr = 0;
+        const long pa = alloc(1, 0, &rr);
+        void* first = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&first, PG, 0x3, 0, pa, PG) == 0) {
+            void* m[4] = {0, 0, 0, 0};
+            int32_t r[4];
+            r[0] = sceKernelMapDirectMemory(&m[0], PG, 0x3, 0, pa, PG);
+            r[1] = sceKernelMapNamedDirectMemory(&m[1], PG, 0x3, 0, pa, PG, "fw3");
+            r[2] = sceKernelMapDirectMemory(&m[2], PG, 0x3, 0x400, pa, PG);
+            r[3] = sceKernelMapNamedDirectMemory(&m[3], PG, 0x3, 0x400, pa, PG, "fw3");
+            for (int i = 0; i < 4; i++) {
+                l.c(ncode(r[i]));
+                if (r[i] == 0)
+                    sceKernelMunmap(m[i], PG);
+            }
+            sceKernelMunmap(first, PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        say("FW4 starting");
+        Line l = head("FW4", "300:41 anon fixed over FC00000000 | :69 anon hint above | :94 direct fixed over | hint above");
+        void* m = (void*)(0xFC00000000ull - PG);
+        int32_t r = sceKernelMmap(m, 2 * PG, 0x3, 0x1012, -1, 0, &m);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, 2 * PG);
+        m = 0;
+        r = sceKernelMmap((void*)0xFC00000000ull, PG, 0x3, 0x1002, -1, 0, &m);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        int32_t rr = 0;
+        const long pa = alloc(2, 0, &rr);
+        if (pa >= 0) {
+            m = (void*)(0xFC00000000ull - PG);
+            r = sceKernelMapDirectMemory(&m, 2 * PG, 0x3, 0x10, pa, PG);
+            l.c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, 2 * PG);
+            m = (void*)0xFC00000000ull;
+            r = sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG);
+            l.c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 2);
+        unk(l).end();
+    }
+    {
+        say("FW5 starting");
+        Line l = head("FW5", "350:19 budget used: flex 16K | anon 16K | /data file 16K");
+        static void* maps[2048];
+        static uint64_t lens[2048];
+        const int n = fw_use_budget(maps, lens, 2048);
+        void* m = 0;
+        int32_t r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        m = 0;
+        r = sceKernelMmap(0, PG, 0x3, 0x1002, -1, 0, &m);
+        l.c(ncode(r));
+        if (r == 0)
+            sceKernelMunmap(m, PG);
+        char path[64];
+        mf_make_10k(path);
+        const int fd = sceKernelOpen(path, 0, 0);
+        if (fd >= 0) {
+            m = 0;
+            r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m);
+            l.c(ncode(r));
+            if (r == 0)
+                sceKernelMunmap(m, PG);
+            sceKernelClose(fd);
+        }
+        for (int i = 0; i < n; i++)
+            sceKernelMunmap(maps[i], lens[i]);
+        unk(l).end();
+    }
+    {
+        say("FW6 starting");
+        Line l = head("FW6", "550:82 five anon maps, five call sites: areas | renamed: areas");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 5 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fw6_a(b))).c(ncode(fw6_b(b + PG))).c(ncode(fw6_c(b + 2 * PG)));
+            l.c(ncode(fw6_d(b + 3 * PG))).c(ncode(fw6_e(b + 4 * PG))).c(' ');
+            co_scan(l, (uint64_t)b, 5 * PG);
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 5 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 5 * PG);
+            sceKernelMunmap(b, 5 * PG);
+        }
+        unk(l).end();
+    }
+    {
+        // test_550.cpp :148, 64 MiB and 16 pieces instead of 4 GiB and 48+10
+        say("TL1 starting");
+        Line l = head("TL1", "550:148 big dmem map, move 16 1M pieces | move 4 back | checked release");
+        long p = -1;
+        void* A = 0;
+        void* B = 0;
+        if (sceKernelAllocateMainDirectMemory(0x4000000, 0x10000, 0, &p) == 0 &&
+            sceKernelReserveVirtualRange(&B, 0x1000000, 0, 0x200000) == 0) {
+            sceKernelMunmap(B, 0x1000000);
+            const int32_t rm = sceKernelMapDirectMemory(&A, 0x4000000, 0x3, 0, p, 0x200000);
+            l.c(ncode(rm)).c(' ');
+            if (rm == 0) {
+                int ok = 0;
+                for (int i = 0; i < 16; i++) {
+                    sceKernelMunmap((uint8_t*)A + i * 0x100000, 0x100000);
+                    void* t = (uint8_t*)B + i * 0x100000;
+                    ok += sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000, 0x100000) == 0;
+                }
+                l.dec(ok).s("/16 | ");
+                l.c(ncode(sceKernelMunmap((uint8_t*)B + 12 * 0x100000, 4 * 0x100000))).c(' ');
+                ok = 0;
+                for (int i = 12; i < 16; i++) {
+                    void* t = (uint8_t*)A + i * 0x100000;
+                    ok += sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000, 0x100000) == 0;
+                }
+                l.dec(ok).s("/4 | ");
+            }
+            l.c(ncode(sceKernelCheckedReleaseDirectMemory(p, 0x4000000))).c(' ');
+            // whatever is still mapped was unmapped by the release
+            l.c('A');
+            nu_page(l, A);
+            l.c('B');
+            nu_page(l, B);
+        } else {
+            l.s("SKIP");
+            if (p >= 0)
+                sceKernelReleaseDirectMemory(p, 0x4000000);
+        }
+        unk(l).end();
+    }
+    {
+        say("NP1 starting");
+        Line l = head("NP1", "100:20 getpagesize | 100:2879 qprot on reserve range | :2947 on void mmap");
+        l.hex((uint64_t)getpagesize()).s(" | ");
+        void* r = 0;
+        void* s0 = 0;
+        void* e0 = 0;
+        int32_t pr = 0;
+        if (sceKernelReserveVirtualRange(&r, PG, 0, 0) == 0) {
+            l.c(ncode(sceKernelQueryMemoryProtection(r, &s0, &e0, &pr)));
+            sceKernelMunmap(r, PG);
+        }
+        l.s(" | ");
+        void* v = 0;
+        if (sceKernelMmap(0, PG, 0, 0x110, -1, 0, &v) == 0 || sceKernelMmap(0, PG, 0, 0x102, -1, 0, &v) == 0) {
+            l.c(ncode(sceKernelQueryMemoryProtection(v, &s0, &e0, &pr)));
+            sceKernelMunmap(v, PG);
+        }
+        unk(l).end();
+    }
+    // ---- TF: test_550.cpp :242 TestFileMappings. A 16 KiB scratch file of byte 1. No write is ever
+    //      made through a shared mapping of a file opened read-only (that corrupts data, :1843).
+    char path[64];
+    mf_named(path, "dmem_tf.bin");
+    static unsigned char ones[0x4000], twos[0x4000], rd[0x4000];
+    for (int k = 0; k < 0x4000; k++) {
+        ones[k] = 1;
+        twos[k] = 2;
+    }
+    auto reset_file = [&]() {
+        const int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            sceKernelWrite(fd, ones, sizeof(ones));
+            sceKernelClose(fd);
+        }
+    };
+    auto file_is = [&](int fd, unsigned char v) {
+        sceKernelLseek(fd, 0, 0);
+        const long n = sceKernelRead(fd, rd, sizeof(rd));
+        sceKernelLseek(fd, 0, 0);
+        return n == 0x4000 && rd[0] == v && rd[0x3FFF] == v ? 'y' : 'n';
+    };
+    auto file_write = [&](int fd, const unsigned char* data) {
+        sceKernelLseek(fd, 0, 0);
+        sceKernelWrite(fd, data, 0x4000);
+        sceKernelLseek(fd, 0, 0);
+    };
+    auto mem_is = [](void* m, unsigned char v) {
+        return ((volatile unsigned char*)m)[0] == v && ((volatile unsigned char*)m)[0x3FFF] == v ? 'y' : 'n';
+    };
+    auto mem_write = [](void* m, unsigned char v) {
+        for (int k = 0; k < 0x4000; k += 0x1000)
+            ((volatile unsigned char*)m)[k] = v;
+        ((volatile unsigned char*)m)[0] = v;
+        ((volatile unsigned char*)m)[0x3FFF] = v;
+    };
+    {
+        say("TF1 starting");
+        Line l = head("TF1", ":273 rw file, shared rw: map | mem 2 -> file 2 | file 1 -> mem 1");
+        reset_file();
+        const int fd = sceKernelOpen(path, 0x2, 0);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x1, fd, 0, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            mem_write(m, 2);
+            l.s(" | ").c(file_is(fd, 2));
+            file_write(fd, ones);
+            l.s(" | ").c(mem_is(m, 1));
+            sceKernelMunmap(m, 0x4000);
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
+    {
+        say("TF2 starting");
+        Line l = head("TF2", ":308 rw file, private rw: map | file 2 -> mem still 1 | mem 2 -> file still 2");
+        reset_file();
+        const int fd = sceKernelOpen(path, 0x2, 0);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x2, fd, 0, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            file_write(fd, twos);
+            l.s(" | ").c(mem_is(m, 1));
+            mem_write(m, 1);
+            l.s(" | ").c(file_is(fd, 2));
+            sceKernelMunmap(m, 0x4000);
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
+    {
+        say("TF3 starting");
+        Line l = head("TF3", ":346 write-only file, shared: rw | w | r | none | mprotect rw, mem 1 | file 2 -> mem 2 | private none, mprotect rw, mem 1");
+        reset_file();
+        const int fd = sceKernelOpen(path, 0x1, 0);
+        if (fd >= 0) {
+            static const int32_t prots[] = {0x3, 0x2, 0x1};
+            for (int32_t p : prots) {
+                void* m = 0;
+                const int32_t r = sceKernelMmap(0, 0x4000, p, 0x1, fd, 0, &m);
+                l.c(ncode(r));
+                if (r == 0)
+                    sceKernelMunmap(m, 0x4000);
+            }
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, 0x4000, 0x0, 0x1, fd, 0, &m);
+            l.s(" | ").c(ncode(r));
+            if (r == 0) {
+                const int32_t rp = sceKernelMprotect(m, 0x4000, 0x3);
+                l.s(" | ").c(ncode(rp));
+                if (rp == 0 && (sb_read_prot(m) & 0x1)) {
+                    l.c(' ').c(mem_is(m, 1));
+                    file_write(fd, twos);
+                    l.s(" | ").c(mem_is(m, 2));
+                }
+                sceKernelMunmap(m, 0x4000);
+            }
+            m = 0;
+            const int32_t r2 = sceKernelMmap(0, 0x4000, 0x0, 0x2, fd, 0, &m);
+            l.s(" | ").c(ncode(r2));
+            if (r2 == 0) {
+                const int32_t rp = sceKernelMprotect(m, 0x4000, 0x3);
+                l.c(ncode(rp));
+                if (rp == 0 && (sb_read_prot(m) & 0x1))
+                    l.c(' ').c(mem_is(m, 2));
+                sceKernelMunmap(m, 0x4000);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+    {
+        say("TF4 starting");
+        Line l = head("TF4", ":435 read-only file: rw shared | rw private | rw none | w shared | r shared private none | shared r, mprotect rw (no write) | :483 private r, mprotect rw, write: file still 1");
+        reset_file();
+        const int fd = sceKernelOpen(path, 0x0, 0);
+        if (fd >= 0) {
+            struct Case {
+                int32_t prot, flags;
+            };
+            static const Case cases[] = {{0x3, 0x1}, {0x3, 0x2}, {0x3, 0x0}, {0x2, 0x1},
+                                         {0x1, 0x1}, {0x1, 0x2}, {0x1, 0x0}};
+            for (const Case& c : cases) {
+                void* m = 0;
+                const int32_t r = sceKernelMmap(0, 0x4000, c.prot, c.flags, fd, 0, &m);
+                l.c(ncode(r));
+                if (r == 0)
+                    sceKernelMunmap(m, 0x4000);
+            }
+            void* m = 0;
+            if (sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m) == 0) {
+                l.s(" | ").c(ncode(sceKernelMprotect(m, 0x4000, 0x3))).s(" p=");
+                l.hex((uint32_t)sb_read_vprot(m));
+                sceKernelMunmap(m, 0x4000);
+            }
+            m = 0;
+            if (sceKernelMmap(0, 0x4000, 0x1, 0x2, fd, 0, &m) == 0) {
+                const int32_t rp = sceKernelMprotect(m, 0x4000, 0x3);
+                l.s(" | ").c(ncode(rp));
+                if (rp == 0 && (sb_read_prot(m) & 0x2)) {
+                    mem_write(m, 2);
+                    l.c(' ').c(file_is(fd, 1));
+                }
+                sceKernelMunmap(m, 0x4000);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -6906,8 +8453,9 @@ static void run_ex() {
 
 // after the last test: remove the scratch files the mapping tests created
 static void remove_scratch_files() {
-    static const char* names[] = {"dmem_mf.bin", "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin",
-                                  "dmem_mf4.bin"};
+    static const char* names[] = {"dmem_mf.bin",  "dmem_mf2.bin", "dmem_mf2empt", "dmem_mf3.bin",
+                                  "dmem_mf4.bin", "dmem_fm.bin",  "dmem_co.bin",  "dmem_pt.bin",
+                                  "dmem_tf.bin"};
     for (const char* name : names) {
         char path[64];
         mf_named(path, name);
@@ -7040,6 +8588,15 @@ int main(void) {
     g_screen.init();
     log_init();
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
+    {
+        char xc_path[64];
+        mf_named(xc_path, "dmem_xc.bin");
+        g_xc_fd = sceKernelOpen(xc_path, 0x0602, 0777);
+        if (g_xc_fd >= 0) {
+            const unsigned char z = 0;
+            sceKernelWrite(g_xc_fd, &z, 1);
+        }
+    }
     say("===== DMEM RELEASE TEST =====");
     {
         Line l;
@@ -7151,15 +8708,37 @@ int main(void) {
         run_rg();
         g_section = "sf";
         run_sf();
+        g_section = "av";
+        run_av_al();
+        g_section = "fm";
+        run_fm_fx();
+        g_section = "dt";
+        run_dt();
+        g_section = "co";
+        run_co();
+        g_section = "pt";
+        run_pt_tp();
+        g_section = "fw";
+        run_fw_tl_tf();
         g_section = "bt";
         run_bt();
         remove_scratch_files();
         g_section = "ex";
         run_ex();
+        g_section = "df";
+        run_df();
         g_section = "sf8";
         run_sf8();
         g_section = "last";
         run_last();
+        // the cross-check scratch file, kept open until here (not part of UL1's list)
+        if (g_xc_fd >= 0) {
+            sceKernelClose(g_xc_fd);
+            g_xc_fd = -1;
+            char xc_path[64];
+            mf_named(xc_path, "dmem_xc.bin");
+            sceKernelUnlink(xc_path);
+        }
     }
     say("===== DONE =====");
     for (;;)
