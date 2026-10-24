@@ -150,7 +150,7 @@ SECTIONS
   FW/TL/TF memory_test per-SDK rules at our SDK version (1.70 null+fixed, 2.00 re-merging, 2.50
      overlap and MAP_STACK, 3.00 0xFC00000000 limits, 3.50 ENOMEM, 5.50 call sites), the TLOU2
      pattern at 64 MiB, and every file open mode with every mapping kind (no write through a shared
-     mapping of a read-only file)
+     mapping of a read-only file); TF5 a read-only file mapped private and read-write right away
   K  address space layout: placement with hints, filling the space below the ceiling and then
      mapping direct and flexible memory, fixed maps above it, every region above 0x700000000 and the whole map from 0,
      placement with large alignments

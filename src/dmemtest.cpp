@@ -8497,6 +8497,32 @@ static void run_fw_tl_tf() {
         }
         unk(l).end();
     }
+    {
+        // a read-only file mapped private and read-write right away: is it writable (the kernel copies
+        // one byte into it: EFAULT if not), and does the file stay as it was? Private only: on the PS4
+        // a private mapping never writes to its file.
+        say("TF5 starting");
+        Line l = head("TF5", "ro file, private rw: map | kernel write into it | file still 1");
+        reset_file();
+        const int fd = sceKernelOpen(path, 0x0, 0);
+        void* m = 0;
+        const int32_t r = fd >= 0 ? sceKernelMmap(0, 0x4000, 0x3, 0x2, fd, 0, &m) : -1;
+        l.c(ncode(r));
+        if (r == 0) {
+            l.s(" vprot=").hex((uint32_t)sb_read_vprot(m));
+            int w = -1;
+            if (g_xc_fd >= 0) {
+                sceKernelLseek(g_xc_fd, 0, 0);
+                w = sceKernelRead(g_xc_fd, m, 1) == 1 ? 1 : 0;
+            }
+            l.s(" | ").c(w == 1 ? 'y' : w == 0 ? 'n' : '-');
+            l.s(" | ").c(file_is(fd, 1));
+            sceKernelMunmap(m, 0x4000);
+        }
+        if (fd >= 0)
+            sceKernelClose(fd);
+        unk(l).end();
+    }
 }
 
 // ---- XR (last of all): does code really run? Each case writes "mov eax, 42; ret", sets the protection
