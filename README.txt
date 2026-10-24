@@ -124,7 +124,8 @@ SECTIONS
   PT3, XR (last of all) does code really run: flexible and direct (0x37 as dmem_regprig, and 0x7),
      the cases known to run. Measured: direct runs code while hiding execute; pool memory and a
      file mapping given execute do not (the process is ended), so they are not run again
-  VQ11/VQ12/VQ13 where VirtualQuery refuses (EACCES) even mapped addresses
+  VQ11/VQ12/VQ13 where VirtualQuery refuses (EACCES) even mapped addresses; VQ14 what sits there:
+     each module's first segment, the main thread's TLS, a stack variable, our code, 0xFE0000000
   EX (very last) execute permission on direct, flexible, pool and anonymous memory: the result,
      the protection read back, and, only when both allow it, the result of running a small stub
   BP (first) the devs' blockpool homebrew call by call on an empty pool, each result and the pool

@@ -74,6 +74,21 @@ int32_t sceKernelMapDirectMemory2(void** addr, size_t len, int32_t type, int32_t
 int32_t sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int32_t type, long* phys);
 const char* sceKernelGetFsSandboxRandomWord(void);
 long sceKernelRead(int fd, void* buf, unsigned long nbytes);
+// module list (OpenOrbis orbis/libkernel.h; same layout as shadPS4's core/module.h)
+struct DtModuleSegment {
+    void* address;
+    uint32_t size;
+    int32_t prot;
+};
+struct DtModuleInfo {
+    size_t size;
+    char name[256];
+    DtModuleSegment segment[4];
+    uint32_t segment_count;
+    uint8_t fingerprint[20];
+};
+int32_t sceKernelGetModuleList(int32_t* handles, size_t count, size_t* available);
+int32_t sceKernelGetModuleInfo(int32_t handle, DtModuleInfo* info);
 int getpagesize(void);
 int32_t sceKernelIsStack(void* addr, void** start, void** end);
 int32_t sceKernelMlock(void* addr, size_t len);
@@ -6247,6 +6262,45 @@ static void run_followups() {
             l.c(' ');
         }
         release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        // what sits in 0x7F0000000-0xFF0000000, where VirtualQuery refuses even our own mappings:
+        // every module's first segment, the main thread's TLS (errno), a stack variable, our code,
+        // and the GnmDriver area at 0xFE0000000; each as address:vq-code
+        say("VQ14 starting");
+        Line l = head("VQ14", "module first segment, TLS, stack, our code, FE0000000: addr:vq");
+        auto vq_at = [&](const void* a) {
+            unsigned char vi[0x60];
+            my_memset(vi, 0, sizeof(vi));
+            l.hex((uint64_t)a).c(':').c(ncode(sceKernelVirtualQuery((void*)a, 0, vi, 0x48))).c(' ');
+        };
+        static int32_t handles[64];
+        size_t n = 0;
+        const int32_t r = sceKernelGetModuleList(handles, 64, &n);
+        l.s("list ").c(ncode(r)).s(" n=").dec((long long)n).s(" | ");
+        for (size_t i = 0; r == 0 && i < n && i < 64; i++) {
+            static DtModuleInfo info;
+            my_memset(&info, 0, sizeof(info));
+            info.size = sizeof(info);
+            if (sceKernelGetModuleInfo(handles[i], &info) != 0 || info.segment_count == 0) {
+                l.s("? ");
+                continue;
+            }
+            for (int k = 0; k < 24 && info.name[k]; k++)
+                l.c(info.name[k]);
+            l.c('=');
+            vq_at(info.segment[0].address);
+        }
+        int stack_var = 0;
+        l.s("| tls=");
+        vq_at(__error());
+        l.s("stack=");
+        vq_at(&stack_var);
+        l.s("code=");
+        vq_at((const void*)&run_followups);
+        l.s("gnm=");
+        vq_at((const void*)0xFE0000000ull);
         unk(l).end();
     }
     {

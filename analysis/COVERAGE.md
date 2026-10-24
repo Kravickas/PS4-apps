@@ -4,7 +4,7 @@ Generated from `src/dmemtest.cpp`.
 
 | function | called from |
 |---|---|
-| `__error` | px_ret, run_bt |
+| `__error` | px_ret, run_bt, run_followups |
 | `mlock` | run_px |
 | `mmap` | px3_mk, px_mk, run_bt, run_mf3 |
 | `mprotect` | run_px, run_rg |
@@ -25,6 +25,8 @@ Generated from `src/dmemtest.cpp`.
 | `sceKernelGetDirectMemorySize` | main |
 | `sceKernelGetDirectMemoryType` | dt_area, gdt_line, run_av_al, run_bp, run_ms, run_pt_tp, run_sf, xc_check_type_sources |
 | `sceKernelGetFsSandboxRandomWord` | run_df |
+| `sceKernelGetModuleInfo` | run_followups |
+| `sceKernelGetModuleList` | run_followups |
 | `sceKernelGetPrtAperture` | run_ms |
 | `sceKernelIsStack` | run_ms |
 | `sceKernelLseek` | fm_read_at, run_fw_tl_tf, run_mf24, run_mf3, xc_can_read, xc_can_write |
