@@ -6530,6 +6530,37 @@ static void run_last() {
             }
             unk(l).end();
         }
+        {
+            // the state of source and destination after a move: VirtualQuery type/prot/flags of
+            // both, the data, the pool counters before and after
+            say("PB4 starting");
+            Line l = head("PB4", "move: counters | code n | counters | src vq, data | dest vq, data");
+            uint8_t* src = R + 2 * blk;
+            uint8_t* dst = R + 3 * blk;
+            if (sceKernelMemoryPoolCommit(src, blk, 0, 0x3, 0) == 0) {
+                *(volatile uint32_t*)src = 0x9ABCDEF0;
+                stats(l).s(" | ");
+                PbEntry e;
+                my_memset(&e, 0, sizeof(e));
+                e.opcode = 5;
+                e.addr = dst;
+                e.len = (uint64_t)src;
+                e.rest = blk;
+                int32_t n = -1;
+                l.c(ncode(sceKernelMemoryPoolBatch(&e, 1, &n, 0))).c(' ').dec(n).s(" | ");
+                stats(l).s(" | ");
+                uint8_t* const ends[] = {src, dst};
+                for (uint8_t* at : ends) {
+                    vq_field(l, (uint64_t)at, (uint64_t)R);
+                    if (sb_read_vprot(at) & 0x1)
+                        l.c(' ').hex(*(volatile uint32_t*)at);
+                    l.s(at == src ? " | " : "");
+                }
+            } else {
+                l.s("SKIP");
+            }
+            unk(l).end();
+        }
             sceKernelMunmap(rv, 0x200000);
         }
     }
@@ -7918,6 +7949,27 @@ static void run_co() {
             return sceKernelMmap((void*)at, 0x4000, 0x1, 0x10, g_co_fd, 0x20000 + i * 0x4000, &o);
         }, 0x1);
         sceKernelClose(g_co_fd);
+    }
+    // CO1 and CO4 again with CPU-only protection: does the GPU protection keep them apart?
+    co_kind("CO9", "CO1 with p3: anon 1010", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0x3, 0x1010, -1, 0, &o);
+    }, 0x1);
+    g_co_R = av_free_area();
+    if (g_co_R >= 0) {
+        co_kind("CO10", "CO4 with p3: direct 10 (neighbouring phys)", 0x20000, [](uint64_t at, int i) {
+            long p = -1;
+            const long want = g_co_R + i * 0x20000;
+            int32_t r = sceKernelAllocateDirectMemory(want, want + 0x20000, 0x20000, 0x20000, 0, &p);
+            if (r != 0)
+                return r;
+            void* o = (void*)at;
+            r = sceKernelMapDirectMemory(&o, 0x20000, 0x3, 0x10, p, 0);
+            if (r != 0)
+                sceKernelReleaseDirectMemory(p, 0x20000);
+            return r;
+        }, 0x1);
+        sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000);
     }
     // :3441 NoCoalesce reservations, the middle one without the flag
     co_kind("CO8", ":3441 reserve 400111, middle 111", 0x20000, [](uint64_t at, int i) {
