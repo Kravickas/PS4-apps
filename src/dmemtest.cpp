@@ -6304,6 +6304,40 @@ static void run_followups() {
         unk(l).end();
     }
     {
+        // VirtualQuery with flag 1 (the next mapping) from just below 0x7F0000000, where the next
+        // mapping lies inside the refused range: a) a system module, b) our own page at 0x7F0000000
+        say("VQ15 starting");
+        Line l = head("VQ15", "vq1 from 7EFFFC000: vq0 there | a) next=module | b) own page at 7F0000000");
+        auto vq1 = [&](uint64_t at) {
+            unsigned char vi[0x60];
+            my_memset(vi, 0, sizeof(vi));
+            const int32_t r = sceKernelVirtualQuery((void*)at, 1, vi, 0x48);
+            l.c(ncode(r));
+            if (r == 0) {
+                uint64_t st = 0;
+                for (int k = 7; k >= 0; k--)
+                    st = (st << 8) | vi[k];
+                l.c(':').hex(st);
+            }
+        };
+        unsigned char v0[0x60];
+        my_memset(v0, 0, sizeof(v0));
+        l.c(ncode(sceKernelVirtualQuery((void*)0x7EFFFC000ull, 0, v0, 0x48))).s(" | ");
+        vq1(0x7EFFFC000ull);
+        l.s(" | ");
+        int32_t rr = 0;
+        const long pa = alloc(1, 3, &rr);
+        void* m = (void*)0x7F0000000ull;
+        const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+        l.c(ncode(r)).c(' ');
+        if (r == 0) {
+            vq1(0x7EFFFC000ull);
+            sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
         say("FL6 starting");
         Line l = head("FL6", "avail drop: 16 maps of 64K | one 1M | 17 maps of 64K");
         static void* maps[17];
