@@ -143,7 +143,8 @@ SECTIONS
   DT memory_test DirectTest findings: double mappings, contents after release, partial release,
      backing per type, type changes and which direct memory areas merge
   CO memory_test coalescing findings: for each kind of mapping, the areas after outside-in mapping,
-     a middle mapping, a rename, an mprotect and an mlock; CO9/CO10 = CO1/CO4 without GPU protection
+     a middle mapping, a rename, an mprotect and an mlock; CO9/CO10 = CO1/CO4 without GPU protection;
+     CO11/CO12 reservations mapped left to right, right to left and in the middle of a range
   PT/TP memory_test protect / type protect findings: reserved splits, one mprotect over several
      kinds, execute on a file mapping, mprotect alignment, mtypeprotect with type 10, splits and
      merges by type, and where mtypeprotect fails (never GPU protection on reserved memory)

@@ -6561,6 +6561,32 @@ static void run_last() {
             }
             unk(l).end();
         }
+        {
+            // move errors: a source that is not committed, a destination already committed, a
+            // destination not 64 KiB aligned
+            say("PB5 starting");
+            Line l = head("PB5", "move: src reserved | dest committed | dest+4000: code n");
+            uint8_t* a = R + 4 * blk;
+            uint8_t* b = R + 5 * blk;
+            uint8_t* c = R + 6 * blk;
+            auto mv = [&](void* dst, void* src) {
+                PbEntry e;
+                my_memset(&e, 0, sizeof(e));
+                e.opcode = 5;
+                e.addr = dst;
+                e.len = (uint64_t)src;
+                e.rest = blk;
+                int32_t n = -1;
+                l.c(ncode(sceKernelMemoryPoolBatch(&e, 1, &n, 0))).c(' ').dec(n).s(" | ");
+            };
+            mv(b, a); // a is only reserved
+            if (sceKernelMemoryPoolCommit(a, blk, 0, 0x3, 0) == 0 &&
+                sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0) == 0) {
+                mv(b, a);              // b is committed
+                mv(c + 0x4000, a);     // not aligned
+            }
+            unk(l).end();
+        }
             sceKernelMunmap(rv, 0x200000);
         }
     }
@@ -7970,6 +7996,37 @@ static void run_co() {
             return r;
         }, 0x1);
         sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000);
+    }
+    // reservations in the middle of a larger range (pieces 1-5 of 7): left to right (1, 2), right to
+    // left (5, 4), then the middle (3); the areas after each step
+    for (int shared = 1; shared >= 0; shared--) {
+        say(shared ? "CO11" : "CO12");
+        Line l = head(shared ? "CO11" : "CO12",
+                      shared ? "void 111 in a 7-piece range: 1,2 | 5,4 | 3" : "void 110 in a 7-piece range: 1,2 | 5,4 | 3");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 7 * 0x20000, 0, 0) == 0) {
+            const uint64_t b = (uint64_t)a;
+            const int32_t fl = shared ? 0x111 : 0x110;
+            auto put = [&](int i) {
+                void* o = 0;
+                l.c(ncode(sceKernelMmap((void*)(b + i * 0x20000), 0x20000, 0, fl, -1, 0, &o)));
+            };
+            put(1);
+            put(2);
+            l.c(' ');
+            co_scan(l, b, 7 * 0x20000);
+            l.s(" | ");
+            put(5);
+            put(4);
+            l.c(' ');
+            co_scan(l, b, 7 * 0x20000);
+            l.s(" | ");
+            put(3);
+            l.c(' ');
+            co_scan(l, b, 7 * 0x20000);
+            sceKernelMunmap(a, 7 * 0x20000);
+        }
+        unk(l).end();
     }
     // :3441 NoCoalesce reservations, the middle one without the flag
     co_kind("CO8", ":3441 reserve 400111, middle 111", 0x20000, [](uint64_t at, int i) {
