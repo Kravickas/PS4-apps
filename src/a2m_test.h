@@ -32,7 +32,7 @@
  * captures run on every launch. */
 #include "ps_a2m.h"
 
-#define A2_BUILD "a2m-2"
+#define A2_BUILD "a2m-3"
 #define A2_TIMEOUT_US 2000000u
 #define A2_W 64
 #define A2_PX (A2_W * A2_W)
@@ -590,9 +590,13 @@ static void a2_f(uint32_t b) {
 }
 
 /* ---- state file ---- */
+/* inflight: the test running (or, | A2_CAPTURE, the visual capture) when the app ended;
+   bad_variants: pixel shader variants that crashed or hung (A2_GROUP of the variant). */
+#define A2_CAPTURE 0x10000
 struct A2State {
     char build[16];
     int32_t next, inflight, regread_bad;
+    uint32_t bad_variants;
 };
 static void a2_state_save(const struct A2State* st) {
     int fd = sceKernelOpen(g_a2_state_path, 0x601, 0x1FF);
@@ -1235,6 +1239,10 @@ static int64_t a2_expect(const struct A2Test* t, int x, int y, uint32_t A, uint3
     uint32_t full = a2_full(t->ns), m = full, col0 = a2_colfmt(t) & 0xF,
              col1 = (a2_colfmt(t) >> 4) & 0xF, cbsm = a2_cbsm(t), r = a2_a2m(t);
     int px = x, py = y;
+    /* The triangle starts at window (0, 0): with VTX_WINDOW_OFFSET_ENABLE it starts at screen
+       (wx, wy), so the strips x < wx and y < wy are not drawn. */
+    if (x < (int)(t->wofs & 0xFFFF) || y < (int)(t->wofs >> 16))
+        return 0;
     if (t->hyp == H_WIN && h) {
         px -= (int)(t->wofs & 0xFFFF);
         py -= (int)(t->wofs >> 16);
@@ -1285,6 +1293,12 @@ static int64_t a2_expect(const struct A2Test* t, int x, int y, uint32_t A, uint3
 static int a2_colour_modelled(const struct A2Test* t) {
     return !t->nocol && t->cbf != CBF_NONE && k_a2_cbf[t->cbf].cmp && (a2_cbtm(t) & 1) &&
            (a2_cbsm(t) & 1) && (a2_colfmt(t) & 0xF) && a2_exports_mrt0(t->ps);
+}
+/* The variants a crash or hang marks bad: all four MRTZ.a exporters together (one shader
+   recompiler path), otherwise the variant alone. */
+static uint32_t a2_group(int v) {
+    uint32_t z = (1u << V_ZA) | (1u << V_AZ) | (1u << V_ZAB) | (1u << V_ZA0);
+    return (z >> v) & 1 ? z : 1u << v;
 }
 static int a2_nh(const struct A2Test* t) {
     return (t->hyp == H_NONE || t->hyp == H_NOMODEL) ? 1 : 2;
@@ -2002,8 +2016,7 @@ static void a2_report_sweep(void) {
 }
 
 /* ---- passes ---- */
-struct A2State;
-static int g_a2_regread_ok = 1;
+static uint32_t g_a2_bad; /* A2State.bad_variants of this launch */
 
 static void a2_params(struct A2Ctx* c, const struct A2Test* t) {
     my_memset(c->tab, 0, 64 * 4);
@@ -2107,6 +2120,12 @@ static int a2_run_test(struct A2Ctx* c, const struct A2Test* t, int regread, int
             struct A2Test o;
             a2_rnd_test(&o, t, k);
             my_memset(&g_tot, 0, sizeof(g_tot));
+            if ((g_a2_bad >> o.ps) & 1) {
+                a2_s("| ");
+                a2_u((unsigned long long)k);
+                a2_s(" | skipped: its pixel shader variant crashed or hung earlier |\n");
+                continue;
+            }
             a2_params(c, &o);
             for (int pass = 0; pass < 2; pass++) {
                 a2_fill(c, &o, pass);
@@ -2196,7 +2215,7 @@ static int a2_run_test(struct A2Ctx* c, const struct A2Test* t, int regread, int
 #define A2V_Y0 120 /* gen_ps_a2m.py VIS_Y0, VIS_PITCH, VIS_H, VIS_X */
 #define A2V_PITCH 312
 #define A2V_H 256
-static const int k_a2v_x[4] = {420, 692, 964, 1236};
+static const int k_a2v_x[4] = {520, 792, 1064, 1336};
 
 static uint32_t* g_a2v_tab;               /* vis's table */
 static uint32_t* g_a2v_res[A2_VIS_SLOTS]; /* per pixel: [7:0] GPU, [15:8] model (h0) */
@@ -2224,12 +2243,15 @@ static void a2v_set_rows(void) {
 }
 
 /* The visual captures (every launch): one pass per V test, its result next to the model. */
-static int a2v_capture(struct A2Ctx* c) {
+static void a2_state_save(const struct A2State* st);
+static int a2v_capture(struct A2Ctx* c, struct A2State* st) {
     for (int k = 0; k < A2_NTESTS; k++) {
         const struct A2Test* t = &k_a2_tests[k];
-        if (!t->vis)
+        if (!t->vis || ((g_a2_bad >> t->ps) & 1))
             continue;
         int slot = t->vis - 1;
+        st->inflight = k | A2_CAPTURE;
+        a2_state_save(st);
         my_memset(&g_tot, 0, sizeof(g_tot));
         a2_params(c, t);
         a2_fill(c, t, 0);
@@ -2245,6 +2267,8 @@ static int a2v_capture(struct A2Ctx* c) {
         g_a2v_mis[slot] = mis;
         g_a2v_unwritten[slot] = g_a2_unwritten;
     }
+    st->inflight = -1;
+    a2_state_save(st);
     return 0;
 }
 
@@ -2272,6 +2296,39 @@ static int a2v_cat(char* o, const char* s) {
         n++;
     }
     return n;
+}
+
+/* Text at (x, y) wrapped at spaces to maxw pixels; returns the y of the next line. */
+static int a2v_wrap(unsigned char* b, int x, int y, const char* s, int maxw,
+                    const unsigned char* col) {
+    char line[200];
+    int n = 0, last_sp = -1;
+    for (int i = 0;; i++) {
+        char ch = s[i];
+        line[n] = 0;
+        if (ch == 0) {
+            if (n)
+                ui_text(b, x, y, line, col);
+            return y + 26;
+        }
+        line[n++] = ch;
+        line[n] = 0;
+        if (ch == ' ')
+            last_sp = n - 1;
+        if (ui_text_width(line) > maxw && last_sp > 0) {
+            line[last_sp] = 0;
+            ui_text(b, x, y, line, col);
+            y += 26;
+            int rest = n - last_sp - 1;
+            for (int j = 0; j < rest; j++)
+                line[j] = line[last_sp + 1 + j];
+            n = rest;
+            last_sp = -1;
+            for (int j = 0; j < n; j++)
+                if (line[j] == ' ')
+                    last_sp = j;
+        }
+    }
 }
 
 /* The page's text in a UI buffer (only when the page or the microscope moves). The panels stay
@@ -2323,7 +2380,7 @@ static void a2v_ui(void) {
         p += a2v_cat(p, "  ");
         p += a2v_cat(p, v->what);
         *p = 0;
-        ui_text(b, 40, y0 + 22, t, white);
+        int yy = a2v_wrap(b, 40, y0 + 22, t, k_a2v_x[0] - 60, white);
         p = t;
         p += ui_fmt_int(p, v->ns);
         p += a2v_cat(p, " samples, DB_ALPHA_TO_MASK 0x");
@@ -2334,15 +2391,15 @@ static void a2v_ui(void) {
                 *p++ = h[(a >> (28 - 4 * i)) & 15];
         }
         *p = 0;
-        ui_text(b, 40, y0 + 48, t, grey);
+        ui_text(b, 40, yy, t, grey);
         p = t;
         p += a2v_cat(p, "pixels differing from the model: ");
         p += ui_fmt_int(p, (long)g_a2v_mis[slot]);
         p += a2v_cat(p, " of 4096");
         *p = 0;
-        ui_text(b, 40, y0 + 74, t, g_a2v_mis[slot] ? red : green);
+        ui_text(b, 40, yy + 26, t, g_a2v_mis[slot] ? red : green);
         if (g_a2v_unwritten[slot])
-            ui_text(b, 40, y0 + 100, "readback incomplete (unwritten samples)", red);
+            ui_text(b, 40, yy + 52, "readback incomplete (unwritten samples)", red);
     }
     for (int i = 0; i < 4; i++)
         g_ui.rect[i] = g_ui.pill[i] = -1e6f;
@@ -2414,14 +2471,27 @@ static int a2m_run(void) {
     a2_paths();
     struct A2State st;
     int resumed = a2_state_load(&st), tests_done = 0;
-    if (resumed && st.next >= A2_NTESTS && st.inflight < 0)
-        tests_done = 1;
     if (!resumed) {
         my_memset(&st, 0, sizeof(st));
         for (int i = 0; A2_BUILD[i]; i++)
             st.build[i] = A2_BUILD[i];
         st.inflight = -1;
     }
+    /* The app ended during a test or a capture: skip that pixel shader variant from now on (an
+       emulator that cannot translate it crashes; RND's variants are its own). */
+    if (st.inflight >= 0) {
+        const struct A2Test* t = &k_a2_tests[st.inflight & 0xFFFF];
+        if (!a2_streq(t->id, "RND"))
+            st.bad_variants |= a2_group(t->ps);
+        if (st.inflight & A2_CAPTURE) {
+            trace_msg("a2m: the app ended during a visual capture; its variant is skipped now\n");
+            st.inflight = -1;
+            a2_state_save(&st);
+        }
+    }
+    g_a2_bad = st.bad_variants;
+    if (resumed && st.next >= A2_NTESTS && st.inflight < 0)
+        tests_done = 1;
     g_a2c_ok = a2_alloc(&g_a2c);
     if (!g_a2c_ok) {
         trace_msg("a2m: allocation failed\n");
@@ -2441,7 +2511,8 @@ static int a2m_run(void) {
         if (st.inflight >= 0) {
             a2_s("### ");
             a2_s(k_a2_tests[st.inflight].id);
-            a2_s(": HUNG - the app ended before its fence\nsummary ");
+            a2_s(": HUNG - the app ended before its fence (crash or GPU hang); its pixel shader "
+                 "variant is skipped from now on\nsummary ");
             a2_s(k_a2_tests[st.inflight].id);
             a2_s(": HUNG\n\n");
             if (st.inflight == 0)
@@ -2453,6 +2524,21 @@ static int a2m_run(void) {
         a2_flush();
         for (int k = st.next; k < A2_NTESTS; k++) {
             const struct A2Test* t = &k_a2_tests[k];
+            if ((st.bad_variants >> t->ps) & 1) {
+                a2_s("### ");
+                a2_s(t->id);
+                a2_s(": ");
+                a2_s(t->what);
+                a2_s("\nSKIPPED: its pixel shader variant ");
+                a2_s(k_a2_vname[t->ps]);
+                a2_s(" crashed or hung earlier\nsummary ");
+                a2_s(t->id);
+                a2_s(": SKIPPED\n\n");
+                st.next = k + 1;
+                a2_state_save(&st);
+                a2_flush();
+                continue;
+            }
             st.inflight = k;
             st.next = k;
             a2_state_save(&st);
@@ -2463,6 +2549,8 @@ static int a2m_run(void) {
                 a2_s(": HUNG\n\n");
                 if (k == 0)
                     st.regread_bad = 1;
+                if (!a2_streq(t->id, "RND"))
+                    st.bad_variants |= a2_group(t->ps);
                 st.inflight = -1;
                 st.next = k + 1;
                 a2_state_save(&st);
@@ -2485,7 +2573,7 @@ static int a2m_run(void) {
         trace_msg("a2m: visual pages unavailable (allocation)\n");
         return 0;
     }
-    if (a2v_capture(c) < 0)
+    if (a2v_capture(c, &st) < 0)
         return -1;
     a2v_set_rows();
     g_a2v_ok = 1;

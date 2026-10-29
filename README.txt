@@ -36,10 +36,11 @@ TRACE
   statistics every 60 frames.
   A2M_TEST (src/main.c, on): ShadCube4 a2m.log in the trace log's folder, the alpha-to-mask
   (DB_ALPHA_TO_MASK) test, run before the main loop; every result is checked against the model in
-  src/a2m_test.h. After a GPU hang close the app and launch it again: it logs the hung test and
-  continues (state: a2m.state there). Once finished it does not run again until a2m.state is
-  deleted. Then the visual pages replace the scene: per capture the GPU's coverage, the model's,
-  their difference and a per-sample microscope (touch pad: next page, d-pad: move the microscope).
+  src/a2m_test.h. After a GPU hang or a crash close the app and launch it again: it logs the
+  test, skips its pixel shader variant from then on and continues (state: a2m.state there).
+  Once finished it does not run again until a2m.state is deleted. Then the visual pages replace
+  the scene: per capture the GPU's coverage, the model's, their difference and a per-sample
+  microscope (touch pad: next page, d-pad: move the microscope).
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top

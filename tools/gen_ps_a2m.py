@@ -55,7 +55,7 @@ EXP_F32 = ["exp mrt0 v10, v10, v10, v9 done vm"]
 # sample grid), 1 / ns (float), -, result V# (8..11). Result dword per pixel: [7:0] GPU mask,
 # [15:8] model mask.
 VIS_Y0, VIS_PITCH, VIS_H = 120, 312, 256
-VIS_X = (420, 692, 964, 1236)
+VIS_X = (520, 792, 1064, 1336)
 
 
 def vis_shader():
@@ -345,7 +345,9 @@ def regs_used(lines):
 
 
 def build(name, body):
-    lines = ["s_mov_b32 vcc_hi, HDRLEN"] + body + ["s_endpgm"]
+    # The header token s_mov_b32 vcc_hi, <literal> as raw words: llvm-mc would encode a small value
+    # as an inline constant (0xBEEB03xx), the SDK token is always the literal form 0xBEEB03FF.
+    lines = [".long 0xbeeb03ff", ".long HDRLEN"] + body + ["s_endpgm"]
     words = assemble("\n".join(lines).replace("HDRLEN", "0x7fff") + "\n")
     if len(words) % 2:
         lines.insert(len(lines) - 1, "s_nop 0")
