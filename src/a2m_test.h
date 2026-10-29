@@ -32,7 +32,7 @@
  * captures run on every launch. */
 #include "ps_a2m.h"
 
-#define A2_BUILD "a2m-3"
+#define A2_BUILD "a2m-5"
 #define A2_TIMEOUT_US 2000000u
 #define A2_W 64
 #define A2_PX (A2_W * A2_W)
@@ -48,7 +48,10 @@
 #define A2_ZP_RBS 16
 #define A2_ZP_BLOCKS 17 /* the test draw + 16 isolation draws */
 #define A2_UNWRITTEN 0xA5A5A5A5u
-#define A2_VIS_SLOTS 12
+#define A2_VIS_SLOTS 18
+#define A2_TEX_W 256
+#define A2_TEX_LEVELS 4 /* 256 .. 32: LINEAR_ALIGNED levels >= 32 px pack without padding */
+#define A2_NOT_SHADED 0xFFFFFFFFu
 
 /* CP_COHER_CNTL (AMD gfx7 register table) */
 #define A2_COHER_DEST_BASE_0 (1u << 0)
@@ -107,6 +110,8 @@ enum {
     V_M1,
     V_M1O,
     V_ITER,
+    V_NOA,
+    V_TEX,
     V_CLR,
     V_RD,
     V_VIS,
@@ -125,6 +130,8 @@ static const char* const k_a2_vname[A2_NSH] = {"t_f32 (MRT0 c, c, c, A)",
                                                "t_m1 (MRT0.a = table 4, MRT1.a = A)",
                                                "t_m1o (MRT1.a = A only)",
                                                "t_iter (MRT0.a = A + sample id x table 11)",
+                                               "t_noa (MRT0 c, c, c, alpha not exported)",
+                                               "t_tex (net texture alpha, perspective plane)",
                                                "clr",
                                                "rd",
                                                "vis"};
@@ -145,6 +152,8 @@ static const struct {
     {a2m_t_m1_bin, sizeof(a2m_t_m1_bin), A2M_T_M1_RSRC1},
     {a2m_t_m1o_bin, sizeof(a2m_t_m1o_bin), A2M_T_M1O_RSRC1},
     {a2m_t_iter_bin, sizeof(a2m_t_iter_bin), A2M_T_ITER_RSRC1},
+    {a2m_t_noa_bin, sizeof(a2m_t_noa_bin), A2M_T_NOA_RSRC1},
+    {a2m_t_tex_bin, sizeof(a2m_t_tex_bin), A2M_T_TEX_RSRC1},
     {a2m_clr_bin, sizeof(a2m_clr_bin), A2M_CLR_RSRC1},
     {a2m_rd_bin, sizeof(a2m_rd_bin), A2M_RD_RSRC1},
     {a2m_vis_bin, sizeof(a2m_vis_bin), A2M_VIS_RSRC1},
@@ -167,7 +176,7 @@ static const struct {
 /* Alpha tables: the coarse table (128 specials, then 896 steps over [0, 1], one value per 2 x 2
    quad), one value everywhere, the visual ramp (quad q: q / 1023) and net, random values, or the
    16-bit sweep (pass j, quad q: raw value 1024 j + q). */
-enum { AK_COARSE, AK_UNIFORM, AK_RAMP, AK_NET, AK_RANDOM, AK_SWEEP16 };
+enum { AK_COARSE, AK_UNIFORM, AK_RAMP, AK_NET, AK_RANDOM, AK_SWEEP16, AK_TEX };
 /* The second table B: none, a random alpha, a random sample mask, a random kill flag (bit 0). */
 enum { BM_NONE, BM_ALPHA, BM_MASK, BM_KILL };
 /* Hypotheses (h0 / h1) where the a2m-1 run left a question open. */
@@ -181,6 +190,7 @@ enum {
     H_SNORM,   /* SNORM16 export: h0 v / 32768, h1 v / 32767 (both: v <= 0 is 0) */
     H_MRT1,    /* h0 MRT0's alpha only, h1 MRT1's alpha */
     H_NOMODEL, /* UINT16 / SINT16 export: no model, the runs are logged */
+    H_NOALPHA, /* MRT0 exported without alpha: h0 no alpha-to-mask, h1 alpha read as 0 */
 };
 static const char* const k_a2_hname[][2] = {
     {"model", "-"},
@@ -192,6 +202,7 @@ static const char* const k_a2_hname[][2] = {
     {"v / 32768", "v / 32767"},
     {"MRT0 only", "MRT1's alpha"},
     {"no model", "-"},
+    {"no alpha-to-mask", "alpha read as 0"},
 };
 
 struct A2Test {
@@ -263,6 +274,10 @@ static const struct A2Test k_a2_tests[] = {
     A2_T(.id = "G18", .what = "export FP16_ABGR (pkrtz)", .ps = V_F16, .colfmt = 4, .refine = 1),
     A2_T(.id = "G19", .what = "export UNORM16_ABGR (pknorm_u16)", .ps = V_U16, .colfmt = 5,
          .refine = 1, .nocol = 1, .hyp = H_U16ONE),
+    A2_T(.id = "G27", .what = "MRT0 exported without its alpha (exp en 0x7), COL0 32_ABGR",
+         .ps = V_NOA, .hyp = H_NOALPHA),
+    A2_T(.id = "G28", .what = "as G27, 8x D1", .ns = 8, .a2m = A2_D1, .ps = V_NOA,
+         .hyp = H_NOALPHA),
     A2_T(.id = "G26", .what = "export UNORM16_ABGR (pknorm_u16), 4x offsets 0123 r0", .ps = V_U16,
          .colfmt = 5, .a2m = A2_O0123, .nocol = 1, .hyp = H_U16ONE),
     A2_T(.id = "G20", .what = "CB_SHADER_MASK MRT0 = 0x8 (alpha only)", .cbsm = 0x8, .nocol = 1),
@@ -454,23 +469,36 @@ static const struct A2Test k_a2_tests[] = {
     A2T16("X16t", "every SNORM16_ABGR alpha (raw), 4x D1", 6, 0x7FFFu, H_SNORM, A2_D1),
     A2T16("X16i", "every UINT16_ABGR alpha (raw), 4x 0123 r0", 7, 1u, H_NOMODEL, A2_O0123),
     A2T16("X16j", "every SINT16_ABGR alpha (raw), 4x 0123 r0", 8, 1u, H_NOMODEL, A2_O0123),
+    /* the textured net (t_tex): the model takes the alpha the GPU sampled (also visual) */
+    A2_T(.id = "N01", .what = "textured net, 4x D1", .a2m = A2_D1, .ps = V_TEX, .kind = AK_TEX,
+         .vis = 1),
+    A2_T(.id = "N02", .what = "textured net, 4x D1, A2M_NUM_SAMPLES 0 (Gnm default DB_EQAA)",
+         .a2m = A2_D1, .a2m_ns = 0, .ps = V_TEX, .kind = AK_TEX, .vis = 2),
+    A2_T(.id = "N03", .what = "textured net, 4x D0 (Gnm AlphaToMaskControl::init offsets)",
+         .ps = V_TEX, .kind = AK_TEX, .vis = 3),
+    A2_T(.id = "N04", .what = "textured net, 8x D1", .ns = 8, .a2m = A2_D1, .ps = V_TEX,
+         .kind = AK_TEX, .vis = 4),
+    A2_T(.id = "N05", .what = "textured net, 8x D1, A2M_NUM_SAMPLES 0 (Gnm default DB_EQAA)",
+         .ns = 8, .a2m = A2_D1, .a2m_ns = 0, .ps = V_TEX, .kind = AK_TEX, .vis = 5),
+    A2_T(.id = "N06", .what = "textured net, 1x D1", .ns = 1, .a2m = A2_D1, .ps = V_TEX,
+         .kind = AK_TEX, .vis = 6),
     /* the visual pages' captures (also logged here) */
-    A2_T(.id = "V01", .what = "ramp, 4x D1", .a2m = A2_D1, .kind = AK_RAMP, .vis = 1),
-    A2_T(.id = "V02", .what = "ramp, 4x D0", .kind = AK_RAMP, .vis = 2),
-    A2_T(.id = "V03", .what = "ramp, 8x D1", .ns = 8, .a2m = A2_D1, .kind = AK_RAMP, .vis = 3),
-    A2_T(.id = "V04", .what = "ramp, 2x D1", .ns = 2, .a2m = A2_D1, .kind = AK_RAMP, .vis = 4),
-    A2_T(.id = "V05", .what = "ramp, 1x D1", .ns = 1, .a2m = A2_D1, .kind = AK_RAMP, .vis = 5),
+    A2_T(.id = "V01", .what = "ramp, 4x D1", .a2m = A2_D1, .kind = AK_RAMP, .vis = 7),
+    A2_T(.id = "V02", .what = "ramp, 4x D0", .kind = AK_RAMP, .vis = 8),
+    A2_T(.id = "V03", .what = "ramp, 8x D1", .ns = 8, .a2m = A2_D1, .kind = AK_RAMP, .vis = 9),
+    A2_T(.id = "V04", .what = "ramp, 2x D1", .ns = 2, .a2m = A2_D1, .kind = AK_RAMP, .vis = 10),
+    A2_T(.id = "V05", .what = "ramp, 1x D1", .ns = 1, .a2m = A2_D1, .kind = AK_RAMP, .vis = 11),
     A2_T(.id = "V06", .what = "ramp, 4x D1, EQAA_DISABLE", .a2m = A2_D1, .eqaa_dis = 1,
-         .kind = AK_RAMP, .vis = 6),
+         .kind = AK_RAMP, .vis = 12),
     A2_T(.id = "V07", .what = "ramp, 4x D1, COVERAGE_TO_MASK (MRTZ.a only, no colour)",
          .a2m = A2_D1, .ps = V_ZA0, .dbsc = A2_COV2MASK, .cbf = CBF_NONE, .colfmt = A2_ZERO_COL,
-         .cbsm = A2_ZERO_MASK, .kind = AK_RAMP, .vis = 7),
+         .cbsm = A2_ZERO_MASK, .kind = AK_RAMP, .vis = 13),
     A2_T(.id = "V08", .what = "ramp, 8x D1, ALPHA_TO_MASK_NUM_SAMPLES 2 (4)", .ns = 8, .a2m = A2_D1,
-         .a2m_ns = 2, .kind = AK_RAMP, .vis = 8),
-    A2_T(.id = "V09", .what = "net, 4x D1", .a2m = A2_D1, .kind = AK_NET, .vis = 9),
-    A2_T(.id = "V10", .what = "net, 4x D0", .kind = AK_NET, .vis = 10),
-    A2_T(.id = "V11", .what = "net, 8x D1", .ns = 8, .a2m = A2_D1, .kind = AK_NET, .vis = 11),
-    A2_T(.id = "V12", .what = "net, 1x D1", .ns = 1, .a2m = A2_D1, .kind = AK_NET, .vis = 12),
+         .a2m_ns = 2, .kind = AK_RAMP, .vis = 14),
+    A2_T(.id = "V09", .what = "net, 4x D1", .a2m = A2_D1, .kind = AK_NET, .vis = 15),
+    A2_T(.id = "V10", .what = "net, 4x D0", .kind = AK_NET, .vis = 16),
+    A2_T(.id = "V11", .what = "net, 8x D1", .ns = 8, .a2m = A2_D1, .kind = AK_NET, .vis = 17),
+    A2_T(.id = "V12", .what = "net, 1x D1", .ns = 1, .a2m = A2_D1, .kind = AK_NET, .vis = 18),
     /* random configurations and alphas (RND, generated from the seed), then 16 coverage samples
        without targets (counted by ZPASS_DONE only; may hang) */
     A2_T(.id = "RND", .what = "random configurations (48), random alphas", .kind = AK_RANDOM,
@@ -676,6 +704,9 @@ struct A2Ctx {
     void* scratch;   /* the readback pass's 1-sample target */
     void* sh[A2_NSH];
     void* vs;
+    void* vs_net; /* the textured net's vertex shader */
+    void* tex;    /* the net texture: RGBA8 256 x 256, 4 levels, LINEAR_ALIGNED */
+    float* verts; /* the net plane: 3 vertices (x, y, z, w, u, v, -, -) */
 };
 static struct A2Ctx g_a2c;
 static int g_a2c_ok;
@@ -818,11 +849,20 @@ static void a2_targets(struct PM4Builder* b, struct A2Ctx* c, uint32_t ns, uint3
    PERSP_CENTER + POS_X / POS_Y_FLOAT (v2, v3), + ANCILLARY (v4) for t_iter; window offset wofs
    (PA_SU_SC_MODE_CNTL.VTX_WINDOW_OFFSET_ENABLE when set). */
 static void a2_common(struct PM4Builder* b, struct A2Ctx* c, uint32_t zbits, int v, uint32_t wofs) {
-    uint64_t va = (uint64_t)(uintptr_t)c->vs;
-    uint32_t vr[4] = {(uint32_t)(va >> 8), (uint32_t)(va >> 40), A2M_VS_A2M_RSRC1, 1u << 1};
     uint32_t ena = v == V_ITER ? 0x2302u : 0x302u;
-    pm4_set_sh_regs(b, SH_VS_PGM_LO, vr, 4);
-    pm4_set_sh_reg(b, SH_VS_USER_DATA_0, zbits);
+    if (v == V_TEX) { /* vs_net: the V# of the plane's vertices in VS_USER_DATA_0..3 */
+        uint64_t va = (uint64_t)(uintptr_t)c->vs_net;
+        uint32_t vr[4] = {(uint32_t)(va >> 8), (uint32_t)(va >> 40), A2M_VS_NET_RSRC1, 4u << 1};
+        uint32_t vb[4];
+        build_vsharp_strided(vb, c->verts, 3 * 32, 32);
+        pm4_set_sh_regs(b, SH_VS_PGM_LO, vr, 4);
+        pm4_set_sh_regs(b, SH_VS_USER_DATA_0, vb, 4);
+    } else {
+        uint64_t va = (uint64_t)(uintptr_t)c->vs;
+        uint32_t vr[4] = {(uint32_t)(va >> 8), (uint32_t)(va >> 40), A2M_VS_A2M_RSRC1, 1u << 1};
+        pm4_set_sh_regs(b, SH_VS_PGM_LO, vr, 4);
+        pm4_set_sh_reg(b, SH_VS_USER_DATA_0, zbits);
+    }
     a2_reg(b, A2_PA_SC_WINDOW_OFFSET, wofs);
     pm4_set_context_reg(b, CTX_VGT_GS_ONCHIP_CNTL, VGT_GS_ONCHIP_CNTL_SAFE);
     {
@@ -874,10 +914,12 @@ static void a2_ps(struct PM4Builder* b, struct A2Ctx* c, int v) {
 /* SPI_SHADER_Z_FORMAT and DB_SHADER_CONTROL bits of a test variant (ac_get_spi_shader_z_format:
    Z + alpha 32_AR, Z + mask 32_ABGR). */
 static uint32_t a2_zfmt(int v) {
+    if (v == V_TEX)
+        return 1u; /* 32_R: Z only */
     return (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0) ? 3u : v == V_MASK ? 9u : 0u;
 }
 static uint32_t a2_vdbsc(int v) {
-    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0)
+    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0 || v == V_TEX)
         return A2_ZEXP;
     if (v == V_MASK)
         return A2_ZEXP | A2_MASKEXP;
@@ -1261,6 +1303,12 @@ static int64_t a2_expect(const struct A2Test* t, int x, int y, uint32_t A, uint3
         az = a2a_f32(t->mrtza);
     else if (t->ps == V_ZAB)
         az = a2a_f32(B);
+    if (t->ps == V_NOA) {
+        if (h)
+            a0 = a2a_zero();
+        else
+            path0 = 0;
+    }
     if (t->hyp == H_MRT1 && h) {
         path0 = (r & 1) && !(t->dbsc & A2_A2M_DIS) && a2_fmt_alpha(col1) && (cbsm & 0x80);
         a0 = a2a_f32(A);
@@ -1413,6 +1461,10 @@ static void a2_fill(struct A2Ctx* c, const struct A2Test* t, int pass) {
             g_a2_qa[q] = (uint32_t)pass * A2_QUADS + (uint32_t)q;
         a2_expand_quads(A);
         break;
+    case AK_TEX: /* t_tex stores the sampled alpha to B; A gets it after the pass */
+        for (int i = 0; i < A2_PX; i++)
+            A[i] = B[i] = A2_NOT_SHADED;
+        return;
     }
     for (int i = 0; i < A2_PX; i++)
         B[i] = t->bmode == BM_ALPHA  ? a2_rand_alpha()
@@ -1474,7 +1526,7 @@ static void a2_classify(struct A2Ctx* c, const struct A2Test* t) {
 /* Totals of a test over its passes. */
 struct A2Tot {
     uint32_t passes, retries, px, dmis[2], cmis[2], dchk, cchk, unclass, unwritten, cdiff;
-    uint32_t zp_bad, iso_bad, zp_none, nex;
+    uint32_t zp_bad, iso_bad, zp_none, nex, not_shaded;
     uint64_t pass_us;
     uint32_t ex[6][8]; /* x, y, A, B, measured depth, measured colour, h0, h1 */
 };
@@ -1789,6 +1841,10 @@ static void a2_report_totals(const struct A2Test* t) {
     a2_u(g_tot.unclass);
     a2_s(", colour != depth ");
     a2_u(g_tot.cdiff);
+    if (t->ps == V_TEX) {
+        a2_s(", pixels t_tex did not shade ");
+        a2_u(g_tot.not_shaded);
+    }
     a2_s(", GPU time ");
     a2_u(g_tot.pass_us);
     a2_s(" us\n");
@@ -2028,6 +2084,8 @@ static void a2_params(struct A2Ctx* c, const struct A2Test* t) {
     c->tab[11] = t->iter_delta;
     c->tab[32] = (t->raw_col & 0xFFFFu) | (t->raw_col << 16);
     c->tab[33] = t->raw_col & 0xFFFFu;
+    build_tsharp_levels(c->tab + 48, c->tex, A2_TEX_W, A2_TEX_W, A2_TEX_LEVELS);
+    build_ssharp_height(c->tab + 56); /* wrap, bilinear, linear mips */
     build_vsharp(c->tab, c->alpha, 2 * A2_PX * 4);
     build_vsharp(c->tab + 12, c->out, 2 * A2_OUT_DEPTH * 4);
     a2_tsharps(c, t);
@@ -2054,6 +2112,13 @@ static int a2_run_pass(struct A2Ctx* c, const struct A2Test* t, int iso, int reg
     g_tot.passes++;
     if (a2_has_readback(t))
         g_tot.unwritten += g_a2_unwritten;
+    if (t->ps == V_TEX) { /* the model takes the alpha t_tex sampled */
+        for (int i = 0; i < A2_PX; i++) {
+            c->alpha[i] = c->alpha[A2_PX + i];
+            if (c->alpha[i] == A2_NOT_SHADED)
+                g_tot.not_shaded++;
+        }
+    }
     a2_check(c, t);
     return 0;
 }
@@ -2435,6 +2500,55 @@ static int a2v_init(void) {
     return 1;
 }
 
+/* ---- the textured net ---- */
+/* The net texture: white strands every 32 texels (8 cells across 256), alpha 1 within 1.5
+   texels of a strand's centre, falling to 0 over the next texel; mips by 2 x 2 box filter
+   (alpha rounded), packed (LINEAR_ALIGNED, levels >= 32 px: no padding, dds_loader.h). The
+   plane: view depth z = 3 + 0.8 x, projected with focal length 1.5 (clip x = 1.5 x, y = 1.5 y,
+   w = z), one triangle (-1.4, -14), (-1.4, 14), (8, 0) whose edges all lie outside the viewport:
+   every pixel is shaded once, with all its samples covered. UV = (x, y) / 4: the far side shows
+   cells of about 4 pixels (small mips, fractional alpha), the near side about 12. */
+static void a2_make_net(struct A2Ctx* c) {
+    unsigned char* t = (unsigned char*)c->tex;
+    for (int y = 0; y < A2_TEX_W; y++)
+        for (int x = 0; x < A2_TEX_W; x++) {
+            float fx = (float)(x & 31) + 0.5f, fy = (float)(y & 31) + 0.5f;
+            float dx = fx < 32.0f - fx ? fx : 32.0f - fx, dy = fy < 32.0f - fy ? fy : 32.0f - fy;
+            float d = dx < dy ? dx : dy;
+            float a = 2.5f - d;
+            a = a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
+            unsigned char* p = t + 4 * (x + A2_TEX_W * y);
+            p[0] = p[1] = p[2] = 255;
+            p[3] = (unsigned char)(a * 255.0f + 0.5f);
+        }
+    unsigned char* src = t;
+    for (int l = 1, w = A2_TEX_W / 2; l < A2_TEX_LEVELS; l++, w /= 2) {
+        unsigned char* dst = src + 4 * (2 * w) * (2 * w);
+        for (int y = 0; y < w; y++)
+            for (int x = 0; x < w; x++) {
+                const unsigned char* s0 = src + 4 * (2 * x + 2 * w * 2 * y);
+                const unsigned char* s1 = s0 + 4 * 2 * w;
+                unsigned a = s0[3] + s0[7] + s1[3] + s1[7];
+                unsigned char* p = dst + 4 * (x + w * y);
+                p[0] = p[1] = p[2] = 255;
+                p[3] = (unsigned char)((a + 2) / 4);
+            }
+        src = dst;
+    }
+    static const float corner[3][2] = {{-1.4f, -14.0f}, {-1.4f, 14.0f}, {8.0f, 0.0f}};
+    for (int i = 0; i < 3; i++) {
+        float x = corner[i][0], y = corner[i][1], z = 3.0f + 0.8f * x;
+        float* v = c->verts + 8 * i;
+        v[0] = 1.5f * x;
+        v[1] = 1.5f * y;
+        v[2] = 0.5f * z; /* the shader exports Z 0.5 itself */
+        v[3] = z;
+        v[4] = 0.25f * x;
+        v[5] = 0.25f * y;
+        v[6] = v[7] = 0.0f;
+    }
+}
+
 /* ---- the run ---- */
 static int a2_alloc(struct A2Ctx* c) {
     my_memset(c, 0, sizeof(*c));
@@ -2449,10 +2563,17 @@ static int a2_alloc(struct A2Ctx* c) {
     c->depth = gpu_alloc_typed(A2_PX * 4 * 8, 0x10000, MEM_TYPE_ONION);
     c->scratch = gpu_alloc_typed(A2_PX * 8, 0x10000, MEM_TYPE_ONION);
     c->vs = gpu_alloc_typed(sizeof(a2m_vs_a2m_bin) + 256, 0x1000, MEM_TYPE_ONION);
+    c->vs_net = gpu_alloc_typed(sizeof(a2m_vs_net_bin) + 256, 0x1000, MEM_TYPE_ONION);
+    c->tex = gpu_alloc_typed(A2_TEX_W * A2_TEX_W * 4 * 2, 0x10000, MEM_TYPE_ONION);
+    c->verts = (float*)gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
     int ok = c->dcb && c->fence && c->alpha && c->tab && c->out && c->zp && c->regs && c->color &&
-             c->depth && c->scratch && c->vs && !((uint64_t)(uintptr_t)c->vs >> 40);
-    if (ok)
+             c->depth && c->scratch && c->vs && c->vs_net && c->tex && c->verts &&
+             !((uint64_t)(uintptr_t)c->vs >> 40) && !((uint64_t)(uintptr_t)c->vs_net >> 40);
+    if (ok) {
         my_memcpy(c->vs, a2m_vs_a2m_bin, sizeof(a2m_vs_a2m_bin));
+        my_memcpy(c->vs_net, a2m_vs_net_bin, sizeof(a2m_vs_net_bin));
+        a2_make_net(c);
+    }
     for (int i = 0; ok && i < A2_NSH; i++) {
         c->sh[i] = gpu_alloc_typed(k_a2_sh[i].size + 256, 0x1000, MEM_TYPE_ONION);
         if (!c->sh[i] || ((uint64_t)(uintptr_t)c->sh[i] >> 40))

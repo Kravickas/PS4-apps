@@ -290,6 +290,64 @@ v_cvt_f32_u32 v20, v20
 v_mad_f32 v9, v20, s15, v9
 exp mrt0 v10, v10, v10, v9 done vm
 s_endpgm
+; ---- t_noa (ps) ----
+.long 0xbeeb03ff
+.long 0xa
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+exp mrt0 v10, v10, v10, off done vm
+s_endpgm
+; ---- t_tex (ps) ----
+.long 0xbeeb03ff
+.long 0x10
+s_mov_b64 s[40:41], exec
+s_wqm_b64 exec, exec
+s_mov_b32 m0, s2
+v_interp_p1_f32 v4, v0, attr0.x
+v_interp_p2_f32 v4, v1, attr0.x
+v_interp_p1_f32 v5, v0, attr0.y
+v_interp_p2_f32 v5, v1, attr0.y
+s_load_dwordx8 s[4:11], s[0:1], 0x30
+s_load_dwordx4 s[12:15], s[0:1], 0x38
+s_load_dwordx4 s[16:19], s[0:1], 0x0
+s_waitcnt lgkmcnt(0)
+image_sample v[6:9], v[4:5], s[4:11], s[12:15] dmask:0xf
+s_waitcnt vmcnt(0)
+s_mov_b64 exec, s[40:41]
+v_cvt_u32_f32 v10, v2
+v_cvt_u32_f32 v11, v3
+v_lshlrev_b32 v11, 6, v11
+v_add_i32 v10, vcc, v10, v11
+v_lshlrev_b32 v10, 2, v10
+v_add_i32 v10, vcc, 0x4000, v10
+buffer_store_dword v9, v10, s[16:19], 0 offen
+v_mov_b32 v12, 0.5
+v_mov_b32 v13, 1.0
+exp mrtz v12, off, off, off
+exp mrt0 v13, v13, v13, v9 done vm
+s_nop 0
+s_endpgm
+; ---- vs_net (vs) ----
+.long 0xbeeb03ff
+.long 0x5
+buffer_load_dwordx4 v[1:4], v0, s[0:3], 0 idxen
+buffer_load_dwordx2 v[5:6], v0, s[0:3], 0 idxen offset:16
+s_waitcnt vmcnt(0)
+exp param0 v5, v6, v5, v6
+exp pos0 v1, v2, v3, v4 done
+s_endpgm
 ; ---- clr (ps) ----
 .long 0xbeeb03ff
 .long 0x3

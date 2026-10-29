@@ -40,7 +40,9 @@ TRACE
   test, skips its pixel shader variant from then on and continues (state: a2m.state there).
   Once finished it does not run again until a2m.state is deleted. Then the visual pages replace
   the scene: per capture the GPU's coverage, the model's, their difference and a per-sample
-  microscope (touch pad: next page, d-pad: move the microscope).
+  microscope (touch pad: next page, d-pad: move the microscope). Pages 1-2: a mipmapped net
+  texture on a perspective plane (alpha from the texture, as a hockey net), pages 3-6: ramps
+  and procedural nets.
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top
