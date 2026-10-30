@@ -25,10 +25,12 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
                      distance atlas (URW Gothic Demi; not shipped)
   make_clock_light_norm.py   src/clock_light_norm.h: the clock's internal-light normaliser
   gen_ps_clock.py    shaders/ps_clock.s (clock mode's glass)
-  gen_optest5.py     src/optest5.h: the OPCODE_TEST 5 rows (every V_CVT_* of GCN2, edge-case inputs,
-                     labels); run clang-format on the header afterwards
-  gen_ps_cvt.py      shaders/ps_cvt.s (without the V_CVT_* shadPS4 cannot translate): the OPCODE_TEST 5
-                     conversion pass
+  gen_optest5.py     src/optest5.h: the OPCODE_TEST 5 rows (every V_CVT_* of GCN2, also with each VOP3
+                     modifier, edge-case inputs, labels); run clang-format on the header afterwards
+  gen_ps_cvt.py      the OPCODE_TEST 5 passes, a kind each (shaders/ps_cvt*.s / .h, cs_cvt.s / .h: VGPR,
+                     e64, SGPR, literal, inline, another store, compute; without the V_CVT_* shadPS4
+                     cannot translate) and shaders/ps_cvt_set.h; needs llvm-mc, run after
+                     gen_optest5.py, then clang-format on shaders/ps_cvt_set.h
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =

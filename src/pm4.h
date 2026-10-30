@@ -190,6 +190,16 @@ static inline uint32_t pm4_type3(uint32_t opcode, uint32_t count) {
 #define SH_VS_PGM_RSRC1            0x4A
 #define SH_VS_PGM_RSRC2            0x4B
 #define SH_VS_USER_DATA_0          0x4C
+/* Compute (gfx_7_2_d.h mmCOMPUTE_* - 0x2C00); SET_SH_REG / DISPATCH_DIRECT carry PM4_SHADER_COMPUTE
+   (SI programming guide 2.1.4, 2.4.7, 2.6.1). */
+#define SH_COMPUTE_START_X         0x204 /* START_X..Z, NUM_THREAD_X..Z */
+#define SH_COMPUTE_PGM_LO          0x20C
+#define SH_COMPUTE_PGM_RSRC1       0x212 /* RSRC1, RSRC2 */
+#define SH_COMPUTE_RESOURCE_LIMITS 0x215 /* + STATIC_THREAD_MGMT_SE0/1, TMPRING_SIZE */
+#define SH_COMPUTE_THREAD_MGMT_SE2 0x219 /* STATIC_THREAD_MGMT_SE2, SE3 */
+#define SH_COMPUTE_USER_DATA_0     0x240
+#define PM4_DISPATCH_DIRECT        0x15
+#define PM4_SHADER_COMPUTE         (1u << 1)
 
 // UCONFIG register offsets (register - 0xC000)
 #define UCFG_PRIMITIVE_TYPE         0x242
