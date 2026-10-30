@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-10"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-11"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -291,6 +291,7 @@ enum {
     H_SAT,     /* v_cvt_pk_u16_u32 / i16_i32: h0 saturate, h1 truncate to 16 bits */
     H_RESTORE, /* v_cmpx, then exec set to all lanes before exp vm: h0 not killed, h1 killed */
     H_TWOEXP,  /* v_cmpx, MRT0 without vm, null export with vm: h0 killed, h1 not killed */
+    H_CAP,     /* NUM_SAMPLES 5..7 with EQAA_DISABLE: h0 16 samples, h1 2^NUM_SAMPLES */
 };
 static const char* const k_alpha_to_mask_hname[][2] = {
     {"model", "-"},
@@ -313,6 +314,7 @@ static const char* const k_alpha_to_mask_hname[][2] = {
     {"saturate", "truncate"},
     {"not killed", "killed"},
     {"killed", "not killed"},
+    {"16 samples", "2^NUM_SAMPLES samples"},
 };
 
 struct AlphaToMaskTest {
@@ -767,10 +769,25 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
                        .show = 1, .kind = AK_RANDOM, .seed = 0xE009u),
     ALPHA_TO_MASK_CASE(.id = "EQ10", .what = "4x, NUM_SAMPLES 5, EQAA_DISABLE, D1",
                        .db_alpha_to_mask = ALPHA_TO_MASK_D1, .alpha_to_mask_num_samples = 5,
-                       .eqaa_dis = 1, .show = 1, .kind = AK_RANDOM, .seed = 0xE010u),
+                       .eqaa_dis = 1, .kind = AK_RANDOM, .hyp = H_CAP, .seed = 0xE010u),
     ALPHA_TO_MASK_CASE(.id = "EQ11", .what = "8x, NUM_SAMPLES 7, EQAA_DISABLE, D1", .ns = 8,
                        .db_alpha_to_mask = ALPHA_TO_MASK_D1, .alpha_to_mask_num_samples = 7,
-                       .eqaa_dis = 1, .show = 1, .kind = AK_RANDOM, .seed = 0xE011u),
+                       .eqaa_dis = 1, .kind = AK_RANDOM, .hyp = H_CAP, .seed = 0xE011u),
+    ALPHA_TO_MASK_CASE(.id = "EQ12", .what = "4x, NUM_SAMPLES 6, D1",
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .alpha_to_mask_num_samples = 6,
+                       .kind = AK_RANDOM, .seed = 0xE012u),
+    ALPHA_TO_MASK_CASE(.id = "EQ13", .what = "4x, NUM_SAMPLES 6, EQAA_DISABLE, D1",
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .alpha_to_mask_num_samples = 6,
+                       .eqaa_dis = 1, .kind = AK_RANDOM, .hyp = H_CAP, .seed = 0xE013u),
+    ALPHA_TO_MASK_CASE(.id = "EQ14", .what = "8x, NUM_SAMPLES 6, EQAA_DISABLE, D1", .ns = 8,
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .alpha_to_mask_num_samples = 6,
+                       .eqaa_dis = 1, .kind = AK_RANDOM, .hyp = H_CAP, .seed = 0xE014u),
+    ALPHA_TO_MASK_CASE(.id = "EQ15", .what = "1x, NUM_SAMPLES 6, EQAA_DISABLE, D0", .ns = 1,
+                       .alpha_to_mask_num_samples = 6, .eqaa_dis = 1, .kind = AK_RANDOM,
+                       .hyp = H_CAP, .seed = 0xE015u),
+    ALPHA_TO_MASK_CASE(.id = "EQ16", .what = "2x, NUM_SAMPLES 6, EQAA_DISABLE, D0", .ns = 2,
+                       .alpha_to_mask_num_samples = 6, .eqaa_dis = 1, .kind = AK_RANDOM,
+                       .hyp = H_CAP, .seed = 0xE016u),
     /* kill: valid-mask patterns, with alpha-to-mask off and on */
     ALPHA_TO_MASK_CASE(.id = "KX01", .what = "v_cmpx kill, exp vm, alpha-to-mask off", .ps = V_KILL,
                        .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL, .kind = AK_RANDOM,
@@ -1820,7 +1837,7 @@ static uint32_t alpha_to_mask_amask(const struct AlphaToMaskTest* t, struct Alph
     uint32_t r = alpha_to_mask_register(t), off = 2 * ((r >> (8 + 2 * p)) & 3) + ((r >> 16) & 1);
     uint32_t lgn = t->alpha_to_mask_num_samples == 0xFF ? alpha_to_mask_log2(t->ns)
                                                         : t->alpha_to_mask_num_samples;
-    if (lgn > 4) /* NUM_SAMPLES 5..7 act as 4 (16 samples) */
+    if (lgn > 4 && !(t->hyp == H_CAP && h)) /* NUM_SAMPLES 5..7 act as 4 (16 samples) */
         lgn = 4;
     uint32_t n = 1u << lgn;
     if (n > t->ns && t->hyp == H_CLAMP && h)
