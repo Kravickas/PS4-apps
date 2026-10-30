@@ -61,9 +61,10 @@
    f64/f16); ps_ui draws two as hex digits. A binary per op and kind (shaders/ps_cvt_set.h,
    tools/gen_ps_cvt.py: VGPR, VOP3 modifiers, e64, SGPR / literal / inline sources, another store,
    compute shaders), compared with the VGPR results, and a sweep (o5_sweep) over edge ranges of
-   inputs. o5_bisect adds them one at a time; one that ended a launch (crash, GPU hang) is skipped
-   from then on (optest5.state). Then the CPU logs the results as GitHub tables to the trace log and
-   the sweep's to "ShadCube4 optest5 sweep.bin".
+   inputs. o5_bisect adds them one at a time; one that ended a launch (crash, or a hang closed by
+   hand) runs once more, one that ended two is skipped from then on (optest5.state). Then the CPU
+   logs the results as GitHub tables to the trace log and the sweep's to
+   "ShadCube4 optest5 sweep.bin".
 
    6 = VOP3 modifiers (src/optest6.h, shaders/ps_mod.s): omod (mul:2 / mul:4 / div:2) and clamp on
    f32, f64, f16 and integer results, neg / abs on arithmetic and conversion sources, each row in 20
@@ -191,7 +192,7 @@ static const int k_day_tenths[] = {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,
 #define FLARE_EDGE 0.12f      /* the GHOSTS fade out over this screen fraction at the edges */
 
 /* Printed in the trace header so logs from different builds can be told apart. */
-#define BUILD_TAG "optest-5j"
+#define BUILD_TAG "optest-5k"
 /* Shadow map: 4096 x 4096, GPU-only (written by the shadow pass, sampled by the floor). In shadPS4
    turn readbackLinearImages off for this title: with it on, this linear target hits its 32 MB
    readback limit. */
@@ -372,7 +373,9 @@ static struct {
         seg_bin[OPT5_SEG_MAX];
     int next, inflight, inflight_f, gpu_done, done_f; /* o5_bisect; gpu_done: last frame finished */
     int act_n, act[OPT5_RUN], act_f[OPT5_RUN];        /* entries running and the frame added */
-    uint32_t bad[(OPT5_ENTRIES + 31) / 32];           /* entries that crashed or hung (o5_state) */
+    uint32_t bad[(OPT5_ENTRIES + 31) / 32];  /* entries that ended two launches (o5_state_load) */
+    uint32_t once[(OPT5_ENTRIES + 31) / 32]; /* entries that ended one */
+    int retry;                               /* the entry that ended the last launch, or -1 */
 #endif
 } g_o5;
 static void* g_ps_clock_gpu = 0;       /* clock mode's UI pass (ps_clock) */
@@ -2017,11 +2020,13 @@ static int o5_marks(const volatile uint32_t* mk, int p0, int p1) {
 static int o5_bad(int e) { return (int)((g_o5.bad[e >> 5] >> (e & 31)) & 1); }
 
 /* optest5.state next to the trace log: the build, the entry being added when the app ended (it
-   crashed or hung there: skipped from then on) and the entries skipped. */
+   crashed, or hung and was closed), the entries that ended one launch and those that ended two
+   (skipped from then on: a hang that does not repeat is not the entry's). */
 struct O5State {
     char build[16];
     int32_t inflight;
     uint32_t bad[(OPT5_ENTRIES + 31) / 32];
+    uint32_t once[(OPT5_ENTRIES + 31) / 32];
 };
 static int o5_state_fd(int flags) {
     static const char* const paths[] = {
@@ -2042,8 +2047,10 @@ static void o5_state_save(void) {
     for (int i = 0; BUILD_TAG[i] && i < 15; i++)
         st.build[i] = BUILD_TAG[i];
     st.inflight = g_o5.inflight;
-    for (int i = 0; i < (OPT5_ENTRIES + 31) / 32; i++)
+    for (int i = 0; i < (OPT5_ENTRIES + 31) / 32; i++) {
         st.bad[i] = g_o5.bad[i];
+        st.once[i] = g_o5.once[i];
+    }
     int fd = o5_state_fd(0x601);
     if (fd < 0)
         return;
@@ -2051,11 +2058,13 @@ static void o5_state_save(void) {
     sceKernelFsync(fd);
     sceKernelClose(fd);
 }
-/* At start: the entries skipped by this build so far, and the one that ended the last launch. */
+/* At start: the entries this build skips so far, and the one that ended the last launch (run once
+   more; skipped if it ended a launch before). */
 static void o5_state_load(void) {
     struct O5State st;
     int fd = o5_state_fd(0);
     g_o5.inflight = -1;
+    g_o5.retry = -1;
     if (fd < 0)
         return;
     long n = sceKernelRead(fd, &st, sizeof(st));
@@ -2065,10 +2074,19 @@ static void o5_state_load(void) {
     for (int i = 0; i < 16; i++)
         if (st.build[i] != (i < (int)sizeof(BUILD_TAG) - 1 ? BUILD_TAG[i] : 0))
             return;
-    for (int i = 0; i < (OPT5_ENTRIES + 31) / 32; i++)
+    for (int i = 0; i < (OPT5_ENTRIES + 31) / 32; i++) {
         g_o5.bad[i] = st.bad[i];
-    if (st.inflight >= 0 && st.inflight < OPT5_ENTRIES)
-        g_o5.bad[st.inflight >> 5] |= 1u << (st.inflight & 31);
+        g_o5.once[i] = st.once[i];
+    }
+    int e = st.inflight;
+    if (e >= 0 && e < OPT5_ENTRIES) {
+        if ((g_o5.once[e >> 5] >> (e & 31)) & 1)
+            g_o5.bad[e >> 5] |= 1u << (e & 31);
+        else {
+            g_o5.once[e >> 5] |= 1u << (e & 31);
+            g_o5.retry = e;
+        }
+    }
 }
 
 /* An entry's name: "binary N V_CVT_X, kind" or "sweep V_CVT_X". */
@@ -2100,11 +2118,14 @@ static int o5_entry_name(char* L, int e) {
 /* Start-up, an entry at a time (the binaries, then the sweep of each op), each traced and saved as
    in flight before the frame that first runs it is built; the next one comes once the GPU has
    finished that frame. If the app ends meanwhile (an emulator that cannot translate the binary
-   crashes, or the GPU hangs), the next launch skips the entry (o5_state_load). An entry's passes
-   run OPT5_RUN frames; their results stay in g_o5.res / sw_res. */
+   crashes, or it hangs and is closed), the next launch runs the entry once more and the one after
+   skips it if it ended that launch too (o5_state_load). An entry's passes run OPT5_RUN frames;
+   their results stay in g_o5.res / sw_res. */
 static void o5_bisect(long long frame) {
-    if (g_o5.inflight >= 0 && g_o5.gpu_done >= g_o5.inflight_f)
+    if (g_o5.inflight >= 0 && g_o5.gpu_done >= g_o5.inflight_f) { /* it ran */
+        g_o5.once[g_o5.inflight >> 5] &= ~(1u << (g_o5.inflight & 31));
         g_o5.inflight = -1;
+    }
     int a = 0;
     for (int i = 0; i < g_o5.act_n; i++)
         if (frame - g_o5.act_f[i] < OPT5_RUN) {
@@ -2264,7 +2285,7 @@ static void o5_log(void) {
 #if OPCODE_TEST != 6
             if (o5_bad(k_opt5_row_bin[sl][0])) {
                 for (int md = 0; md < OPT5_MODES; md++) {
-                    m = " | crashed";
+                    m = " | skipped";
                     while (*m)
                         line[k++] = *m++;
                 }
@@ -2411,7 +2432,7 @@ static void o5_cross(int kind) {
     while (*m)
         line[k++] = *m++;
     k += lg_i64(line + k, crashed);
-    m = " skipped (a binary crashed or hung)\n";
+    m = " skipped (a binary ended two launches)\n";
     while (*m)
         line[k++] = *m++;
     trace_line(line, (unsigned long)k);
@@ -2663,7 +2684,7 @@ static void o5_sweep_log(void) {
                     for (int b = 0; b < 4; b++)
                         h = (h ^ ((v >> (8 * b)) & 0xFF)) * 16777619u;
                 }
-            m = skip ? " | crashed" : " | ";
+            m = skip ? " | skipped" : " | ";
             while (*m)
                 line[k++] = *m++;
             if (!skip)
@@ -3963,16 +3984,17 @@ int main(void) {
                     g_o5.gpu_done = -1;
                     o5_state_load();
                     for (int e = 0; e < OPT5_BINS + g_o5.segs; e++)
-                        if (o5_bad(e)) {
+                        if (o5_bad(e) || e == g_o5.retry) {
                             char L[200];
                             int k = 0;
-                            const char* m = "o5 skipped: ";
+                            const char* m = e == g_o5.retry ? "o5 retry: " : "o5 skipped: ";
                             while (*m)
                                 L[k++] = *m++;
                             k += o5_entry_name(L + k, e);
-                            m = " (crashed or hung in an earlier launch; delete optest5.state to "
-                                "run "
-                                "it again)\n";
+                            m = e == g_o5.retry
+                                    ? " (ended the last launch; skipped if it does again)\n"
+                                    : " (ended two launches; delete optest5.state to run it "
+                                      "again)\n";
                             while (*m)
                                 L[k++] = *m++;
                             trace_line(L, (unsigned long)k);
