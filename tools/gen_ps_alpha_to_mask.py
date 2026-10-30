@@ -26,6 +26,10 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
   t_noa   MRT0 (colour x 3) without the alpha component (exp en 0x7)
   t_en8 / t_en0 / t_en9 / t_en1  MRT0 uncompressed with enable mask 8 / 0 / 9 / 1
   t_c3 / t_cc / t_c4 / t_c8      MRT0 FP16 compressed with enable mask 3 / C / 4 / 8
+  t_kill2 / t_kill3 / t_kill_novm  killed where B & 1: v_cmpx and a branch to a null export,
+          v_cmp and s_and_b64 exec, v_cmpx and an export without the valid mask
+  t_pknorm_u16 / t_pknorm_i16 / t_pkrtz / t_pk_u16 / t_pk_i16  the conversion of (A, C) stored to
+          B[i]; MRT0 (colour x 3, A)
   t_all   kill where B bit 8, MRTZ (Z, -, B & 0xff, C at byte 0x8000), MRT0 (colour x 3, A)
   t_tex   the textured net: alpha from the net texture (T# at 48, S# at 56, UV from vs_net),
           stored to B[i]; MRTZ Z 0.5 (32_R), MRT0 (1, 1, 1, alpha)
@@ -360,6 +364,46 @@ SHADERS = [
         "exp mrtz v13, off, v21, v20",
         "exp mrt0 v10, v10, v10, v9 done vm",
     ]),
+    # kill patterns (killed where B & 1): branch to a null export, exec masked by s_and_b64,
+    # export without the valid mask
+    ("t_kill2", 0xA2A0C11E, "ps", PS_HEAD + [
+        "v_and_b32 v16, 1, v17",
+        "v_cmpx_eq_u32 vcc, 0, v16",
+        "s_cbranch_execz kill_null",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+        "s_endpgm",
+        "kill_null:",
+        "exp null off, off, off, off done vm",
+    ]),
+    ("t_kill3", 0xA2A0C11F, "ps", PS_HEAD + [
+        "v_and_b32 v16, 1, v17",
+        "v_cmp_eq_u32_e32 vcc, 0, v16",
+        "s_and_b64 exec, exec, vcc",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
+    ("t_kill_novm", 0xA2A0C120, "ps", PS_HEAD + [
+        "v_and_b32 v16, 1, v17",
+        "v_cmpx_eq_u32 vcc, 0, v16",
+        "exp mrt0 v10, v10, v10, v9 done",
+    ]),
+] + [
+    # conversion instructions: op(A, C) stored to B[i]; MRT0 (colour x 3, A)
+    (name, h, "ps", PS_HEAD + [
+        "v_add_i32 v22, vcc, 0x8000, v8",
+        "buffer_load_dword v20, v22, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "%s v21, v9, v20" % op,
+        "buffer_store_dword v21, v18, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]) for name, h, op in [
+        ("t_pknorm_u16", 0xA2A0C121, "v_cvt_pknorm_u16_f32"),
+        ("t_pknorm_i16", 0xA2A0C122, "v_cvt_pknorm_i16_f32"),
+        ("t_pkrtz", 0xA2A0C123, "v_cvt_pkrtz_f16_f32"),
+        ("t_pk_u16", 0xA2A0C124, "v_cvt_pk_u16_u32"),
+        ("t_pk_i16", 0xA2A0C125, "v_cvt_pk_i16_i32"),
+    ]
+] + [
     ("clr", 0xA2A0C10F, "ps", [
         "v_mov_b32 v4, 0.25",
         "exp mrt0 v4, v4, v4, v4 done vm",
