@@ -32,6 +32,8 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           v_cmpx then VALU work, v_cmpx then exec copied through SGPRs, v_cmp +
           s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
           exec restored to all lanes
+  t_mark  stores 1 to B[i] (did the pixel shader run for the pixel)
+  t_cov   stores the sample coverage input (v4, SPI_PS_INPUT_ENA.SAMPLE_COVERAGE_ENA) to B[i]
   t_pknorm_u16 / t_pknorm_i16 / t_pkrtz / t_pk_u16 / t_pk_i16  the conversion of (A, C) stored to
           B[i]; MRT0 (colour x 3, A)
   t_all   kill where B bit 8, MRTZ (Z, -, B & 0xff, C at byte 0x8000), MRT0 (colour x 3, A)
@@ -434,6 +436,20 @@ SHADERS = [
             "exp mrt0 v10, v10, v10, v9 done vm",
         ]),
     ]
+] + [
+    # invocation marker (1 to B[i]) and the sample coverage input (v4 with SAMPLE_COVERAGE_ENA,
+    # stored to B[i])
+    ("t_mark", 0xA2A0C12E, "ps", PS_HEAD + [
+        "v_mov_b32 v20, 1",
+        "buffer_store_dword v20, v18, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
+    ("t_cov", 0xA2A0C12F, "ps", ["v_mov_b32 v19, v4"] + PS_HEAD + [
+        "buffer_store_dword v19, v18, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
 ] + [
     # conversion instructions: op(A, C) stored to B[i]; MRT0 (colour x 3, A)
     (name, h, "ps", PS_HEAD + [
