@@ -34,15 +34,16 @@ TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
   times per step ("load ms:"), time sources and zones ("tz", "tz_net", "tz_http"), and frame
   statistics every 60 frames.
-  A2M_TEST (src/main.c, on): ShadCube4 a2m.log in the trace log's folder, the alpha-to-mask
-  (DB_ALPHA_TO_MASK) test, run before the main loop; every result is checked against the model in
-  src/a2m_test.h. After a GPU hang or a crash close the app and launch it again: it logs the
-  test, skips its pixel shader variant from then on and continues (state: a2m.state there).
-  Once finished it does not run again until a2m.state is deleted. Then the visual pages replace
-  the scene: per capture the GPU's coverage, the model's, their difference and a per-sample
-  microscope (touch pad: next page, d-pad: move the microscope). Pages 1-2: a mipmapped net
-  texture on a perspective plane (alpha from the texture, as a hockey net), pages 3-6: ramps
-  and procedural nets.
+  ALPHA_TO_MASK_TEST (src/main.c, on): the alpha-to-mask (DB_ALPHA_TO_MASK) test, run before
+  the main loop; log: ShadCube4 alpha to mask.log in the trace log's folder. Every result is
+  checked against the model in src/alpha_to_mask_test.h and cross-checked (readback before /
+  after, ZPASS_DONE, per-sample isolation draws, a repeated pass, same alpha same result). After a
+  GPU hang or a crash close the app and launch it again: it logs the test, skips its pixel shader
+  variant from then on and continues (state: alpha_to_mask.state there). Once finished it does
+  not run again until alpha_to_mask.state is deleted. Then the visual pages replace the scene:
+  per capture the GPU's coverage, the model's, their difference and a per-sample microscope
+  (touch pad: next page, d-pad: move the microscope). Pages 1-2: a mipmapped net texture on a
+  perspective plane, pages 3-6: ramps and procedural nets.
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top
@@ -54,7 +55,7 @@ SOURCE MAP
   src/bgm.c/.h         the looping music thread
   src/loadscreen.h     the loading screen (CPU-drawn)
   src/timesrc.h        time sources: in-game, console, SNTP and the time zone lookup
-  src/a2m_test.h       alpha-to-mask hardware test (A2M_TEST), log: ShadCube4 a2m.log
+  src/alpha_to_mask_test.h  alpha-to-mask hardware test (ALPHA_TO_MASK_TEST)
   src/ui.h, ui_atlas.h the panels: controls list, speeds, the time pill
   src/clock.h, clock_sdf.h, clock_light_norm.h   the glass clock (text, per-frame constants)
   src/logo_texture.h   the built-in logo texture (fallback when a texture is missing)

@@ -38,10 +38,10 @@
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
 
-/* A2M_TEST: the alpha-to-mask hardware test (src/a2m_test.h) once before the main loop; results
-   in ShadCube4 a2m.log next to the trace log. 0: off. */
-#ifndef A2M_TEST
-#define A2M_TEST 1
+/* ALPHA_TO_MASK_TEST: the alpha-to-mask hardware test (src/alpha_to_mask_test.h) once before the
+   main loop; results in ShadCube4 alpha to mask.log next to the trace log. 0: off. */
+#ifndef ALPHA_TO_MASK_TEST
+#define ALPHA_TO_MASK_TEST 1
 #endif
 
 #include "atmosphere.h"
@@ -510,7 +510,7 @@ static int lg_hex(char *o, unsigned long long v){
    an existing one only returns an error), opened once (WRONLY|CREAT|TRUNC = 0x601) and kept open;
    the other paths only if that fails. */
 extern int sceKernelMkdir(const char*, unsigned short);
-#if A2M_TEST
+#if ALPHA_TO_MASK_TEST
 static const char* g_trace_path; /* the path trace_init opened */
 #endif
 static void trace_init(void){
@@ -525,7 +525,7 @@ static void trace_init(void){
         int fd = sceKernelOpen(paths[i], 0x601, 0x1FF);
         if (fd >= 0) {
             g_log_fd = fd;
-#if A2M_TEST
+#if ALPHA_TO_MASK_TEST
             g_trace_path = paths[i];
 #endif
             return;
@@ -1751,8 +1751,8 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
     pm4_draw_index_auto(b, BG_VERTS);
 }
 
-#if A2M_TEST
-#include "a2m_test.h"
+#if ALPHA_TO_MASK_TEST
+#include "alpha_to_mask_test.h"
 #endif
 
 /* PGM_RSRC1 of the post shaders: VGPRs v38 / v51 / v15, SGPRs s20 / s19 / s31,
@@ -1795,8 +1795,8 @@ static void emit_post(struct PM4Builder* b, void* display, const uint32_t* bg_v)
                   g_ps_post_comp_gpu, PS_POST_COMP_RSRC1, t, bg_v);
     post_pass(b, g_frame, DISPLAY_W, DISPLAY_W, DISPLAY_H, CB_INFO_RGBA16F, g_ps_post_final_gpu,
               PS_POST_FINAL_RSRC1, t, bg_v);
-#if A2M_TEST
-    a2v_pass(b, bg_v);
+#if ALPHA_TO_MASK_TEST
+    alpha_to_mask_visual_pass(b, bg_v);
 #endif
     /* Frost chain, then the UI pass (frame + frosted glass + UI, sRGB) to the display. */
     const uint32_t* f = g_post_tab + FROST_BLOCK * 32;
@@ -3349,13 +3349,13 @@ int main(void) {
 
     ls_mark("final_setup");
     ls_finish(); /* the full bar; the splash went when the loading screen came up */
-#if A2M_TEST
-    if (a2m_run() < 0) {
-        trace_msg("a2m: fence timeout, GPU hung - close the app\n");
+#if ALPHA_TO_MASK_TEST
+    if (alpha_to_mask_run() < 0) {
+        trace_msg("alpha-to-mask: fence timeout, GPU hung - close the app\n");
         for (;;)
             sceKernelUsleep(1000000);
     }
-    trace_msg("a2m: run finished\n");
+    trace_msg("alpha-to-mask: run finished\n");
 #endif
     int splash_ret = g_ls.splash_ret;
     { char L[96]; int p=0;
@@ -3461,8 +3461,8 @@ int main(void) {
         // Button edge detection (pressed this frame, not last)
         uint32_t pressed = pad.buttons & ~prev_buttons;
         prev_buttons = pad.buttons;
-#if A2M_TEST
-        a2v_input(pressed);
+#if ALPHA_TO_MASK_TEST
+        alpha_to_mask_visual_input(pressed);
 #endif
 
         /* Controls (the on-screen list, src/ui.h, shows the same):
@@ -4209,9 +4209,9 @@ int main(void) {
                          : g_ts.source == TS_CONSOLE ? 2
                          : ts_net_valid()            ? 3
                                                      : 2;
-#if A2M_TEST
-            if (g_a2v_ok)
-                a2v_ui();
+#if ALPHA_TO_MASK_TEST
+            if (g_alpha_to_mask_visual_ok)
+                alpha_to_mask_visual_ui();
             else
 #endif
                 ui_update(speed_pct, k_day_tenths[day_step], day_frozen, tod_txt, ts_dot);
