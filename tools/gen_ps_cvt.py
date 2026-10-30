@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""OPCODE_TEST 5 conversion passes (src/optest5.h numbering). Writes shaders/ps_cvt*.s, shaders/cs_cvt.s, one header
-per kind (shaders/ps_cvt*.h, shaders/cs_cvt.h; main.c gives each float mode its own hash at upload) and
-shaders/ps_cvt_set.h (the kinds, their binaries and which rows each one runs).
+"""OPCODE_TEST 5 conversion passes (src/optest5.h numbering): a binary per V_CVT_* and kind, so an
+emulator that cannot translate one instruction only loses that binary (main.c skips a binary that
+crashed or hung in an earlier launch). Writes shaders/ps_cvt.s (every binary's source, one after the
+other) and shaders/ps_cvt_set.h (the binaries; main.c gives each float mode its own hash at upload).
 
-Kinds, each a pass per float mode; every row's result is kept per kind and compared with kind 0 in the log:
-  0 VGPR      e32 encoding, sources in VGPRs; modifier ops (name "OP (mods)") as e64 with the modifier bits
-  1 e64       the e32 rows (ops without modifiers) in the VOP3 encoding, sources in VGPRs
-  2 SGPR      the e32 rows with src0 in s[24:25] (s_mov_b32 of the row's value)
-  3 literal   the e32 rows with src0 a literal dword (forced, also where an inline constant exists; an f64 source
-              only when its low dword is 0: the literal is the high dword)
-  4 inline    the e32 rows whose src0 has an inline constant (integer 0..64, -1..-16 or +-0.5, 1, 2, 4)
-  5 store     kind 0's code, results written by two buffer_store_dword instead of buffer_store_dwordx2
-  6 compute   kind 0's code as a compute shader (slot = thread group * 64 + thread)
-Kinds 2..4 bake each row's value into the code (one block per row, kept when the slot's row id matches).
-Leaves out V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator: its assert stops the shader).
-V_CVT_OFF_F32_I4 takes immediate operands only (shadPS4 asserts on a register): one instruction per value of its
-rows, kept for its op with that a; kind 2 leaves it out. Needs llvm-mc (AMDGPU target).
+Kinds; class = where the result is kept (kind 0 / 1 in class 0, compared with the others in the log):
+  0 VGPR        the op's e32 rows (VOP1 / VOP2 encoding), sources in VGPRs        class 0
+  1 modifiers   the op's VOP3 modifier rows ("OP (mods)": e64 with the modifier bits) class 0
+  2 e64         the e32 rows in the VOP3 encoding                                  class 1
+  3 SGPR        the e32 rows with src0 in s[24:25] (s_mov_b32 of the row's value)  class 2
+  4 literal     the e32 rows with src0 a literal dword (forced, also where an inline constant exists;
+                an f64 source only when its low dword is 0: the literal is the high dword)  class 3
+  5 inline      the e32 rows whose src0 has an inline constant (0..64, -1..-16, +-0.5, 1, 2, 4) class 4
+  6 store       kind 0's code, results written by two buffer_store_dword        class 5
+  7 store mods  kind 1's, the same way                                            class 5
+  8 compute     kind 0's code as a compute shader (slot = thread group * 64 + thread)  class 6
+  9 compute mods  kind 1's, the same way                                          class 6
+Kinds 3..5 bake each row's value into the code (one block per row, kept when the slot's row id
+matches). Leaves out V_CVT_U32_F64 and V_CVT_PKACCUM_U8_F32 (no shadPS4 translator: its assert stops
+the shader) and the VOP3 forms (e64, modifiers) of V_CVT_F32_UBYTE0..3 (shadPS4 asserts decoding
+them). V_CVT_OFF_F32_I4 takes immediate operands only (shadPS4 asserts on a register): one
+instruction per value of its rows, kept for its op with that a; kind 3 leaves it out. Needs llvm-mc
+(AMDGPU target).
 python3 tools/gen_optest5.py && python3 tools/gen_ps_cvt.py"""
 import os, re, shutil, struct, subprocess, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,10 +45,13 @@ BASE = {"I32_F32": ("v_cvt_i32_f32", "f1", 0), "U32_F32": ("v_cvt_u32_f32", "f1"
         "PKNORM_U16_F32": ("v_cvt_pknorm_u16_f32", "f2", 0), "PK_U16_U32": ("v_cvt_pk_u16_u32", "i2", 0),
         "PK_I16_I32": ("v_cvt_pk_i16_i32", "i2", 0), "PK_U8_F32": ("v_cvt_pk_u8_f32", "pk8", 0)}
 OFF = "OFF_F32_I4"
-KINDS = ["VGPR", "e64", "SGPR", "literal", "inline", "store", "compute"]
-KIND_FILE = ["ps_cvt", "ps_cvt_e64", "ps_cvt_sgpr", "ps_cvt_lit", "ps_cvt_inl", "ps_cvt_st2", "cs_cvt"]
-PS_KINDS = 6
-HASH = 0xCAFE7000  # | kind << 8 | mode, set by main.c at upload
+# no VOP3 encoding (gen_optest5.py NO_VOP3): shadPS4 asserts decoding it
+NO_VOP3 = ("F32_UBYTE0", "F32_UBYTE1", "F32_UBYTE2", "F32_UBYTE3")
+KINDS = ["VGPR", "modifiers", "e64", "SGPR", "literal", "inline", "store", "store mods", "compute",
+         "compute mods"]
+KIND_CLASS = [0, 0, 1, 2, 3, 4, 5, 5, 6, 6]
+CLASSES = ["VGPR", "e64", "SGPR", "literal", "inline", "store", "compute"]
+HASH = 0xCA000000  # | binary << 8 | mode, set by main.c at upload
 RSRC1 = "PGM_RSRC1 0xC4 (20 VGPRs, 26 SGPRs incl. VCC)"
 
 def split(name):
@@ -133,7 +142,7 @@ def op_block(k, e64=False):
     base, mods = split(OPS[k])
     if base not in BASE: return []
     ins, kind, wide = BASE[base]
-    if e64 and mods: return []
+    if e64 and (mods or base in NO_VOP3): return []
     L = ["; op %d: %s%s" % (k, OPS[k], " (e64)" if e64 else "")]
     if base == OFF:
         L += ["s_movk_i32 s26, 0x%x" % k, "v_cmp_eq_u32_e64 s[22:23], s26, v8"]
@@ -190,49 +199,70 @@ def row_block(r, kind_ix):
             L += longs([(E32[base][0] & ~0x1FF) | code])
     return L + keep("v_cmp_eq_u32 vcc, 0x%x, v17" % (r + 1), wide)
 
-HEAD = ["; OPCODE_TEST 5 conversion pass, kind %s (tools/gen_ps_cvt.py): one %s per table slot. Table (s[0:1]):",
-        "; [0..3] V# of the slots {op | 64-bit result << 8 | row + 1 << 16, a, b, c} (op 0xff: a heading), [4..7] V# of",
-        "; the results ([11] bytes a slot: lo, hi a pass), [8] this pass's byte offset in a result, [9] slot count,",
-        "; [10] marker. Runs the V_CVT_* on the slot's operands and keeps the slot's (a, b = an f64 source; c = PK_U8's",
-        "; S2); FLOAT_MODE from PGM_RSRC1. Slot 0 stores the marker at [slot count * [11] + [8] / 2]."]
+HEAD = ["; binary %d: V_CVT_%s, kind %s (tools/gen_ps_cvt.py): one %s per table slot. Table (s[0:1]):",
+        "; [0..3] V# of the slots {op | 64-bit result << 8 | row + 1 << 16, a, b, c} (op 0xff: a heading), [4..7] V#",
+        "; of the results ([11] bytes a slot: lo, hi a class and float mode), [8] this pass's byte offset in a",
+        "; result, [9] slot count, [10] marker. Runs the op on the slot's operands and keeps the slot's (a, b = an",
+        "; f64 source; c = PK_U8's S2); FLOAT_MODE from PGM_RSRC1. Slot 0 stores the marker at [slot count * [11] +",
+        "; [8] / 2]."]
 
-def source(kind_ix):
-    cs = kind_ix == 6
-    L = [l % (KINDS[kind_ix], "thread" if cs else "pixel (x + 512 y)") if i == 0 else l for i, l in enumerate(HEAD)]
-    L += ["; Generated by tools/gen_ps_cvt.py.",
-          "s_load_dwordx8 s[4:11], s[0:1], 0x0", "s_load_dwordx4 s[12:15], s[0:1], 0x8"]
+def base_of(k):
+    return split(OPS[k])[0]
+
+def body(base, kind):
+    """The binary's op code: [] when the kind has nothing of this op."""
+    L = []
+    if kind in (0, 6, 8, 2):
+        for k in range(len(OPS)):
+            if base_of(k) == base and not split(OPS[k])[1]: L += op_block(k, kind == 2)
+    elif kind in (1, 7, 9):
+        for k in range(len(OPS)):
+            if base_of(k) == base and split(OPS[k])[1]: L += op_block(k)
+    else:
+        for r in range(len(ROWS)):
+            if base_of(ROWS[r][0]) == base: L += row_block(r, kind - 1)
+    return L
+
+def source(b, base, kind, code):
+    cs = kind in (8, 9)
+    lab = "_%d" % b
+    L = [l % (b, base, KINDS[kind], "thread" if cs else "pixel (x + 512 y)") if i == 0 else l
+         for i, l in enumerate(HEAD)]
+    L += ["s_load_dwordx8 s[4:11], s[0:1], 0x0", "s_load_dwordx4 s[12:15], s[0:1], 0x8"]
     if cs:
         L += ["s_lshl_b32 s3, s2, 6", "v_add_i32 v4, vcc, s3, v0"]
     else:
         L += ["v_cvt_u32_f32 v4, v2", "v_cvt_u32_f32 v5, v3", "v_lshlrev_b32 v5, 9, v5", "v_add_i32 v4, vcc, v4, v5"]
     L += ["s_waitcnt lgkmcnt(0)", "v_cmp_gt_u32 vcc, s13, v4", "s_and_saveexec_b64 s[16:17], vcc",
-          "s_cbranch_execz cvt_done", "v_lshlrev_b32 v5, 4, v4", "buffer_load_dwordx4 v[8:11], v5, s[4:7], 0 offen",
-          "s_waitcnt vmcnt(0)", "v_lshrrev_b32 v17, 16, v8", "v_and_b32 v8, 0xff, v8", "v_mov_b32 v12, 0",
-          "v_mov_b32 v13, 0"]
-    if kind_ix in (2, 3, 4):
-        for r in range(len(ROWS)): L += row_block(r, kind_ix)
-    else:
-        for k in range(len(OPS)): L += op_block(k, kind_ix == 1)
+          "s_cbranch_execz cvt_done" + lab, "v_lshlrev_b32 v5, 4, v4",
+          "buffer_load_dwordx4 v[8:11], v5, s[4:7], 0 offen", "s_waitcnt vmcnt(0)", "v_lshrrev_b32 v17, 16, v8",
+          "v_and_b32 v8, 0xff, v8", "v_mov_b32 v12, 0", "v_mov_b32 v13, 0"]
+    L += code
     L += ["v_mul_u32_u24 v6, s15, v4", "v_add_i32 v6, vcc, s12, v6"]
-    if kind_ix == 5:
+    if kind in (6, 7):
         L += ["buffer_store_dword v12, v6, s[8:11], 0 offen", "buffer_store_dword v13, v6, s[8:11], 0 offen offset:4"]
     else:
         L.append("buffer_store_dwordx2 v[12:13], v6, s[8:11], 0 offen")
-    L += ["v_cmp_eq_u32 vcc, 0, v4", "s_and_saveexec_b64 s[18:19], vcc", "s_cbranch_execz cvt_nomark",
+    L += ["v_cmp_eq_u32 vcc, 0, v4", "s_and_saveexec_b64 s[18:19], vcc", "s_cbranch_execz cvt_nomark" + lab,
           "s_mul_i32 s20, s13, s15", "s_lshr_b32 s21, s12, 1", "s_add_u32 s20, s20, s21", "v_mov_b32 v7, s20",
-          "v_mov_b32 v16, s14", "buffer_store_dword v16, v7, s[8:11], 0 offen", "cvt_nomark:",
-          "s_mov_b64 exec, s[18:19]", "cvt_done:", "s_mov_b64 exec, s[16:17]"]
+          "v_mov_b32 v16, s14", "buffer_store_dword v16, v7, s[8:11], 0 offen", "cvt_nomark%s:" % lab,
+          "s_mov_b64 exec, s[18:19]", "cvt_done%s:" % lab, "s_mov_b64 exec, s[16:17]"]
     if not cs: L += ["v_mov_b32 v0, 0", "exp mrt0 v0, v0, v0, v0 done vm"]
     L.append("s_endpgm")
     return "\n".join(L) + "\n"
 
-def rows_of(kind_ix):
-    """Rows the kind runs (bit kind_ix of k_opt5_row_kinds)."""
-    if kind_ix in (0, 5, 6): return set(range(len(ROWS)))
-    if kind_ix == 1:
-        return {r for r, (k, a, b, c) in enumerate(ROWS) if split(OPS[k])[0] in BASE and not split(OPS[k])[1] and
-                (split(OPS[k])[0] != OFF or inline_code(a, False) is not None)}
-    return {r for r in range(len(ROWS)) if row_block(r, kind_ix)}
+def rows_kind(base, kind):
+    """Rows the binary keeps a result for."""
+    out = []
+    for r, (k, a, b_, c) in enumerate(ROWS):
+        if base_of(k) != base: continue
+        mods = split(OPS[k])[1]
+        if kind in (0, 6, 8) and not mods: out.append(r)
+        elif kind in (1, 7, 9) and mods: out.append(r)
+        elif kind == 2 and not mods and base not in NO_VOP3 and (base != OFF or inline_code(a, False) is not None):
+            out.append(r)
+        elif kind in (3, 4, 5) and row_block(r, kind - 1): out.append(r)
+    return out
 
 def assemble(src):
     with tempfile.TemporaryDirectory() as d:
@@ -248,19 +278,14 @@ def assemble(src):
     b = e[text[4]:text[4] + text[5]]
     return list(struct.unpack("<%dI" % (len(b) // 4), b))
 
-def header(name, src, code, h):
+def binary(name, code, h):
     if len(code) % 2: code = code + [0xBF800000]  # s_nop: even dword count after the SDK token
     code = [0xBEEB03FF, len(code) // 2] + code    # token, n / 2 - 1 with n = dwords incl. the token
-    L = ["#pragma once", "#include <stdint.h>", ""]
-    for l in src.split("\n"):
-        if not l.startswith(";"): break
-        if not l.startswith("; Generated"): L.append("//" + l[1:])
-    L += ["// %s. Hash %08X (main.c adds the float mode)." % (RSRC1, h),
-          "static const uint32_t %s_binary[] __attribute__((aligned(256))) = {" % name]
+    L = ["static const uint32_t %s[] __attribute__((aligned(256))) = {" % name]
     for i in range(0, len(code), 6): L.append("    " + " ".join("0x%08X," % w for w in code[i:i + 6]))
     L.append("    " + " ".join("0x%08X," % w for w in (0x5362724F, 0x00726468, len(code) * 4 << 8, 0, 0xDEADBEEF, h, 0)))
     L.append("};")
-    return "\n".join(L) + "\n"
+    return L
 
 # modifier ops: the patched e64 must equal llvm-mc's own encoding where it takes the modifiers
 chk = [(k, OPS[k]) for k in range(len(OPS)) if split(OPS[k])[1] and split(OPS[k])[0] in BASE and split(OPS[k])[0] != OFF]
@@ -289,29 +314,49 @@ for k, n in chk:
     assert e == [w0 | b0, w1 | b1], (n, line, ["%08x" % x for x in e], "%08x %08x" % (w0 | b0, w1 | b1))
     ok_llvm.append(n)
 
-files = []
-mask = [0] * len(ROWS)
-for ki in range(len(KINDS)):
-    src = source(ki)
-    code = assemble(src)
-    open(os.path.join(ROOT, "shaders", KIND_FILE[ki] + ".s"), "w").write(src)
-    open(os.path.join(ROOT, "shaders", KIND_FILE[ki] + ".h"), "w").write(
-        header(KIND_FILE[ki], src, code, HASH | ki << 8))
-    for r in rows_of(ki): mask[r] |= 1 << ki
-    files.append((KIND_FILE[ki], len(code)))
-S = ["/* Generated by tools/gen_ps_cvt.py - do not edit. OPCODE_TEST 5 passes: kinds 0..%d pixel shaders (ps_cvt*.h), "
-     "kind %d the compute shader (cs_cvt.h); k_opt5_row_kinds: bit k = kind k runs the row. */" % (PS_KINDS - 1, PS_KINDS),
-     "#pragma once", "#define OPT5_KINDS %d" % len(KINDS), "#define OPT5_PS_KINDS %d" % PS_KINDS,
-     "#define OPT5_HASH 0x%08Xu" % HASH,
-     "static const char* const k_opt5_kind[OPT5_KINDS] = {%s};" % ", ".join('"%s"' % k for k in KINDS),
-     "static const uint32_t* const k_opt5_kind_bin[OPT5_KINDS] = {%s};" % ", ".join(
-         "%s_binary" % f for f in KIND_FILE),
-     "static const uint32_t k_opt5_kind_size[OPT5_KINDS] = {%s};" % ", ".join(
-         "sizeof(%s_binary)" % f for f in KIND_FILE),
-     "static const uint8_t k_opt5_row_kinds[] = {%s}; /* a row of src/optest5.h */" % ", ".join(
-         "0x%02X" % m for m in mask)]
+bins = []  # (base, kind, rows)
+for base in BASE:
+    for kind in range(len(KINDS)):
+        code = body(base, kind)
+        rows = rows_kind(base, kind)
+        if code:
+            assert rows, (base, kind)
+            bins.append((base, kind, code, rows))
+srcs, arrays = [], []
+row_bin = [[0xFFFF] * len(CLASSES) for _ in ROWS]
+for b, (base, kind, code, rows) in enumerate(bins):
+    src = source(b, base, kind, code)
+    srcs.append(src)
+    arrays += binary("ps_cvt_b%d" % b, assemble(src), HASH | b << 8)
+    for r in rows:
+        assert row_bin[r][KIND_CLASS[kind]] == 0xFFFF, (r, kind)
+        row_bin[r][KIND_CLASS[kind]] = b
+open(os.path.join(ROOT, "shaders", "ps_cvt.s"), "w").write(
+    "; OPCODE_TEST 5 passes, one binary after the other (shaders/ps_cvt_set.h). Generated by tools/gen_ps_cvt.py.\n"
+    + "\n".join(srcs))
+OPI = {n: i for i, n in enumerate(OPS)}
+S = ["/* Generated by tools/gen_ps_cvt.py - do not edit. The OPCODE_TEST 5 passes: %d binaries (shaders/ps_cvt.s), "
+     "each run in every float mode; %s. Hash %08X | binary << 8 | float mode (main.c, at upload). k_opt5_row_bin: "
+     "the binary that keeps a row's result in each class (0xFFFF: none). */" % (len(bins), RSRC1, HASH),
+     "#pragma once", "#define OPT5_BINS %d" % len(bins), "#define OPT5_CLASSES %d" % len(CLASSES),
+     "#define OPT5_HASH 0x%08Xu" % HASH, "#define OPT5_KIND_COMPUTE 8 /* and 9: compute shaders */"]
+S += arrays
+S += ["static const char* const k_opt5_kind[%d] = {%s};" % (len(KINDS), ", ".join('"%s"' % k for k in KINDS)),
+      "static const char* const k_opt5_class[OPT5_CLASSES] = {%s};" % ", ".join('"%s"' % c for c in CLASSES),
+      "static const uint32_t* const k_opt5_bin[OPT5_BINS] = {%s};" % ", ".join(
+          "ps_cvt_b%d" % b for b in range(len(bins))),
+      "static const uint32_t k_opt5_bin_size[OPT5_BINS] = {%s};" % ", ".join(
+          "sizeof(ps_cvt_b%d)" % b for b in range(len(bins))),
+      "static const uint8_t k_opt5_bin_op[OPT5_BINS] = {%s}; /* the op's e32 form in src/optest5.h */" % ", ".join(
+          str(OPI[base]) for base, kind, code, rows in bins),
+      "static const uint8_t k_opt5_bin_kind[OPT5_BINS] = {%s};" % ", ".join(str(kind) for base, kind, c, r in bins),
+      "static const uint8_t k_opt5_bin_class[OPT5_BINS] = {%s};" % ", ".join(
+          str(KIND_CLASS[kind]) for base, kind, c, r in bins),
+      "static const uint16_t k_opt5_row_bin[][OPT5_CLASSES] = {%s}; /* a row of src/optest5.h */" % ", ".join(
+          "{%s}" % ", ".join("0x%X" % x for x in rb) for rb in row_bin)]
 open(os.path.join(ROOT, "shaders", "ps_cvt_set.h"), "w").write("\n".join(S) + "\n")
-for f, n in files: print("shaders/%s.s / .h: %d dwords" % (f, n))
-print("shaders/ps_cvt_set.h: %d rows; modifier encodings checked against llvm-mc: %d of %d" % (
-    len(ROWS), len(ok_llvm), len(chk)))
-for ki in range(len(KINDS)): print("  kind %d %-8s %4d rows" % (ki, KINDS[ki], sum(1 for m in mask if m >> ki & 1)))
+print("shaders/ps_cvt.s, shaders/ps_cvt_set.h: %d binaries, %d bytes; %d rows; modifier encodings checked against "
+      "llvm-mc: %d of %d" % (len(bins), 4 * sum(1 for l in arrays for w in l.split() if w.startswith("0x")), len(ROWS),
+                             len(ok_llvm), len(chk)))
+for c in range(len(CLASSES)):
+    print("  class %d %-8s %4d rows" % (c, CLASSES[c], sum(1 for rb in row_bin if rb[c] != 0xFFFF)))

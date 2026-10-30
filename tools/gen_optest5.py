@@ -30,6 +30,8 @@ OPI={n:i for i,(n,k,w) in enumerate(OPS)}
 # for f64/f16; the first two are drawn on screen
 MODES=[0x00,0xC0,0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0x90,0xA0,0xB0,0xD0,0xE0,0xF0,0x01,0x02,0x03,0x04,0x08,0x0C]
 FULL_ONLY = ("U32_F64", "PKACCUM_U8_F32")  # no translator in shadPS4 (main 94e21778)
+# no VOP3 encoding: shadPS4 asserts decoding it (format.cpp VOP3 401..404 Undefined; 860d73b)
+NO_VOP3 = ("F32_UBYTE0", "F32_UBYTE1", "F32_UBYTE2", "F32_UBYTE3")
 dmin32=struct.unpack('<f',struct.pack('<I',1))[0]; dmax32=struct.unpack('<f',struct.pack('<I',0x007FFFFF))[0]
 F32V=[0.0,-0.0,0.5,1.5,2.5,-0.5,-1.5,-2.5,0.49999997,1.0,-1.0,dmin32,-dmin32,2147483520.0,2147483648.0,4294967040.0,4294967296.0,1e10,
       -2147483648.0,-2147483904.0,-1e10,float('inf'),float('-inf'),("NaN",0x7FC00000),("-NaN",0xFFC00000),
@@ -123,7 +125,7 @@ MF2=[(1.0,2.0),(-1.5,0.5),(-0.0,0.0),(("NaN",0x7FC00000),("-NaN",0xFFC00000)),(-
 MI2=[(1,M),(0x7FFFFFFF,0x80000000),(70000,(-70000)&M),(0x8000,0xFFFF8000)]
 MP8=[(1.5,0,0),(-1.0,1,0x11223344),(171.0,2,0x11223344),(("NaN",0x7FC00000),0,0)]
 for name,kind,wd in list(OPS[:26]):
-    if name in FULL_ONLY: continue
+    if name in FULL_ONLY or name in NO_VOP3: continue
     n=MODS["3" if kind=="pk8" else "2" if kind in ("f2","i2") else "1"]
     for md in n:
         mn="%s (%s)" % (name,md)
