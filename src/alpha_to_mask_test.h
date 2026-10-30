@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-14"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-15"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -92,6 +92,7 @@
 #define ALPHA_TO_MASK_ZEXP (1u << 0)
 #define ALPHA_TO_MASK_KILL (1u << 6)
 #define ALPHA_TO_MASK_COV2MASK (1u << 7)
+#define ALPHA_TO_MASK_PA_CL_GB_VERT_CLIP_ADJ 0x2FAu
 #define ALPHA_TO_MASK_AA_ZERO 0x10000u /* aa_mask: PA_SC_AA_MASK 0 for every pixel */
 #define ALPHA_TO_MASK_DEPTH_BEFORE_SHADER (1u << 12)
 #define ALPHA_TO_MASK_MASKEXP (1u << 8)
@@ -142,6 +143,7 @@ enum {
     V_KP_RESTORE,
     V_MARK,
     V_COV,
+    V_ZFAR,
     V_PKNORM_U16,
     V_PKNORM_I16,
     V_PKRTZ,
@@ -190,6 +192,7 @@ static const char* const k_alpha_to_mask_vname[ALPHA_TO_MASK_NSH] = {
     "t_kp_restore (v_cmpx, then s_mov_b64 exec, -1 where B & 1, exp vm)",
     "t_mark (1 to B: the pixel shader ran)",
     "t_cov (the sample coverage input to B)",
+    "t_zfar (MRTZ Z 0.75, MRT0.a = A)",
     "t_pknorm_u16 (v_cvt_pknorm_u16_f32 A, C to B)",
     "t_pknorm_i16 (v_cvt_pknorm_i16_f32 A, C to B)",
     "t_pkrtz (v_cvt_pkrtz_f16_f32 A, C to B)",
@@ -245,6 +248,7 @@ static const struct {
      ALPHA_TO_MASK_T_KP_RESTORE_RSRC1},
     {alpha_to_mask_t_mark_bin, sizeof(alpha_to_mask_t_mark_bin), ALPHA_TO_MASK_T_MARK_RSRC1},
     {alpha_to_mask_t_cov_bin, sizeof(alpha_to_mask_t_cov_bin), ALPHA_TO_MASK_T_COV_RSRC1},
+    {alpha_to_mask_t_zfar_bin, sizeof(alpha_to_mask_t_zfar_bin), ALPHA_TO_MASK_T_ZFAR_RSRC1},
     {alpha_to_mask_t_pknorm_u16_bin, sizeof(alpha_to_mask_t_pknorm_u16_bin),
      ALPHA_TO_MASK_T_PKNORM_U16_RSRC1},
     {alpha_to_mask_t_pknorm_i16_bin, sizeof(alpha_to_mask_t_pknorm_i16_bin),
@@ -362,6 +366,7 @@ struct AlphaToMaskTest {
     uint32_t colour;           /* the test colour's bits; 0: 1.0 */
     uint64_t aa_quad;       /* PA_SC_AA_MASK per quad pixel (16 bits each); 0: aa_mask everywhere */
     uint8_t cb_disable;     /* CB_COLOR_CONTROL.MODE CB_DISABLE */
+    uint8_t channel;        /* colour channel the readback reads (0 red .. 3 alpha) */
     uint8_t no_kill_enable; /* DB_SHADER_CONTROL.KILL_ENABLE off for a kill variant */
     uint8_t locs;           /* 1: every sample at the pixel centre */
     uint32_t uni_alpha, mrt0a, mrtza, iter_delta, blend, wofs, raw_col, seed;
@@ -1064,11 +1069,31 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "I04",
                        .what = "4x D1, PS_ITER_SAMPLES 1 (2 of 4), alpha = A + 0.125 sample id",
                        .db_alpha_to_mask = ALPHA_TO_MASK_D1, .ps = V_ITER, .ps_iter = 1,
-                       .iter_delta = 0x3E000000u, .show = 1, .hyp = H_NOMODEL),
+                       .iter_delta = 0x3E000000u),
     ALPHA_TO_MASK_CASE(.id = "I05",
                        .what = "8x D1, PS_ITER_SAMPLES 1 (2 of 8), alpha = A + 0.0625 sample id",
                        .ns = 8, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .ps = V_ITER, .ps_iter = 1,
-                       .iter_delta = 0x3D800000u, .show = 1, .hyp = H_NOMODEL),
+                       .iter_delta = 0x3D800000u),
+    ALPHA_TO_MASK_CASE(.id = "I06",
+                       .what = "8x D1, PS_ITER_SAMPLES 2 (4 of 8), alpha = A + 0.0625 sample id",
+                       .ns = 8, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .ps = V_ITER, .ps_iter = 2,
+                       .iter_delta = 0x3D800000u),
+    ALPHA_TO_MASK_CASE(.id = "I07",
+                       .what = "4x D0, PS_ITER_SAMPLES 0 (1 of 4), alpha = A + 0.125 sample id",
+                       .ps = V_ITER, .ps_iter = 0, .iter_delta = 0x3E000000u),
+    ALPHA_TO_MASK_CASE(.id = "I08",
+                       .what =
+                           "8x D0, PS_ITER_SAMPLES 1 (2 of 8), random alphas, + 0.03125 sample id",
+                       .ns = 8, .ps = V_ITER, .ps_iter = 1, .iter_delta = 0x3D000000u,
+                       .kind = AK_RANDOM, .seed = 0x1008u),
+    ALPHA_TO_MASK_CASE(.id = "DB06",
+                       .what = "DEPTH_BEFORE_SHADER, MRTZ Z 0.75 (interpolated 0.5), 4x D1",
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .ps = V_ZFAR,
+                       .dbsc = ALPHA_TO_MASK_DEPTH_BEFORE_SHADER, .kind = AK_RANDOM, .hyp = H_DBS,
+                       .seed = 0xDB06u),
+    ALPHA_TO_MASK_CASE(.id = "CSM",
+                       .what = "CB_SHADER_MASK and CB_TARGET_MASK per colour channel (red, green, "
+                               "blue, alpha read back)"),
     /* everything at once: MRT0.a, MRTZ.a, sample mask export, kill, PA_SC_AA_MASK */
     ALPHA_TO_MASK_CASE(.id = "ALL1",
                        .what = "MRT0.a A, MRTZ.a C, mask B, kill B bit 8, AA_MASK 0xB, 4x D1",
@@ -1550,6 +1575,12 @@ static void alpha_to_mask_common(struct PM4Builder* b, struct AlphaToMaskContext
         pm4_set_context_regs(b, CTX_VIEWPORT_ZMIN0, z, 2);
     }
     pm4_set_context_reg(b, CTX_INDEX_OFFSET, 0);
+    {
+        /* PA_CL_GB_*: a guard band wide enough that no test primitive is clipped (a clipped
+           primitive is split, and its pixels on the split run the pixel shader twice) */
+        const uint32_t gb[4] = {0x41800000u, 0x41800000u, 0x41800000u, 0x41800000u};
+        pm4_set_context_regs(b, ALPHA_TO_MASK_PA_CL_GB_VERT_CLIP_ADJ, gb, 4);
+    }
     pm4_set_context_reg(b, CTX_PS_INPUT_CNTL_0, 0);
     pm4_set_context_reg(b, CTX_VS_OUTPUT_CONFIG, 0);
     alpha_to_mask_reg(b, CTX_PS_INPUT_ENA, ena);
@@ -1583,14 +1614,14 @@ static void alpha_to_mask_ps(struct PM4Builder* b, struct AlphaToMaskContext* c,
 /* SPI_SHADER_Z_FORMAT and DB_SHADER_CONTROL bits of a test variant (ac_get_spi_shader_z_format:
    Z + alpha 32_AR, Z + mask 32_ABGR). */
 static uint32_t alpha_to_mask_zfmt(int v) {
-    if (v == V_TEX)
+    if (v == V_TEX || v == V_ZFAR)
         return 1u; /* 32_R: Z only */
     if (v == V_ALL)
         return 9u;
     return (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0) ? 3u : v == V_MASK ? 9u : 0u;
 }
 static uint32_t alpha_to_mask_vdbsc(int v) {
-    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0 || v == V_TEX)
+    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0 || v == V_TEX || v == V_ZFAR)
         return ALPHA_TO_MASK_ZEXP;
     if (v == V_MASK)
         return ALPHA_TO_MASK_ZEXP | ALPHA_TO_MASK_MASKEXP;
@@ -2131,7 +2162,10 @@ static int64_t alpha_to_mask_expect(const struct AlphaToMaskTest* t, int x, int 
     if (t->ps == V_ITER && path0) {
         uint32_t it = 0;
         for (uint32_t s = 0; s < t->ns; s++) {
-            float as = alpha_to_mask_ftof(A) + (float)s * alpha_to_mask_ftof(t->iter_delta);
+            /* with PS_ITER_SAMPLES m below the samples, sample s takes invocation s % m */
+            uint32_t m_iter = (1u << t->ps_iter) < t->ns ? (1u << t->ps_iter) : t->ns;
+            float as =
+                alpha_to_mask_ftof(A) + (float)(s % m_iter) * alpha_to_mask_ftof(t->iter_delta);
             struct AlphaValue a = alpha_value_f32(h ? A : alpha_to_mask_fbits(as));
             it |= alpha_to_mask_amask(t, a, p, h) & (1u << s);
         }
@@ -2172,8 +2206,8 @@ static int64_t alpha_to_mask_expect_depth(const struct AlphaToMaskTest* t, int x
 }
 /* An MRT0 export reaches the colour target (with any enable mask): the covered samples change. */
 static int alpha_to_mask_colour_written(const struct AlphaToMaskTest* t) {
-    return t->cbf != CBF_NONE && !t->cb_disable && (alpha_to_mask_cbtm(t) & 1) &&
-           (alpha_to_mask_cbsm(t) & 1) && (alpha_to_mask_colfmt(t) & 0xF) &&
+    return t->cbf != CBF_NONE && !t->cb_disable && ((alpha_to_mask_cbtm(t) >> t->channel) & 1) &&
+           ((alpha_to_mask_cbsm(t) >> t->channel) & 1) && (alpha_to_mask_colfmt(t) & 0xF) &&
            alpha_to_mask_exports_mrt0(t->ps);
 }
 /* The variants a crash or hang marks bad: all four MRTZ.a exporters together (one shader
@@ -3223,6 +3257,7 @@ static void alpha_to_mask_params(struct AlphaToMaskContext* c, const struct Alph
     c->tab[5] = t->mrtza;
     c->tab[8] = 0x3F000000u;
     c->tab[9] = t->colour ? t->colour : 0x3F800000u;
+    c->tab[34] = t->channel;
     c->tab[10] = t->ns;
     c->tab[11] = t->iter_delta;
     c->tab[32] = (t->raw_col & 0xFFFFu) | (t->raw_col << 16);
@@ -3339,6 +3374,8 @@ static int alpha_to_mask_family_size(const struct AlphaToMaskTest* t) {
         return ALPHA_TO_MASK_RND_CONFIGS;
     if (alpha_to_mask_streq(t->id, "AA16"))
         return 48;
+    if (alpha_to_mask_streq(t->id, "CSM"))
+        return (11 + 6) * 4;
     return 0;
 }
 static void alpha_to_mask_family_test(struct AlphaToMaskTest* o, const struct AlphaToMaskTest* t,
@@ -3462,6 +3499,21 @@ static void alpha_to_mask_family_test(struct AlphaToMaskTest* o, const struct Al
         o->seed = t->seed * 31u + (uint32_t)k;
         return;
     }
+    if (alpha_to_mask_streq(t->id, "CSM")) { /* shader / target mask per channel, alpha 0.5 */
+        static const uint8_t shader_masks[11] = {0x1, 0x2, 0x4, 0x8, 0x3, 0x6,
+                                                 0xC, 0x7, 0xE, 0xB, 0xF};
+        static const uint8_t target_masks[6] = {0x1, 0x2, 0x4, 0x8, 0x5, 0xA};
+        int m = k / 4;
+        o->channel = (uint8_t)(k % 4);
+        o->kind = AK_UNIFORM;
+        o->uni_alpha = 0x3F000000u;
+        o->db_alpha_to_mask = ALPHA_TO_MASK_OFF0;
+        if (m < 11)
+            o->cbsm = shader_masks[m];
+        else
+            o->cbtm = target_masks[m - 11];
+        return;
+    }
     if (alpha_to_mask_streq(t->id, "AA16")) { /* 16 samples: walking one, walking zero, random */
         alpha_to_mask_seed(t->seed + (uint32_t)k);
         o->ns = 16;
@@ -3507,6 +3559,14 @@ static void alpha_to_mask_family_line(const struct AlphaToMaskTest* o, int k) {
     }
     if (o->zfunc)
         alpha_to_mask_s(", ZFUNC GREATER");
+    if (o->cbsm || o->cbtm || o->channel) {
+        alpha_to_mask_s(", CB_SHADER_MASK ");
+        alpha_to_mask_x(alpha_to_mask_cbsm(o), 1);
+        alpha_to_mask_s(" CB_TARGET_MASK ");
+        alpha_to_mask_x(alpha_to_mask_cbtm(o), 1);
+        alpha_to_mask_s(", channel ");
+        alpha_to_mask_u(o->channel);
+    }
     alpha_to_mask_s(" | ");
     alpha_to_mask_u(g_tot.dmis[0]);
     alpha_to_mask_s(" / ");

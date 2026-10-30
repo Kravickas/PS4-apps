@@ -32,6 +32,7 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           v_cmpx then VALU work, v_cmpx then exec copied through SGPRs, v_cmp +
           s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
           exec restored to all lanes
+  t_zfar  MRTZ Z 0.75 (32_R), MRT0 (colour x 3, A)
   t_mark  stores 1 to B[i] (did the pixel shader run for the pixel)
   t_cov   stores the sample coverage input (v4, SPI_PS_INPUT_ENA.SAMPLE_COVERAGE_ENA) to B[i]
   t_pknorm_u16 / t_pknorm_i16 / t_pkrtz / t_pk_u16 / t_pk_i16  the conversion of (A, C) stored to
@@ -41,9 +42,9 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           stored to B[i]; MRTZ Z 0.5 (32_R), MRT0 (1, 1, 1, alpha)
 vs_net: the net plane's vertices from the V# in s[0:3] (x, y, z, w, u, v; stride 32).
 clr: MRT0 0.25 x 4 (the clear draw; the depth clear is DB_RENDER_CONTROL's).
-rd: the readback: for sample s < table 10, image_load the colour (T# at 16) and the depth (T# at
-24) at (x, y, s) and store them raw at the V# at 12: colour at ((y 64 + x) 8 + s) 4, depth at
-0x20000 + the same; MRT0 0 into a scratch target.
+rd: the readback: for sample s < table 10, image_load the colour (T# at 16; its channel table 34)
+and the depth (T# at 24) at (x, y, s) and store them raw at the V# at 12: colour at
+((y 64 + x) 8 + s) 4, depth at 0x20000 + the same; MRT0 0 into a scratch target.
 vis: the visual pages (see vis_shader).
 
 Needs llvm-mc-18 (-mcpu=bonaire). Run from the project root."""
@@ -450,6 +451,12 @@ SHADERS = [
         "s_waitcnt vmcnt(0)",
         "exp mrt0 v10, v10, v10, v9 done vm",
     ]),
+    # MRTZ Z 0.75 (the interpolated Z is 0.5), MRT0 (colour x 3, A)
+    ("t_zfar", 0xA2A0C130, "ps", PS_HEAD + [
+        "v_mov_b32 v13, 0.75",
+        "exp mrtz v13, off, off, off",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
 ] + [
     # conversion instructions: op(A, C) stored to B[i]; MRT0 (colour x 3, A)
     (name, h, "ps", PS_HEAD + [
@@ -477,6 +484,7 @@ SHADERS = [
         "s_load_dwordx8 s[12:19], s[0:1], 0x18",
         "s_load_dwordx4 s[20:23], s[0:1], 0xc",
         "s_load_dword s24, s[0:1], 0xa",
+        "s_load_dword s27, s[0:1], 0x22",
         "s_waitcnt lgkmcnt(0)",
         "v_cvt_u32_f32 v4, v2",
         "v_cvt_u32_f32 v5, v3",
@@ -488,8 +496,22 @@ SHADERS = [
         "v_mov_b32 v7, v4",
         "v_mov_b32 v8, v5",
         "v_mov_b32 v9, s25",
-        "image_load v10, v[7:9], s[4:11] dmask:0x1 unorm",
+        "image_load v[16:19], v[7:9], s[4:11] dmask:0xf unorm",
         "image_load v11, v[7:9], s[12:19] dmask:0x1 unorm",
+        "s_waitcnt vmcnt(0)",
+        "v_mov_b32 v10, v16",
+        "s_cmp_eq_u32 s27, 1",
+        "s_cbranch_scc0 rd_g",
+        "v_mov_b32 v10, v17",
+        "rd_g:",
+        "s_cmp_eq_u32 s27, 2",
+        "s_cbranch_scc0 rd_b",
+        "v_mov_b32 v10, v18",
+        "rd_b:",
+        "s_cmp_eq_u32 s27, 3",
+        "s_cbranch_scc0 rd_a",
+        "v_mov_b32 v10, v19",
+        "rd_a:",
         "s_lshl_b32 s26, s25, 2",
         "v_add_i32 v12, vcc, s26, v6",
         "v_add_i32 v13, vcc, 0x20000, v12",
