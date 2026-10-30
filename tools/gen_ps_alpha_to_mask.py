@@ -28,6 +28,10 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
   t_c3 / t_cc / t_c4 / t_c8      MRT0 FP16 compressed with enable mask 3 / C / 4 / 8
   t_kill2 / t_kill3 / t_kill_novm  killed where B & 1: v_cmpx and a branch to a null export,
           v_cmp and s_and_b64 exec, v_cmpx and an export without the valid mask
+  t_kp_*  killed where B & 1 after: v_cmpx_e64 to an SGPR pair, v_cmpx_gt_f32, v_cmpx_gt_u32,
+          v_cmpx then VALU work, v_cmpx then exec copied through SGPRs, v_cmp +
+          s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
+          exec restored to all lanes
   t_pknorm_u16 / t_pknorm_i16 / t_pkrtz / t_pk_u16 / t_pk_i16  the conversion of (A, C) stored to
           B[i]; MRT0 (colour x 3, A)
   t_all   kill where B bit 8, MRTZ (Z, -, B & 0xff, C at byte 0x8000), MRT0 (colour x 3, A)
@@ -386,6 +390,50 @@ SHADERS = [
         "v_cmpx_eq_u32 vcc, 0, v16",
         "exp mrt0 v10, v10, v10, v9 done",
     ]),
+] + [
+    # more kill patterns (B & 1 kills): what follows the compare decides the valid mask
+    (name, h, "ps", PS_HEAD + ["v_and_b32 v16, 1, v17"] + body) for name, h, body in [
+        ("t_kp_e64", 0xA2A0C126, [
+            "v_cmpx_eq_u32_e64 s[24:25], 0, v16",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_f32", 0xA2A0C127, [
+            "v_cvt_f32_u32 v19, v16",
+            "v_cmpx_gt_f32 vcc, 0.5, v19",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_gt", 0xA2A0C128, [
+            "v_cmpx_gt_u32 vcc, 1, v16",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_valu", 0xA2A0C129, [
+            "v_cmpx_eq_u32 vcc, 0, v16",
+            "v_mul_f32 v10, 1.0, v10",
+            "v_add_f32 v9, 0, v9",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_smov", 0xA2A0C12A, [
+            "v_cmpx_eq_u32 vcc, 0, v16",
+            "s_mov_b64 s[24:25], exec",
+            "s_mov_b64 exec, s[24:25]",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_saveexec", 0xA2A0C12B, [
+            "v_cmp_eq_u32 vcc, 0, v16",
+            "s_and_saveexec_b64 s[24:25], vcc",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+        ("t_kp_twoexp", 0xA2A0C12C, [
+            "v_cmpx_eq_u32 vcc, 0, v16",
+            "exp mrt0 v10, v10, v10, v9",
+            "exp null off, off, off, off done vm",
+        ]),
+        ("t_kp_restore", 0xA2A0C12D, [
+            "v_cmpx_eq_u32 vcc, 0, v16",
+            "s_mov_b64 exec, -1",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+        ]),
+    ]
 ] + [
     # conversion instructions: op(A, C) stored to B[i]; MRT0 (colour x 3, A)
     (name, h, "ps", PS_HEAD + [

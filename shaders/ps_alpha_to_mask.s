@@ -611,6 +611,186 @@ v_and_b32 v16, 1, v17
 v_cmpx_eq_u32 vcc, 0, v16
 exp mrt0 v10, v10, v10, v9 done
 s_endpgm
+; ---- t_kp_e64 (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_eq_u32_e64 s[24:25], 0, v16
+exp mrt0 v10, v10, v10, v9 done vm
+s_nop 0
+s_endpgm
+; ---- t_kp_f32 (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cvt_f32_u32 v19, v16
+v_cmpx_gt_f32 vcc, 0.5, v19
+exp mrt0 v10, v10, v10, v9 done vm
+s_nop 0
+s_endpgm
+; ---- t_kp_gt (ps) ----
+.long 0xbeeb03ff
+.long 0xb
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_gt_u32 vcc, 1, v16
+exp mrt0 v10, v10, v10, v9 done vm
+s_endpgm
+; ---- t_kp_valu (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_eq_u32 vcc, 0, v16
+v_mul_f32 v10, 1.0, v10
+v_add_f32 v9, 0, v9
+exp mrt0 v10, v10, v10, v9 done vm
+s_endpgm
+; ---- t_kp_smov (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_eq_u32 vcc, 0, v16
+s_mov_b64 s[24:25], exec
+s_mov_b64 exec, s[24:25]
+exp mrt0 v10, v10, v10, v9 done vm
+s_endpgm
+; ---- t_kp_saveexec (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmp_eq_u32 vcc, 0, v16
+s_and_saveexec_b64 s[24:25], vcc
+exp mrt0 v10, v10, v10, v9 done vm
+s_nop 0
+s_endpgm
+; ---- t_kp_twoexp (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_eq_u32 vcc, 0, v16
+exp mrt0 v10, v10, v10, v9
+exp null off, off, off, off done vm
+s_endpgm
+; ---- t_kp_restore (ps) ----
+.long 0xbeeb03ff
+.long 0xc
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+s_load_dwordx8 s[8:15], s[0:1], 0x4
+s_waitcnt lgkmcnt(0)
+v_cvt_u32_f32 v4, v2
+v_cvt_u32_f32 v5, v3
+v_lshlrev_b32 v6, 6, v5
+v_add_i32 v6, vcc, v6, v4
+v_lshlrev_b32 v8, 2, v6
+v_add_i32 v18, vcc, 0x4000, v8
+buffer_load_dword v9, v8, s[4:7], 0 offen
+buffer_load_dword v17, v18, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v10, s13
+v_mov_b32 v13, s12
+v_and_b32 v16, 1, v17
+v_cmpx_eq_u32 vcc, 0, v16
+s_mov_b64 exec, -1
+exp mrt0 v10, v10, v10, v9 done vm
+s_nop 0
+s_endpgm
 ; ---- t_pknorm_u16 (ps) ----
 .long 0xbeeb03ff
 .long 0xf
