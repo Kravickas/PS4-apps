@@ -123,9 +123,10 @@ def longs(ws):
     return [".long " + ", ".join("0x%08x" % w for w in ws)]
 
 def keep(cond, wide):
+    """The result where cond holds; v18 = 1 there (the slot is this binary's)."""
     L = [cond, "v_cndmask_b32 v12, v12, v14, vcc"]
     if wide: L.append("v_cndmask_b32 v13, v13, v15, vcc")
-    return L
+    return L + ["v_cndmask_b32 v18, v18, v19, vcc"]
 
 def pre(base):
     return ["v_mov_b32 v14, 0xdead0000"] if base == "F16_F32" else []
@@ -157,7 +158,8 @@ def op_block(k, e64=False):
                 L += longs([w0 | b0, (w1 & ~0x1FF) | code | b1])
             else:
                 L.append("v_cvt_off_f32_i4 v14, %s" % imm_text(v))
-            L += ["v_cmp_eq_u32 vcc, 0x%x, v9" % v, "s_and_b64 vcc, vcc, s[22:23]", "v_cndmask_b32 v12, v12, v14, vcc"]
+            L += ["v_cmp_eq_u32 vcc, 0x%x, v9" % v, "s_and_b64 vcc, vcc, s[22:23]", "v_cndmask_b32 v12, v12, v14, vcc",
+                  "v_cndmask_b32 v18, v18, v19, vcc"]
         return L
     L += pre(base)
     if mods:
@@ -236,13 +238,16 @@ def source(b, base, kind, code):
     L += ["s_waitcnt lgkmcnt(0)", "v_cmp_gt_u32 vcc, s13, v4", "s_and_saveexec_b64 s[16:17], vcc",
           "s_cbranch_execz cvt_done" + lab, "v_lshlrev_b32 v5, 4, v4",
           "buffer_load_dwordx4 v[8:11], v5, s[4:7], 0 offen", "s_waitcnt vmcnt(0)", "v_lshrrev_b32 v17, 16, v8",
-          "v_and_b32 v8, 0xff, v8", "v_mov_b32 v12, 0", "v_mov_b32 v13, 0"]
+          "v_and_b32 v8, 0xff, v8", "v_mov_b32 v12, 0", "v_mov_b32 v13, 0", "v_mov_b32 v18, 0", "v_mov_b32 v19, 1"]
     L += code
-    L += ["v_mul_u32_u24 v6, s15, v4", "v_add_i32 v6, vcc, s12, v6"]
+    # only the slots this binary has a result for: the others keep what another binary wrote
+    L += ["v_mul_u32_u24 v6, s15, v4", "v_add_i32 v6, vcc, s12, v6", "v_cmp_ne_u32 vcc, 0, v18",
+          "s_and_saveexec_b64 s[26:27], vcc"]
     if kind in (6, 7):
         L += ["buffer_store_dword v12, v6, s[8:11], 0 offen", "buffer_store_dword v13, v6, s[8:11], 0 offen offset:4"]
     else:
         L.append("buffer_store_dwordx2 v[12:13], v6, s[8:11], 0 offen")
+    L.append("s_mov_b64 exec, s[26:27]")
     L += ["v_cmp_eq_u32 vcc, 0, v4", "s_and_saveexec_b64 s[18:19], vcc", "s_cbranch_execz cvt_nomark" + lab,
           "s_mul_i32 s20, s13, s15", "s_lshr_b32 s21, s12, 1", "s_add_u32 s20, s20, s21", "v_mov_b32 v7, s20",
           "v_mov_b32 v16, s14", "buffer_store_dword v16, v7, s[8:11], 0 offen", "cvt_nomark%s:" % lab,

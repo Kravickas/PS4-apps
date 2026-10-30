@@ -32,6 +32,9 @@ Asset pipeline (Python 3 with numpy, Pillow, quicktex; ffmpeg for the music):
                      without the V_CVT_* shadPS4 cannot translate): shaders/ps_cvt.s and
                      shaders/ps_cvt_set.h; needs llvm-mc, run after gen_optest5.py, then
                      clang-format on shaders/ps_cvt_set.h
+  check_ps_cvt.py    runs every OPCODE_TEST 5 binary (shaders/ps_cvt.s) on main.c's slot table with
+                     each conversion replaced by a tag: every row's result in each class must come
+                     from its own binary, the rest stay 0
 
 DDS rules (src/dds_loader.h): DX10 header, BC1_UNORM_SRGB / BC4_UNORM / BC5_UNORM
 / R8G8B8A8_UNORM_SRGB, power-of-two, mips down to 32 px, rows bottom-up (row 0 =
