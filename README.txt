@@ -57,6 +57,23 @@ PROBES
   C60-C62 regions: mtypeprotect of A pages 2-4 to type 0 (C60); pages 4-7 released and allocated
        again on their own, of type 3 (C61, then munmap of A pages 4-7) or of type 0 (C62)
 
+  C70-C80 pool commit of each memory type 0-10 (protection 3), C81-C88 of type 3 with protection
+       0, 1, 2, 3, 10, 20, 30 and 33: per page of the 2 MiB reservation's first 8 pages,
+       VirtualQuery flags (Vf), memory type (Vt) and protection (Vv), and QueryMemoryProtection
+       (Vp), after the commit (pre) and after the decommit (op). Pool memory is never read in
+       C70-C99.
+  C90-C94 munmap of pool memory: an empty reservation, only the committed 64 KiB, the whole 2 MiB
+       holding a commit, only the uncommitted part, the whole 2 MiB after a decommit
+  C95-C97 release of pool memory never committed (rel, chk) and after commit, decommit and munmap;
+       at= is where the next 128 KiB expand lands, in pages from the released memory
+  C98  DirectMemoryQuery find-next from pool memory, before and after a commit
+  C99  one mtypeprotect (type 0, protection 1) over A and an alias of A pages 3-4 mapped right
+       after A in the same reserved range
+  C100-C103 one line each: VirtualQuery's region for every page of A (Avq, start-end:type in pages
+       from A) when pages 4-7 are a second allocation of type 0 (C100), after a MapDirectMemory2
+       alias of pages 3-4 with type 0 (C101), after mtypeprotect of A pages 2-4 to type 0 (C102),
+       and with an alias of pages 3-4 kept (C103)
+
 RESUME
   carve.state, next to the results file, holds the build, the next probe and the probe running
   when the app ended. If the app ends during a probe (a crash, or closed by hand), the next launch
