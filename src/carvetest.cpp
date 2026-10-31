@@ -656,7 +656,7 @@ static Line& va_part(Line& l, const char* tag, uint8_t* va, long pa_first, int p
 // A new CP_BUILD starts over and truncates the log; after the last entry the run is not repeated
 // until carve.state is deleted.
 
-#define CP_BUILD "carve-1"
+#define CP_BUILD "carve-2"
 
 struct CpState {
     char build[16];
@@ -703,24 +703,31 @@ enum Kind { K_DIRECT, K_ALIAS_GATE, K_FLEX, K_POOL };
 
 // what splits the block's physical range behind A
 enum Creator {
-    C_NONE,        // nothing
-    C_KEEP,        // alias mapped, left mapped
-    C_UNMAP,       // alias mapped, then unmapped
-    C_MTYPE_SAME,  // alias mapped, then mtypeprotect to type 3 (the block's type)
-    C_MTYPE_OTHER, // alias mapped, then mtypeprotect to type 0
-    C_MAP2,        // alias mapped with MapDirectMemory2, type 3, left mapped
-    C_NAMED_UNMAP, // alias mapped with MapNamedDirectMemory, then unmapped
-    C_THREE,       // three one-page aliases mapped, then all three unmapped
-    C_POOL_REL1,   // pool: release the second page of the committed block
-    C_POOL_RELALL, // pool: release the whole committed block
+    C_NONE,         // nothing
+    C_KEEP,         // alias mapped, left mapped
+    C_UNMAP,        // alias mapped, then unmapped
+    C_MTYPE_SAME,   // alias mapped, then mtypeprotect to type 3 (the block's type)
+    C_MTYPE_OTHER,  // alias mapped, then mtypeprotect to type 0
+    C_MAP2,         // alias mapped with MapDirectMemory2 (type b_type), left mapped
+    C_NAMED_UNMAP,  // alias mapped with MapNamedDirectMemory, then unmapped
+    C_THREE,        // three one-page aliases mapped, then all three unmapped
+    C_POOL_REL1,    // pool: release the second page of the committed block
+    C_POOL_RELALL,  // pool: release the whole committed block
+    C_KEEP_UNMAP_A, // alias mapped and left mapped, then all of A unmapped
+    C_DISJOINT,     // A pages 4-7 unmapped, B maps those pages: two mappings, no page shared
 };
 
-enum Op { O_MTYPE, O_MUNMAP, O_RELEASE, O_CHECKED, O_MPROTECT, O_SPAN, O_DECOMMIT };
+enum Op { O_NONE, O_MTYPE, O_MUNMAP, O_RELEASE, O_CHECKED, O_MPROTECT, O_SPAN, O_DECOMMIT };
 
 struct Spec {
     const char* id;
     const char* name;
     int kind, creator, b_first, b_pages, op, op_first, op_pages;
+    int on_b = 0;      // the operation applies to B instead of A
+    int mtype = 3;     // type given to mtypeprotect
+    int prot = -1;     // protection given to mtypeprotect / mprotect (-1: A's own)
+    int b_type = 3;    // type given to MapDirectMemory2
+    int adj_type = -1; // pages 4-7 are a second allocation of this type (-1: one allocation)
 };
 
 static const Spec SPECS[] = {
@@ -756,6 +763,23 @@ static const Spec SPECS[] = {
     {"C42", "pool commit, rel all; decommit", K_POOL, C_POOL_RELALL, 0, 0, O_DECOMMIT, 0, 4},
     {"C43", "pool commit, rel page 1; mtype", K_POOL, C_POOL_REL1, 0, 0, O_MTYPE, 0, 4},
     {"C44", "pool commit, rel page 1; munmap", K_POOL, C_POOL_REL1, 0, 0, O_MUNMAP, 0, 4},
+    {"C45", "pool commit; munmap", K_POOL, C_NONE, 0, 0, O_MUNMAP, 0, 4},
+    {"C50", "alias 3-4 kept; mtype A 0-7", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 8},
+    {"C51", "alias 3-4 kept; mtype B prot 1", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2, 1, 3, 0x1},
+    {"C52", "alias 3-4 kept; mtype A 0-1", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2},
+    {"C53", "alias 3-4 kept, A unmapped; mtype B", K_DIRECT, C_KEEP_UNMAP_A, 3, 2, O_MTYPE, 0, 2,
+     1},
+    {"C54", "map2 alias 3-4 type 0; munmap A 0-7", K_DIRECT, C_MAP2, 3, 2, O_MUNMAP, 0, 8, 0, 3, -1,
+     0},
+    {"C55", "alias 3-4 kept; mprotect B 1", K_DIRECT, C_KEEP, 3, 2, O_MPROTECT, 0, 2, 1},
+    {"C56", "alias 3-4 kept; mtype B type 0", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2, 1, 0},
+    {"C57", "A 0-3 + B 4-7, no page shared; mtype A", K_DIRECT, C_DISJOINT, 4, 4, O_MTYPE, 0, 4},
+    {"C58", "A 0-3 + B 4-7, no page shared; mtype B", K_DIRECT, C_DISJOINT, 4, 4, O_MTYPE, 0, 4, 1},
+    {"C60", "no alias; mtype A 2-4 type 0", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 2, 3, 0, 0},
+    {"C61", "two allocs 0-3 + 4-7 type 3; munmap A 4-7", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 4, 4, 0,
+     3, -1, 3, 3},
+    {"C62", "two allocs 0-3 type 3 + 4-7 type 0; none", K_DIRECT, C_NONE, 0, 0, O_NONE, 0, 0, 0, 3,
+     -1, 3, 0},
 };
 static const int NSPECS = (int)(sizeof(SPECS) / sizeof(SPECS[0]));
 
@@ -794,13 +818,18 @@ struct Alias {
 
 // ---- direct-memory probes ---------------------------------------------------------------------
 
-static void op_run(Line& l, const Spec& s, uint8_t* a, long pa, uint8_t* span, int32_t prot) {
-    uint8_t* at = a + s.op_first * PG;
+static void op_run(Line& l, const Spec& s, uint8_t* target, long pa, uint8_t* span, int32_t prot) {
+    if (s.op == O_NONE) {
+        l.s("op=none ");
+        return;
+    }
+    uint8_t* at = target + s.op_first * PG;
     const uint64_t len = (uint64_t)s.op_pages * PG;
+    const int32_t op_prot = s.prot >= 0 ? s.prot : prot;
     int32_t r = 0;
     switch (s.op) {
     case O_MTYPE:
-        r = sceKernelMtypeprotect(at, len, 3, prot);
+        r = sceKernelMtypeprotect(at, len, s.mtype, op_prot);
         break;
     case O_MUNMAP:
         r = sceKernelMunmap(at, len);
@@ -812,10 +841,10 @@ static void op_run(Line& l, const Spec& s, uint8_t* a, long pa, uint8_t* span, i
         r = sceKernelCheckedReleaseDirectMemory(pa + s.op_first * (long)PG, len);
         break;
     case O_MPROTECT:
-        r = sceKernelMprotect(at, len, 0x1);
+        r = sceKernelMprotect(at, len, s.prot >= 0 ? s.prot : 0x1);
         break;
     case O_SPAN:
-        r = sceKernelMtypeprotect(span, len, 3, prot);
+        r = sceKernelMtypeprotect(span, len, s.mtype, op_prot);
         break;
     }
     l.ret("op", r);
@@ -872,6 +901,23 @@ static void run_direct(int idx) {
         rsv = r_rsv == 0 ? (uint8_t*)v : nullptr;
     }
 
+    int32_t r_adj_rel = 0, r_adj = 0;
+    if (s.adj_type >= 0) {
+        long q = -1;
+        const long half = blk.pa + 4 * (long)PG;
+        r_adj_rel = sceKernelReleaseDirectMemory(half, 4 * PG);
+        r_adj =
+            sceKernelAllocateDirectMemory(half, half + 4 * (long)PG, 4 * PG, PG, s.adj_type, &q);
+        if (r_adj_rel != 0 || r_adj != 0 || q != half) {
+            Line l = head(s.id, s.name);
+            l.s("SKIP second alloc ").ret("rel", r_adj_rel).ret("alloc", r_adj);
+            l.s("at=");
+            rel_page(l, q, blk.pa).end();
+            release_pages(blk.pa, NP);
+            return;
+        }
+    }
+
     int32_t r_a = 0;
     uint8_t* a = (span && !rsv) ? nullptr : map_at(rsv, blk.pa, NP, prot, &r_a);
     if (span && a && cpa >= 0)
@@ -899,6 +945,8 @@ static void run_direct(int idx) {
     int nal = 0;
     Line pre = head(s.id, s.name);
     pre.s("pre ");
+    if (s.adj_type >= 0)
+        pre.ret("rel4-7", r_adj_rel).ret("alloc4-7", r_adj);
     const long bpa = blk.pa + s.b_first * (long)PG;
     switch (s.creator) {
     case C_NONE:
@@ -921,9 +969,30 @@ static void run_direct(int idx) {
             pre.ret("mtypeB", sceKernelMtypeprotect(al[0].va, s.b_pages * PG, 0, 0x3));
         break;
     }
+    case C_KEEP_UNMAP_A: {
+        int32_t r = 0;
+        al[0].va = map_at(nullptr, bpa, s.b_pages, 0x3, &r);
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("mapB", r).ret("unmapA", sceKernelMunmap(a, NP * PG));
+        break;
+    }
+    case C_DISJOINT: {
+        pre.ret("unmapA", sceKernelMunmap(a + s.b_first * PG, s.b_pages * PG));
+        int32_t r = 0;
+        al[0].va = map_at(nullptr, bpa, s.b_pages, 0x3, &r);
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("mapB", r);
+        if (al[0].va)
+            stamp(al[0].va, s.b_pages, tag + (uint32_t)s.b_first);
+        break;
+    }
     case C_MAP2: {
         void* v = nullptr;
-        const int32_t r = sceKernelMapDirectMemory2(&v, s.b_pages * PG, 3, 0x3, 0, bpa, PG);
+        const int32_t r = sceKernelMapDirectMemory2(&v, s.b_pages * PG, s.b_type, 0x3, 0, bpa, PG);
         al[0].va = r == 0 ? (uint8_t*)v : nullptr;
         al[0].first = s.b_first;
         al[0].pages = s.b_pages;
@@ -972,7 +1041,10 @@ static void run_direct(int idx) {
     pre.end();
 
     Line post = head(s.id, s.name);
-    op_run(post, s, a, blk.pa, rsv, prot);
+    if (s.on_b && !al[0].va)
+        post.s("SKIP no B ");
+    else
+        op_run(post, s, s.on_b ? al[0].va : a, blk.pa, rsv, prot);
     post.s("| ");
     phys_part(post, blk.pa, NP).s(" | ");
     va_part(post, "A", a, blk.pa, NP, tag, true, 0);
@@ -1073,19 +1145,41 @@ static void run_pool(int idx) {
     stamp(va, pages, tag);
     const long pa = (long)pp;
 
+    // VirtualQuery's address for the committed block is used only if it lies in the memory this
+    // probe expanded, so a release never reaches anything else; the expanded range otherwise.
+    long vq0 = -1, vq1 = -1;
+    int32_t t0 = -1;
+    vq_page(va, &vq0, &t0);
+    vq_page(va + PG, &vq1, &t0);
+    const bool use_vq = vq0 >= pa && vq0 + (long)blk <= pa + 2 * (long)blk;
+    const long blk_pa = use_vq ? vq0 : pa;
+
     Line pre = head(s.id, s.name);
-    pre.s("pre ").ret("expand", re).ret("reserve", rr).ret("commit", rc);
+    pre.s("pre ").ret("expand", re).ret("reserve", rr).ret("commit", rc).s("vq=");
+    if (vq0 < 0)
+        pre.c('-');
+    else
+        rel_page(pre, vq0, pa);
+    pre.c(' ');
     uint32_t released = 0;
     if (s.creator == C_POOL_REL1) {
-        pre.ret("rel1", sceKernelReleaseDirectMemory(pa + (long)PG, PG));
+        const long p1 = blk_pa + (long)PG;
+        pre.s(use_vq ? "rel1(vq) " : "rel1(expand) ");
+        pre.ret("ret", sceKernelReleaseDirectMemory(p1, PG));
         released = 0x2;
     } else if (s.creator == C_POOL_RELALL) {
-        pre.ret("relall", sceKernelReleaseDirectMemory(pa, blk));
+        pre.s(use_vq ? "relall(vq) " : "relall(expand) ");
+        pre.ret("ret", sceKernelReleaseDirectMemory(blk_pa, blk));
         released = 0xF;
     }
-    pre.s("| ");
-    phys_part(pre, pa, pages).s(" | ");
-    va_part(pre, "V", va, pa, pages, tag, false, released).end();
+    pre.s("| expand ");
+    phys_part(pre, pa, 2 * pages);
+    if (blk_pa != pa) {
+        pre.s(" | block ");
+        phys_part(pre, blk_pa, pages);
+    }
+    pre.s(" | ");
+    va_part(pre, "V", va, blk_pa, pages, tag, false, released).end();
 
     Line post = head(s.id, s.name);
     int32_t ro = 0;
@@ -1095,9 +1189,17 @@ static void run_pool(int idx) {
         ro = sceKernelMtypeprotect(va, blk, 3, 0x3);
     else
         ro = sceKernelMunmap(va, blk);
-    post.ret("op", ro).s("| ");
-    phys_part(post, pa, pages).s(" | ");
-    va_part(post, "V", va, pa, pages, tag, false, released).end();
+    // decommitted memory is not read: PS4 still reports it readable and the read ends the app
+    if (s.op == O_DECOMMIT)
+        released = 0xF;
+    post.ret("op", ro).s("| expand ");
+    phys_part(post, pa, 2 * pages);
+    if (blk_pa != pa) {
+        post.s(" | block ");
+        phys_part(post, blk_pa, pages);
+    }
+    post.s(" | ");
+    va_part(post, "V", va, blk_pa, pages, tag, false, released).end();
 
     if (s.op == O_MTYPE)
         sceKernelMemoryPoolDecommit(va, blk, 0);

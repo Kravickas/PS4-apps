@@ -41,9 +41,21 @@ PROBES
   C30-C35 the C20 split, then each other operation: mtypeprotect of all of A (C30), munmap of
        pages 2-4 (C31), release (C32) and checked release (C33) of the block, mtypeprotect of pages
        2-4 (C34), one mtypeprotect over A and the mapping next to it (C35)
-  C40-C44 pool: 128 KiB expanded, 64 KiB committed at the start of a 2 MiB reservation; decommit
+  C40-C45 pool: 128 KiB expanded, 64 KiB committed at the start of a 2 MiB reservation; decommit
        (C40), the second page released then decommit (C41), all of it released then decommit
-       (C42), the second page released then mtypeprotect (C43) or munmap (C44)
+       (C42), the second page released then mtypeprotect (C43) or munmap (C44), munmap with
+       nothing released (C45). vq= is where VirtualQuery puts the committed block, in pages from
+       the expanded memory. The block's pages are released there only if that lies inside the
+       expanded 128 KiB (rel1(vq)); otherwise at the expanded memory (rel1(expand)). "expand"
+       shows all 8 expanded pages, "block" the committed block when VirtualQuery puts it
+       elsewhere. Pool memory is not read after a decommit.
+  C50-C58 the same memory mapped twice and kept mapped: mtypeprotect of A (C50), of B with
+       protection 1 (C51), of A pages 0-1, which B does not map (C52), of B after all of A is
+       unmapped (C53), of B to type 0 (C56); a MapDirectMemory2 alias of type 0 then munmap of A
+       (C54); mprotect of B (C55); A pages 0-3 and B pages 4-7, no page mapped twice, then
+       mtypeprotect of A (C57) or of B (C58)
+  C60-C62 regions: mtypeprotect of A pages 2-4 to type 0 (C60); pages 4-7 released and allocated
+       again on their own, of type 3 (C61, then munmap of A pages 4-7) or of type 0 (C62)
 
 RESUME
   carve.state, next to the results file, holds the build, the next probe and the probe running
