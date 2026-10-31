@@ -4,10 +4,10 @@
 # ============================================================================
 
 # ---- Package identity (fixed) ----
-TITLE       := DmemTest
+TITLE       := CarveTest
 VERSION     := 01.00
-TITLE_ID    := SHAD00090
-CONTENT_ID  := IV0000-SHAD00090_00-SHADDMEMTEST0000
+TITLE_ID    := SHAD00091
+CONTENT_ID  := IV0000-SHAD00091_00-SHADCARVETEST000
 
 EXTRAFLAGS  :=
 
@@ -33,7 +33,7 @@ LD          := ld.lld
 PKG         := $(TOOLCHAIN)/bin/linux
 
 # ---- Sources: only the test, so other projects' files in src/ are never built ----
-OBJS        := $(INTDIR)/dmemtest.o
+OBJS        := $(INTDIR)/carvetest.o
 
 # ---- Bundled .prx/.sprx modules (drop libc.prx / libSceFios2.prx here to ship them) ----
 LIBMODULES  := $(wildcard sce_module/*)
