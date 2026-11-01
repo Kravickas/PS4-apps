@@ -7,30 +7,39 @@ calls in CarveTest. Runs at launch and keeps the results on screen; close it wit
 
 OUTPUT
   Screen, and /data/carvecheck_results.txt (/temp0/carvecheck_results.txt if /data is not
-  writable). One line per test, PASS in green or FAIL in red. The test name says which call it
-  makes and how the memory was split first; a failing test lists every check it failed, with what
-  the PS4 returned. RESULT ends the run: each group with what it verifies and its count, every
-  test of the group under it, and below each failed test its failed checks, one per line, also for
-  tests that failed in an earlier launch. After a relaunch the test results of the earlier
-  launches are shown first under EARLIER RESULTS. The last line on screen names the file to
-  delete for a fresh run (carvecheck.state).
+  writable). Each test prints PASS (green) or FAIL (red) and its name, which says which call it
+  makes and how the memory was split first; under a failed test, each failed check is on its own
+  line with what the PS4 returned. At the end the screen is cleared and shows only RESULT, sized
+  to fill the screen: each group with how many of its tests passed (and how many ended the app)
+  and what it verifies, every test of the group under it, and the total. After a relaunch the
+  tests already run are shown first under EARLIER RESULTS. The last line on screen names the file
+  to delete for a fresh run (carvecheck.state).
 
 TESTS
-  split range (A01-A15): the range of mapping A is split by another mapping of part of the same
-    memory, then:
-    A01 munmap of A after an alias of pages 3-4 was mapped and unmapped
-    A02 munmap of A with a MapDirectMemory2 alias of pages 3-4 still mapped; the alias keeps its
-        data
-    A03 the same with a MapNamedDirectMemory alias, unmapped
-    A04, A05 the split at pages 0-1 and at pages 6-7
-    A06 three one-page aliases of pages 5, 6 and 7, unmapped (how Red Dead Redemption 2 splits it)
-    A07 mtypeprotect of all of A; A11 of pages 2-4, across the split
-    A08 munmap of pages 2-4, across the split; the other pages keep their data
-    A09, A10 release and checked release of the whole block; the memory is free, A is unmapped
-    A12 one mtypeprotect over A and the mapping C right after it (as Red Dead Redemption 2 does)
-    A13 a MapDirectMemory2 alias of pages 3-4 with type 0, then munmap of A
-    A14, A15 committed pool memory, part of it released, then decommit or mtypeprotect
-    On a build without the fix these end the app, which counts as a failure (see RESUME).
+  split range: calls on a mapping whose memory another mapping split cover the whole range. The
+  mapping is 8 pages; the split is a second mapping of pages 3-4 mapped and unmapped again unless
+  the name says otherwise. On a build without the fix these end the app, which counts as a fail.
+    munmap whole mapping; split by alias of pages 3-4, unmapped
+    munmap whole mapping; MapDirectMemory2 alias of pages 3-4 kept (the alias keeps its data)
+    munmap whole mapping; named alias of pages 3-4, unmapped
+    munmap whole mapping; split at pages 0-1 / split at pages 6-7
+    munmap whole mapping; aliases of pages 5, 6, 7 unmapped (how Red Dead Redemption 2 splits it)
+    mtypeprotect whole mapping / mtypeprotect pages 2-4, across the split (data kept)
+    munmap pages 2-4, across the split (the other pages keep their data)
+    ReleaseDirectMemory / CheckedReleaseDirectMemory whole block (memory free, mapping gone)
+    mtypeprotect over the mapping and the next one; first split (as Red Dead Redemption 2 does)
+    munmap whole mapping; MapDirectMemory2 alias of pages 3-4, type 0
+    PoolDecommit, and mtypeprotect, of a pool commit after a page of it was released
+  region reporting: GetDirectMemoryType and DirectMemoryQuery report the whole allocation for
+  every page: after an alias was unmapped, after munmap of pages 2-4, after mtypeprotect of pages
+  2-4 to the same type, and over two adjacent allocations of type 3 (also after munmap of the
+  second); two adjacent allocations of types 3 and 0 report one region each.
+  releases: ReleaseDirectMemory of pool memory returns 0 and leaves it in the pool (the next
+  expand does not get it back); CheckedReleaseDirectMemory of pool memory returns ENOENT;
+  release after decommit and munmap returns 0; a release starting on a free page releases
+  nothing past its range.
+
+RESUME).
   region reporting (R01-R05): GetDirectMemoryType and DirectMemoryQuery for every page report the
     whole allocation, however the mapping state splits it: after an alias was unmapped (R01), a
     partial munmap (R02), a partial mtypeprotect to the same type (R03), and over two adjacent

@@ -225,6 +225,10 @@ struct Screen {
         return true;
     }
 
+    void clear() {
+        nlines = 0;
+    }
+
     void push(const char* s, int n) {
         int i = 0;
         while (i < n) {
@@ -301,8 +305,24 @@ struct Screen {
         uint32_t* dst = fb[cur];
         for (long i = 0, n = (long)w * h; i < n; i++)
             dst[i] = 0x80101018u;
-        const int scale = nlines * 20 > h - 8 ? 1 : 2;
-        const int gw = 8 * scale, rowh = 10 * scale;
+        // The largest text that fits every line, rows spread over the whole height.
+        int widest = 1;
+        for (int li = 0; li < nlines; li++) {
+            int len = 0;
+            while (lines[li][len])
+                len++;
+            if (len > widest)
+                widest = len;
+        }
+        int scale = 3;
+        while (scale > 1 && (nlines * 10 * scale > h - 8 || widest * 8 * scale > w - 12))
+            scale--;
+        const int gw = 8 * scale;
+        int rowh = nlines > 0 ? (h - 8) / nlines : 10 * scale;
+        if (rowh > 20 * scale)
+            rowh = 20 * scale;
+        if (rowh < 10 * scale)
+            rowh = 10 * scale;
         const int maxrows = (h - 8) / rowh;
         const int first = nlines > maxrows ? nlines - maxrows : 0;
         int y = 4;
@@ -1004,37 +1024,36 @@ static void l04(uint32_t) {
 // ---- runner -------------------------------------------------------------------------------------
 
 struct Test {
-    const char* id;
     char group;
     const char* name;
     void (*fn)(uint32_t);
 };
 
 static const Test TESTS[] = {
-    {"A01", 'A', "munmap whole mapping; split by alias of pages 3-4, unmapped", a01},
-    {"A02", 'A', "munmap whole mapping; MapDirectMemory2 alias of pages 3-4 kept", a02},
-    {"A03", 'A', "munmap whole mapping; named alias of pages 3-4, unmapped", a03},
-    {"A04", 'A', "munmap whole mapping; split at pages 0-1", a04},
-    {"A05", 'A', "munmap whole mapping; split at pages 6-7", a05},
-    {"A06", 'A', "munmap whole mapping; aliases of pages 5, 6, 7 unmapped (RDR2)", a06},
-    {"A07", 'A', "mtypeprotect whole mapping; split by alias of pages 3-4", a07},
-    {"A08", 'A', "munmap pages 2-4, across the split", a08},
-    {"A09", 'A', "ReleaseDirectMemory whole block; split by alias of pages 3-4", a09},
-    {"A10", 'A', "CheckedReleaseDirectMemory whole block; split by alias", a10},
-    {"A11", 'A', "mtypeprotect pages 2-4, across the split", a11},
-    {"A12", 'A', "mtypeprotect over the mapping and the next one; first split (RDR2)", a12},
-    {"A13", 'A', "munmap whole mapping; MapDirectMemory2 alias of pages 3-4, type 0", a13},
-    {"A14", 'A', "PoolDecommit; a page of the commit released first", a14},
-    {"A15", 'A', "mtypeprotect a pool commit; a page of it released first", a15},
-    {"R01", 'R', "after an alias of pages 3-4 was mapped and unmapped", r01},
-    {"R02", 'R', "after munmap of pages 2-4", r02},
-    {"R03", 'R', "after mtypeprotect of pages 2-4 to the same type", r03},
-    {"R04", 'R', "two adjacent allocations of type 3, then munmap of pages 4-7", r04},
-    {"R05", 'R', "two adjacent allocations of types 3 and 0: one region each", r05},
-    {"L01", 'L', "ReleaseDirectMemory of pool memory: 0, and it stays in the pool", l01},
-    {"L02", 'L', "CheckedReleaseDirectMemory of pool memory: ENOENT", l02},
-    {"L03", 'L', "ReleaseDirectMemory of pool memory after decommit and munmap", l03},
-    {"L04", 'L', "ReleaseDirectMemory starting on a free page stays inside its range", l04},
+    {'A', "munmap whole mapping; split by alias of pages 3-4, unmapped", a01},
+    {'A', "munmap whole mapping; MapDirectMemory2 alias of pages 3-4 kept", a02},
+    {'A', "munmap whole mapping; named alias of pages 3-4, unmapped", a03},
+    {'A', "munmap whole mapping; split at pages 0-1", a04},
+    {'A', "munmap whole mapping; split at pages 6-7", a05},
+    {'A', "munmap whole mapping; aliases of pages 5, 6, 7 unmapped (RDR2)", a06},
+    {'A', "mtypeprotect whole mapping; split by alias of pages 3-4", a07},
+    {'A', "munmap pages 2-4, across the split", a08},
+    {'A', "ReleaseDirectMemory whole block; split by alias of pages 3-4", a09},
+    {'A', "CheckedReleaseDirectMemory whole block; split by alias", a10},
+    {'A', "mtypeprotect pages 2-4, across the split", a11},
+    {'A', "mtypeprotect over the mapping and the next one; first split (RDR2)", a12},
+    {'A', "munmap whole mapping; MapDirectMemory2 alias of pages 3-4, type 0", a13},
+    {'A', "PoolDecommit; a page of the commit released first", a14},
+    {'A', "mtypeprotect a pool commit; a page of it released first", a15},
+    {'R', "after an alias of pages 3-4 was mapped and unmapped", r01},
+    {'R', "after munmap of pages 2-4", r02},
+    {'R', "after mtypeprotect of pages 2-4 to the same type", r03},
+    {'R', "two adjacent allocations of type 3, then munmap of pages 4-7", r04},
+    {'R', "two adjacent allocations of types 3 and 0: one region each", r05},
+    {'L', "ReleaseDirectMemory of pool memory: 0, and it stays in the pool", l01},
+    {'L', "CheckedReleaseDirectMemory of pool memory: ENOENT", l02},
+    {'L', "ReleaseDirectMemory of pool memory after decommit and munmap", l03},
+    {'L', "ReleaseDirectMemory starting on a free page stays inside its range", l04},
 };
 static const int NTESTS = (int)(sizeof(TESTS) / sizeof(TESTS[0]));
 
@@ -1051,7 +1070,7 @@ static const char* group_goal(char g) {
 // carvecheck.state next to the results: the build, the next test, the test running when the app
 // ended, tests that ended one launch (run once more), tests that ended two (failed), and every
 // result so far. A new CK_BUILD starts over.
-#define CK_BUILD "check-1"
+#define CK_BUILD "check-2"
 
 struct CkState {
     char build[16];
@@ -1082,19 +1101,25 @@ static bool state_load(CkState* st) {
     return true;
 }
 
-static void report(int i, bool ok, const Line* why) {
+static const char* const REASON_INDENT = "          ";
+
+// A test's verdict, then each failed check on its own line below it
+static void report(int i, bool ok, const char* why, int why_len) {
     Line l;
-    l.s(ok ? "PASS  " : "FAIL  ").s(TESTS[i].id).s("  ").s(TESTS[i].name);
-    if (!ok && why && why->p > 0) {
-        l.s("  -- ");
-        for (int k = 0; k < why->p; k++)
-            l.c(why->b[k]);
+    l.s(ok ? "PASS  " : "FAIL  ").s(TESTS[i].name).end();
+    int k = 0;
+    while (k < why_len) {
+        Line r;
+        r.s(REASON_INDENT);
+        while (k < why_len && !(why[k] == ';' && (k + 1 >= why_len || why[k + 1] == ' ')))
+            r.c(why[k++]);
+        k += 2;
+        r.end();
     }
-    l.end();
 }
 
-// After a relaunch the screen starts empty: put the test results of the earlier launches back on
-// it. Screen only; the results file already holds all of it.
+// ---- the results file read back --------------------------------------------------------------
+
 static char g_prev[0x10000];
 static long g_prev_len = 0;
 
@@ -1111,98 +1136,122 @@ static void load_results() {
     sceKernelClose(fd);
 }
 
-static bool is_test_result(const char* l, long n) {
-    const bool verdict = n > 8 && (l[0] == 'P' || l[0] == 'F') && l[4] == ' ' && l[5] == ' ';
-    return verdict && (l[6] == 'A' || l[6] == 'R' || l[6] == 'L') && l[7] >= '0' && l[7] <= '9';
+static bool line_is_verdict(const char* l, long n, const char* name) {
+    if (n < 6 || !((l[0] == 'P' && l[1] == 'A') || (l[0] == 'F' && l[1] == 'A')) || l[4] != ' ' ||
+        l[5] != ' ')
+        return false;
+    long k = 0;
+    while (name[k] && 6 + k < n && l[6 + k] == name[k])
+        k++;
+    return !name[k] && 6 + k == n;
+}
+
+// The last verdict line of test i in the results file and the reason lines under it; the reason
+// lines are returned as one block including their newlines.
+static bool find_result(int i, const char** reasons, long* reasons_len) {
+    *reasons = nullptr;
+    *reasons_len = 0;
+    bool found = false;
+    long start = 0;
+    for (long k = 0; k < g_prev_len; k++) {
+        if (g_prev[k] != '\n')
+            continue;
+        const char* l = g_prev + start;
+        const long n = k - start;
+        start = k + 1;
+        if (!line_is_verdict(l, n, TESTS[i].name))
+            continue;
+        found = true;
+        long r = start;
+        while (r + 10 <= g_prev_len && g_prev[r] == ' ' && g_prev[r + 9] == ' ') {
+            while (r < g_prev_len && g_prev[r] != '\n')
+                r++;
+            r++;
+        }
+        *reasons = g_prev + start;
+        *reasons_len = r - start;
+    }
+    return found;
+}
+
+static void screen_text(const char* t, int n) {
+    if (g_screen.ok)
+        g_screen.push(t, n);
 }
 
 static void screen_line(const char* t) {
     Line l;
     l.s(t).c('\n');
-    g_screen.push(l.b, l.p);
+    screen_text(l.b, l.p);
 }
 
-static void show_previous_results() {
+// After a relaunch the screen starts empty: put the tests already run back on it, from the
+// results file. Screen only; the results file already holds all of it.
+static void show_previous_results(const CkState& st) {
     load_results();
-    const long total = g_prev_len;
-    if (!g_screen.ok)
-        return;
     screen_line("===== EARLIER RESULTS =====");
-    long start = 0;
-    for (long i = 0; i < total; i++) {
-        if (g_prev[i] != '\n')
+    for (int i = 0; i < NTESTS; i++) {
+        if (!((st.done >> i) & 1))
             continue;
-        if (is_test_result(g_prev + start, i - start))
-            g_screen.push(g_prev + start, (int)(i - start + 1));
-        start = i + 1;
+        Line l;
+        l.s((st.passed >> i) & 1 ? "PASS  " : "FAIL  ").s(TESTS[i].name).c('\n');
+        screen_text(l.b, l.p);
+        const char* reasons;
+        long len;
+        if (find_result(i, &reasons, &len) && len > 0)
+            screen_text(reasons, (int)len);
     }
-    g_screen.render();
+    if (g_screen.ok)
+        g_screen.render();
 }
 
-// The reasons a test failed, from its last FAIL line in the results file; empty if there is none.
-static void fail_reasons(const char* id, const char** at, long* len) {
-    *at = nullptr;
-    *len = 0;
-    long start = 0;
-    for (long i = 0; i < g_prev_len; i++) {
-        if (g_prev[i] != '\n')
-            continue;
-        const char* l = g_prev + start;
-        const long n = i - start;
-        start = i + 1;
-        if (n < 10 || l[0] != 'F' || l[6] != id[0] || l[7] != id[1] || l[8] != id[2])
-            continue;
-        for (long k = 9; k + 4 <= n; k++)
-            if (l[k] == ' ' && l[k + 1] == '-' && l[k + 2] == '-' && l[k + 3] == ' ') {
-                *at = l + k + 4;
-                *len = n - (k + 4);
-                break;
-            }
-    }
-}
-
-// Every test under its group, failures with each failed check on its own line.
+// Every test under its group, failures with each failed check on its own line, alone on screen.
 static void summary(const CkState& st) {
     load_results();
+    g_screen.clear();
     say("===== RESULT =====");
-    int all = 0, all_ok = 0;
+    int all = 0, all_ok = 0, all_ended = 0;
     for (const char* gp = "ARL"; *gp; gp++) {
         const char g = *gp;
-        int n = 0, ok = 0;
+        int n = 0, ok = 0, ended = 0;
         for (int i = 0; i < NTESTS; i++)
             if (TESTS[i].group == g && ((st.done >> i) & 1)) {
                 n++;
                 ok += (st.passed >> i) & 1;
+                ended += (st.ended >> i) & 1;
             }
         all += n;
         all_ok += ok;
+        all_ended += ended;
         Line h;
-        h.s(ok == n ? "PASS  " : "FAIL  ").s(group_name(g)).s(" ").dec(ok).c('/').dec(n);
-        h.s(": ").s(group_goal(g)).end();
+        h.s(ok == n ? "PASS  " : "FAIL  ").s(group_name(g)).s(": ").dec(ok).s(" of ").dec(n);
+        h.s(" passed");
+        if (ended)
+            h.s(", ").dec(ended).s(" ended the app");
+        h.end();
+        Line goal;
+        goal.s("      ").s(group_goal(g)).end();
         for (int i = 0; i < NTESTS; i++) {
             if (TESTS[i].group != g || !((st.done >> i) & 1))
                 continue;
             const bool pass = (st.passed >> i) & 1;
-            Line l;
-            l.s(pass ? "  PASS  " : "  FAIL  ").s(TESTS[i].id).s("  ").s(TESTS[i].name).end();
-            if (pass)
-                continue;
-            const char* why;
+            const char* reasons;
             long len;
-            fail_reasons(TESTS[i].id, &why, &len);
-            long k = 0;
-            while (k < len) {
-                Line r;
-                r.s("          ");
-                while (k < len && !(why[k] == ';' && (k + 1 >= len || why[k + 1] == ' ')))
-                    r.c(why[k++]);
-                k += 2;
-                r.end();
-            }
+            Line l;
+            l.s(pass ? "PASS  " : "FAIL  ").s(TESTS[i].name).end();
+            if (!pass && find_result(i, &reasons, &len) && len > 0)
+                emit(reasons, (int)len);
         }
     }
     Line l;
-    l.s(all_ok == all ? "PASS  " : "FAIL  ").s("total ").dec(all_ok).c('/').dec(all).end();
+    l.s(all_ok == all ? "PASS  " : "FAIL  ").s("total: ").dec(all_ok).s(" of ").dec(all);
+    l.s(" passed");
+    if (all_ok != all) {
+        l.s(", ").dec(all - all_ok).s(" failed");
+        if (all_ended)
+            l.s(", ").dec(all_ended).s(" of them ended the app");
+    }
+    l.end();
 }
 
 // Last line on screen: a relaunch only resumes, so a fresh run needs the state file gone.
@@ -1232,13 +1281,18 @@ int main(void) {
         state_save(&st);
     }
 
-    if (resumed)
-        show_previous_results();
+    const bool tests_left = st.next < NTESTS || st.inflight >= 0;
+    if (resumed && tests_left && st.done)
+        show_previous_results(st);
     say("===== CARVE CHECK =====");
     {
         Line l;
-        l.s("build=").s(CK_BUILD).s(resumed ? " launch=resumed" : " launch=fresh");
-        l.s(" next=").s(st.next < NTESTS ? TESTS[st.next].id : "done").end();
+        l.s("build ").s(CK_BUILD).s(resumed ? ", resumed" : ", fresh run");
+        if (st.next < NTESTS)
+            l.s(", test ").dec(st.next + 1).s(" of ").dec(NTESTS);
+        else
+            l.s(", all ").dec(NTESTS).s(" tests done");
+        l.end();
     }
 
     if (st.inflight >= 0 && st.inflight < NTESTS) {
@@ -1246,22 +1300,22 @@ int main(void) {
         if ((st.once >> i) & 1) {
             st.ended |= 1u << i;
             st.done |= 1u << i;
-            Line why;
-            why.s("ended the app on two launches");
-            report(i, false, &why);
+            const char why[] = "ended the app on two launches";
+            report(i, false, why, (int)sizeof(why) - 1);
             st.next = i + 1;
         } else {
             st.once |= 1u << i;
             Line l;
-            l.s("RETRY ").s(TESTS[i].id).s("  ended the last launch, running it once more").end();
+            l.s("RETRY ").s(TESTS[i].name).end();
+            Line r;
+            r.s(REASON_INDENT).s("ended the last launch, running it once more").end();
             st.next = i;
         }
         st.inflight = -1;
         state_save(&st);
     }
 
-    const bool nothing_to_run = st.next >= NTESTS;
-    if (!nothing_to_run) {
+    if (st.next < NTESTS) {
         // Every test here maps the same memory twice; SDK 2.50 and later require this first.
         sceKernelEnableDmemAliasing();
         char group = 0;
@@ -1277,7 +1331,7 @@ int main(void) {
             g_ok = true;
             g_why = &why;
             TESTS[i].fn(0x43430000u | ((uint32_t)i << 8));
-            report(i, g_ok, &why);
+            report(i, g_ok, why.b, why.p);
             st.once &= ~(1u << i);
             st.done |= 1u << i;
             if (g_ok)
