@@ -315,31 +315,38 @@ struct Screen {
                 widest = len;
         }
         int scale = 3;
-        while (scale > 1 && (nlines * 10 * scale > h - 8 || widest * 8 * scale > w - 12))
+        while (scale > 1 && (nlines * (8 * scale + 2) > h - 8 || widest * 8 * scale > w - 12))
             scale--;
         const int gw = 8 * scale;
         int rowh = nlines > 0 ? (h - 8) / nlines : 10 * scale;
         if (rowh > 20 * scale)
             rowh = 20 * scale;
-        if (rowh < 10 * scale)
-            rowh = 10 * scale;
+        if (rowh < 8 * scale + 2)
+            rowh = 8 * scale + 2;
         const int maxrows = (h - 8) / rowh;
         const int first = nlines > maxrows ? nlines - maxrows : 0;
         int y = 4;
         for (int li = first; li < nlines; li++) {
             const char* s = lines[li];
             uint32_t col = 0x80E0E0E0u;
-            if (has(s, "FAIL"))
-                col = 0x80FF5050u;
-            else if (has(s, "PASS"))
-                col = 0x8040E060u;
-            else if (s[0] == '=')
+            if (s[0] == '=')
                 col = 0x8060C0F0u;
             else if (has(s, "WARN") || has(s, "SKIP"))
                 col = 0x80F0C040u;
-            int x = 6;
+            // Only the words PASS and FAIL get their colour; the rest of the line keeps its own.
+            int x = 6, word = 0;
+            uint32_t word_col = col;
             for (const char* q = s; *q; q++) {
-                glyph(dst, x, y, *q, col, scale);
+                if (word == 0 && q[0] == 'P' && q[1] == 'A' && q[2] == 'S' && q[3] == 'S') {
+                    word = 4;
+                    word_col = 0x8040E060u;
+                } else if (word == 0 && q[0] == 'F' && q[1] == 'A' && q[2] == 'I' && q[3] == 'L') {
+                    word = 4;
+                    word_col = 0x80FF5050u;
+                }
+                glyph(dst, x, y, *q, word ? word_col : col, scale);
+                if (word)
+                    word--;
                 x += gw;
                 if (x > w - gw)
                     break;

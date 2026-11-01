@@ -7,8 +7,9 @@ calls in CarveTest. Runs at launch and keeps the results on screen; close it wit
 
 OUTPUT
   Screen, and /data/carvecheck_results.txt (/temp0/carvecheck_results.txt if /data is not
-  writable). Each test prints PASS (green) or FAIL (red) and its name, which says which call it
-  makes and how the memory was split first; under a failed test, each failed check is on its own
+  writable). Each test prints PASS or FAIL (only the word is coloured, green or red) and its
+  name, which says which call it makes and how the memory was split first; under a failed test,
+  each failed check is on its own
   line with what the PS4 returned. At the end the screen is cleared and shows only RESULT, sized
   to fill the screen: each group with how many of its tests passed (and how many ended the app)
   and what it verifies, every test of the group under it, and the total. After a relaunch the
