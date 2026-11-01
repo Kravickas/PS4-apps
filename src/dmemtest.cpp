@@ -8772,6 +8772,1119 @@ static void run_pt3() {
     }
 }
 
+// ---- CV: CarveTest (Kravickas/PS4-apps branch carve, build carve-3), ported. Physical ranges split by
+//      aliases (EnableDmemAliasing), then mtypeprotect / munmap / release / checked release; partly
+//      released pool memory; pool commit of every type and protection; VirtualQuery regions. IDs are
+//      CV0-CV103 (C0-C103 there). Its own helpers stay in namespace carve; calls go through the SB
+//      checker like every other section. Runs before SF8: CV0 measures before/after enabling aliasing.
+namespace carve {
+
+// ---- memory helpers ---------------------------------------------------------------------------
+
+static const uint64_t PG = 0x4000;
+static const int NP = 8; // pages per test block
+static uint64_t g_dmem = 0;
+
+struct DmemInfo { // OrbisQueryInfo
+    uint64_t start, end;
+    int32_t mtype, pad;
+};
+
+static bool allocated(long pa) {
+    DmemInfo q;
+    my_memset(&q, 0, sizeof(q));
+    if (sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q)) != 0)
+        return false;
+    return q.start <= (uint64_t)pa && (uint64_t)pa < q.end;
+}
+
+static bool mapped(const void* va, int32_t* prot) {
+    void* s = 0;
+    void* e = 0;
+    int32_t p = 0;
+    if (sceKernelQueryMemoryProtection((void*)va, &s, &e, &p) != 0)
+        return false;
+    if (prot)
+        *prot = p;
+    return true;
+}
+
+static uint64_t le64(const unsigned char* b) {
+    uint64_t v = 0;
+    for (int k = 7; k >= 0; k--)
+        v = (v << 8) | b[k];
+    return v;
+}
+
+// VirtualQuery of one page: physical address it reports for va (-1 if none), memory type (-1)
+static void vq_page(const void* va, long* phys, int32_t* type) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    *phys = -1;
+    *type = -1;
+    if (sceKernelVirtualQuery(va, 0, vi, 0x48) != 0)
+        return;
+    *type = (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) | ((uint32_t)vi[0x1E] << 16) |
+                      ((uint32_t)vi[0x1F] << 24));
+    if (vi[0x20] & 0x0A) // direct or pooled
+        *phys = (long)(le64(vi + 0x10) + ((uint64_t)va - le64(vi)));
+}
+
+static void stamp(uint8_t* va, int pages, uint32_t tag) {
+    for (int i = 0; i < pages; i++)
+        *(volatile uint32_t*)(va + i * PG) = tag + (uint32_t)i;
+}
+
+static char hexc(uint32_t v) {
+    v &= 0xF;
+    return (char)(v < 10 ? '0' + v : 'A' + v - 10);
+}
+
+static void unmap_pages(uint8_t* va, int pages) {
+    if (!va)
+        return;
+    for (int i = 0; i < pages; i++)
+        if (mapped(va + i * PG, nullptr))
+            sceKernelMunmap(va + i * PG, PG);
+}
+
+static void release_pages(long pa, int pages) {
+    if (pa < 0)
+        return;
+    for (int i = 0; i < pages; i++)
+        if (allocated(pa + (long)i * (long)PG))
+            sceKernelReleaseDirectMemory(pa + (long)i * (long)PG, PG);
+}
+
+// ---- readback strings -------------------------------------------------------------------------
+
+static Line& rel_page(Line& l, long addr, long base) {
+    const long d = addr - base;
+    if (d < 0)
+        l.c('-');
+    const long a = d < 0 ? -d : d;
+    l.dec(a / (long)PG);
+    if (a % (long)PG)
+        l.c('+').hex((uint64_t)(a % (long)PG));
+    return l;
+}
+
+// One token per run of pages that the query reports alike.
+static Line& region_str(Line& l, const char* tag, long pa, int pages, bool gt) {
+    l.s(tag).c('[');
+    bool first = true;
+    int32_t pr = 0, pt = 0;
+    long ps = 0, pe = 0;
+    for (int i = 0; i < pages; i++) {
+        const long at = pa + (long)i * (long)PG;
+        int32_t r, t = 0;
+        long s = 0, e = 0;
+        if (gt) {
+            r = sceKernelGetDirectMemoryType(at, &t, &s, &e);
+        } else {
+            DmemInfo q;
+            my_memset(&q, 0, sizeof(q));
+            r = sceKernelDirectMemoryQuery(at, 0, &q, sizeof(q));
+            s = (long)q.start;
+            e = (long)q.end;
+            t = q.mtype;
+        }
+        if (r != 0) {
+            s = e = 0;
+            t = 0;
+        }
+        if (i > 0 && r == pr && s == ps && e == pe && t == pt)
+            continue;
+        if (!first)
+            l.c(' ');
+        first = false;
+        if (r != 0) {
+            l.dec(i).c('!').hex((uint32_t)r);
+        } else {
+            rel_page(l, s, pa).c('-');
+            if (e == 0)
+                l.c('z'); // end not reported
+            else
+                rel_page(l, e, pa);
+            l.c(':').hex((uint32_t)t);
+        }
+        pr = r;
+        ps = s;
+        pe = e;
+        pt = t;
+    }
+    return l.c(']');
+}
+
+static Line& phys_part(Line& l, long pa, int pages) {
+    l.s("phys=[");
+    for (int i = 0; i < pages; i++)
+        l.c(allocated(pa + (long)i * (long)PG) ? 'A' : 'F');
+    l.s("] ");
+    region_str(l, "gt", pa, pages, true).c(' ');
+    return region_str(l, "dq", pa, pages, false);
+}
+
+// va maps pages starting at pa_first; released: pages whose backing must not be read (bit i)
+static Line& va_part(Line& l, const char* tag, uint8_t* va, long pa_first, int pages,
+                     uint32_t stamp_first, bool check_alloc, uint32_t released) {
+    l.s(tag).s("=[");
+    for (int i = 0; i < pages; i++) {
+        uint8_t* p = va + i * PG;
+        int32_t prot = 0;
+        char c;
+        if (!va || !mapped(p, &prot))
+            c = '.';
+        else if (((released >> i) & 1) ||
+                 (check_alloc && !allocated(pa_first + (long)i * (long)PG)))
+            c = 'r';
+        else if (!(prot & 1))
+            c = 'n';
+        else
+            c = *(volatile uint32_t*)p == stamp_first + (uint32_t)i ? 'M' : 'm';
+        l.c(c);
+    }
+    l.s("] ").s(tag).s("o=[");
+    for (int i = 0; i < pages; i++) {
+        long ph = -1;
+        int32_t t = -1;
+        if (va && mapped(va + i * PG, nullptr))
+            vq_page(va + i * PG, &ph, &t);
+        l.c(ph < 0 ? '-' : ph == pa_first + (long)i * (long)PG ? '=' : '#');
+    }
+    l.s("] ").s(tag).s("t=[");
+    for (int i = 0; i < pages; i++) {
+        long ph = -1;
+        int32_t t = -1;
+        if (va && mapped(va + i * PG, nullptr))
+            vq_page(va + i * PG, &ph, &t);
+        l.c(t < 0 ? '-' : hexc((uint32_t)t));
+    }
+    l.s("] ").s(tag).s("p=[");
+    for (int i = 0; i < pages; i++) {
+        int32_t prot = 0;
+        if (va && mapped(va + i * PG, &prot))
+            l.c(hexc((uint32_t)prot >> 4)).c(hexc((uint32_t)prot));
+        else
+            l.s("--");
+    }
+    return l.c(']');
+}
+
+
+// ---- probe definitions ------------------------------------------------------------------------
+
+enum Kind {
+    K_DIRECT,
+    K_ALIAS_GATE,
+    K_FLEX,
+    K_POOL,
+    K_PCOMMIT,
+    K_PUNMAP,
+    K_PREL,
+    K_PQUERY,
+    K_SPAN_ALIAS,
+    K_VQ_REGION
+};
+
+// what splits the block's physical range behind A
+enum Creator {
+    C_NONE,         // nothing
+    C_KEEP,         // alias mapped, left mapped
+    C_UNMAP,        // alias mapped, then unmapped
+    C_MTYPE_SAME,   // alias mapped, then mtypeprotect to type 3 (the block's type)
+    C_MTYPE_OTHER,  // alias mapped, then mtypeprotect to type 0
+    C_MAP2,         // alias mapped with MapDirectMemory2 (type b_type), left mapped
+    C_NAMED_UNMAP,  // alias mapped with MapNamedDirectMemory, then unmapped
+    C_THREE,        // three one-page aliases mapped, then all three unmapped
+    C_POOL_REL1,    // pool: release the second page of the committed block
+    C_POOL_RELALL,  // pool: release the whole committed block
+    C_KEEP_UNMAP_A, // alias mapped and left mapped, then all of A unmapped
+    C_DISJOINT,     // A pages 4-7 unmapped, B maps those pages: two mappings, no page shared
+};
+
+enum Op { O_NONE, O_MTYPE, O_MUNMAP, O_RELEASE, O_CHECKED, O_MPROTECT, O_SPAN, O_DECOMMIT };
+
+struct Spec {
+    const char* id;
+    const char* name;
+    int kind, creator, b_first, b_pages, op, op_first, op_pages;
+    int on_b = 0;      // the operation applies to B instead of A
+    int mtype = 3;     // type given to mtypeprotect
+    int prot = -1;     // protection given to mtypeprotect / mprotect (-1: A's own)
+    int b_type = 3;    // type given to MapDirectMemory2
+    int adj_type = -1; // pages 4-7 are a second allocation of this type (-1: one allocation)
+};
+
+static const Spec SPECS[] = {
+    {"CV0", "alias before / after EnableDmemAliasing", K_ALIAS_GATE, 0, 0, 0, 0, 0, 0},
+    {"CV1", "no alias; mtype A 0-7", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 0, 8},
+    {"CV2", "no alias; munmap A 0-7", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 0, 8},
+    {"CV3", "no alias; munmap A 2-4", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 2, 3},
+    {"CV4", "no alias; rel 0-7", K_DIRECT, C_NONE, 0, 0, O_RELEASE, 0, 8},
+    {"CV5", "no alias; chk 0-7", K_DIRECT, C_NONE, 0, 0, O_CHECKED, 0, 8},
+    {"CV6", "no alias; mtype A 2-4", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 2, 3},
+    {"CV7", "alias 3-4 kept; munmap A 0-7", K_DIRECT, C_KEEP, 3, 2, O_MUNMAP, 0, 8},
+    {"CV8", "flexible 4 pages, munmap 1, then 0+2-3", K_FLEX, 0, 0, 0, 0, 0, 0},
+    {"CV9", "no alias; mtype A+C (A 0-7, C 4p)", K_DIRECT, C_NONE, 0, 0, O_SPAN, 0, 12},
+    {"CV10", "alias 3-4 unmapped; munmap A 0-1", K_DIRECT, C_UNMAP, 3, 2, O_MUNMAP, 0, 2},
+    {"CV11", "alias 3-4 unmapped; mtype A 0-1", K_DIRECT, C_UNMAP, 3, 2, O_MTYPE, 0, 2},
+    {"CV12", "alias 3-4 unmapped; mprotect A 0-7", K_DIRECT, C_UNMAP, 3, 2, O_MPROTECT, 0, 8},
+    {"CV20", "alias 3-4 unmapped; munmap A 0-7", K_DIRECT, C_UNMAP, 3, 2, O_MUNMAP, 0, 8},
+    {"CV21", "alias 3-4 mtype 3; munmap A 0-7", K_DIRECT, C_MTYPE_SAME, 3, 2, O_MUNMAP, 0, 8},
+    {"CV22", "alias 3-4 mtype 0; munmap A 0-7", K_DIRECT, C_MTYPE_OTHER, 3, 2, O_MUNMAP, 0, 8},
+    {"CV23", "map2 alias 3-4 kept; munmap A 0-7", K_DIRECT, C_MAP2, 3, 2, O_MUNMAP, 0, 8},
+    {"CV24", "named alias 3-4 unmapped; munmap A", K_DIRECT, C_NAMED_UNMAP, 3, 2, O_MUNMAP, 0, 8},
+    {"CV25", "alias 0-1 unmapped; munmap A 0-7", K_DIRECT, C_UNMAP, 0, 2, O_MUNMAP, 0, 8},
+    {"CV26", "alias 6-7 unmapped; munmap A 0-7", K_DIRECT, C_UNMAP, 6, 2, O_MUNMAP, 0, 8},
+    {"CV27", "aliases 5,6,7 unmapped; munmap A 0-7", K_DIRECT, C_THREE, 5, 3, O_MUNMAP, 0, 8},
+    {"CV30", "alias 3-4 unmapped; mtype A 0-7", K_DIRECT, C_UNMAP, 3, 2, O_MTYPE, 0, 8},
+    {"CV31", "alias 3-4 unmapped; munmap A 2-4", K_DIRECT, C_UNMAP, 3, 2, O_MUNMAP, 2, 3},
+    {"CV32", "alias 3-4 unmapped; rel 0-7", K_DIRECT, C_UNMAP, 3, 2, O_RELEASE, 0, 8},
+    {"CV33", "alias 3-4 unmapped; chk 0-7", K_DIRECT, C_UNMAP, 3, 2, O_CHECKED, 0, 8},
+    {"CV34", "alias 3-4 unmapped; mtype A 2-4", K_DIRECT, C_UNMAP, 3, 2, O_MTYPE, 2, 3},
+    {"CV35", "alias 3-4 unmapped; mtype A+C", K_DIRECT, C_UNMAP, 3, 2, O_SPAN, 0, 12},
+    {"CV40", "pool commit 64K of 128K; decommit", K_POOL, C_NONE, 0, 0, O_DECOMMIT, 0, 4},
+    {"CV41", "pool commit, rel page 1; decommit", K_POOL, C_POOL_REL1, 0, 0, O_DECOMMIT, 0, 4},
+    {"CV42", "pool commit, rel all; decommit", K_POOL, C_POOL_RELALL, 0, 0, O_DECOMMIT, 0, 4},
+    {"CV43", "pool commit, rel page 1; mtype", K_POOL, C_POOL_REL1, 0, 0, O_MTYPE, 0, 4},
+    {"CV44", "pool commit, rel page 1; munmap", K_POOL, C_POOL_REL1, 0, 0, O_MUNMAP, 0, 4},
+    {"CV45", "pool commit; munmap", K_POOL, C_NONE, 0, 0, O_MUNMAP, 0, 4},
+    {"CV50", "alias 3-4 kept; mtype A 0-7", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 8},
+    {"CV51", "alias 3-4 kept; mtype B prot 1", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2, 1, 3, 0x1},
+    {"CV52", "alias 3-4 kept; mtype A 0-1", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2},
+    {"CV53", "alias 3-4 kept, A unmapped; mtype B", K_DIRECT, C_KEEP_UNMAP_A, 3, 2, O_MTYPE, 0, 2,
+     1},
+    {"CV54", "map2 alias 3-4 type 0; munmap A 0-7", K_DIRECT, C_MAP2, 3, 2, O_MUNMAP, 0, 8, 0, 3, -1,
+     0},
+    {"CV55", "alias 3-4 kept; mprotect B 1", K_DIRECT, C_KEEP, 3, 2, O_MPROTECT, 0, 2, 1},
+    {"CV56", "alias 3-4 kept; mtype B type 0", K_DIRECT, C_KEEP, 3, 2, O_MTYPE, 0, 2, 1, 0},
+    {"CV57", "A 0-3 + B 4-7, no page shared; mtype A", K_DIRECT, C_DISJOINT, 4, 4, O_MTYPE, 0, 4},
+    {"CV58", "A 0-3 + B 4-7, no page shared; mtype B", K_DIRECT, C_DISJOINT, 4, 4, O_MTYPE, 0, 4, 1},
+    {"CV60", "no alias; mtype A 2-4 type 0", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 2, 3, 0, 0},
+    {"CV61", "two allocs 0-3 + 4-7 type 3; munmap A 4-7", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 4, 4, 0,
+     3, -1, 3, 3},
+    {"CV62", "two allocs 0-3 type 3 + 4-7 type 0; none", K_DIRECT, C_NONE, 0, 0, O_NONE, 0, 0, 0, 3,
+     -1, 3, 0},
+    {"CV70", "pool commit type 0, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 0, 3},
+    {"CV71", "pool commit type 1, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 1, 3},
+    {"CV72", "pool commit type 2, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 2, 3},
+    {"CV73", "pool commit type 3, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 3},
+    {"CV74", "pool commit type 4, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 4, 3},
+    {"CV75", "pool commit type 5, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 5, 3},
+    {"CV76", "pool commit type 6, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 6, 3},
+    {"CV77", "pool commit type 7, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 7, 3},
+    {"CV78", "pool commit type 8, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 8, 3},
+    {"CV79", "pool commit type 9, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 9, 3},
+    {"CV80", "pool commit type 10, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 10, 3},
+    {"CV81", "pool commit type 3, prot 0", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x0},
+    {"CV82", "pool commit type 3, prot 1", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x1},
+    {"CV83", "pool commit type 3, prot 2", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x2},
+    {"CV84", "pool commit type 3, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x3},
+    {"CV85", "pool commit type 3, prot 10", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x10},
+    {"CV86", "pool commit type 3, prot 20", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x20},
+    {"CV87", "pool commit type 3, prot 30", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x30},
+    {"CV88", "pool commit type 3, prot 33", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 3, 0x33},
+    {"CV90", "pool munmap empty reservation", K_PUNMAP, 0, 0, 0, 0, 0, 0},
+    {"CV91", "pool munmap committed 64K", K_PUNMAP, 1, 0, 0, 0, 0, 0},
+    {"CV92", "pool munmap 2M with 64K committed", K_PUNMAP, 2, 0, 0, 0, 0, 0},
+    {"CV93", "pool munmap uncommitted part", K_PUNMAP, 3, 0, 0, 0, 0, 0},
+    {"CV94", "pool munmap 2M after decommit", K_PUNMAP, 4, 0, 0, 0, 0, 0},
+    {"CV95", "pool rel never committed", K_PREL, 0, 0, 0, 0, 0, 0},
+    {"CV96", "pool chk never committed", K_PREL, 1, 0, 0, 0, 0, 0},
+    {"CV97", "pool rel after decommit+munmap", K_PREL, 2, 0, 0, 0, 0, 0},
+    {"CV98", "pool find-next query", K_PQUERY, 0, 0, 0, 0, 0, 0},
+    {"CV99", "A + alias in one mtype call", K_SPAN_ALIAS, 0, 0, 0, 0, 0, 0},
+    {"CV100", "VQ: two allocs type 3 + 0", K_VQ_REGION, 0, 0, 0, 0, 0, 0},
+    {"CV101", "VQ: map2 alias 3-4 type 0", K_VQ_REGION, 1, 0, 0, 0, 0, 0},
+    {"CV102", "VQ: mtype A 2-4 type 0", K_VQ_REGION, 2, 0, 0, 0, 0, 0},
+    {"CV103", "VQ: alias 3-4 kept, same type", K_VQ_REGION, 3, 0, 0, 0, 0, 0},
+};
+static const int NSPECS = (int)(sizeof(SPECS) / sizeof(SPECS[0]));
+
+static uint32_t tag_of(int idx) {
+    return 0x43500000u | ((uint32_t)idx << 8);
+}
+
+// ---- block: NP test pages between two free pages ----------------------------------------------
+
+struct Block {
+    long pa = -1;
+    int32_t r_alloc = 0, r_guard_lo = 0, r_guard_hi = 0;
+};
+
+static bool block_new(Block& b, int pages) {
+    long base = -1;
+    b.r_alloc = sceKernelAllocateDirectMemory(0, (long)g_dmem, (pages + 2) * PG, PG, 3, &base);
+    if (b.r_alloc != 0)
+        return false;
+    b.r_guard_lo = sceKernelReleaseDirectMemory(base, PG);
+    b.r_guard_hi = sceKernelReleaseDirectMemory(base + (long)(pages + 1) * (long)PG, PG);
+    b.pa = base + (long)PG;
+    return b.r_guard_lo == 0 && b.r_guard_hi == 0;
+}
+
+static uint8_t* map_at(void* fixed, long pa, int pages, int32_t prot, int32_t* r) {
+    void* va = fixed;
+    *r = sceKernelMapDirectMemory(&va, pages * PG, prot, fixed ? 0x10 : 0, pa, PG);
+    return *r == 0 ? (uint8_t*)va : nullptr;
+}
+
+struct Alias {
+    uint8_t* va = nullptr;
+    int first = 0, pages = 0;
+};
+
+// ---- direct-memory probes ---------------------------------------------------------------------
+
+static void op_run(Line& l, const Spec& s, uint8_t* target, long pa, uint8_t* span, int32_t prot) {
+    if (s.op == O_NONE) {
+        l.s("op=none ");
+        return;
+    }
+    uint8_t* at = target + s.op_first * PG;
+    const uint64_t len = (uint64_t)s.op_pages * PG;
+    const int32_t op_prot = s.prot >= 0 ? s.prot : prot;
+    int32_t r = 0;
+    switch (s.op) {
+    case O_MTYPE:
+        r = sceKernelMtypeprotect(at, len, s.mtype, op_prot);
+        break;
+    case O_MUNMAP:
+        r = sceKernelMunmap(at, len);
+        break;
+    case O_RELEASE:
+        r = sceKernelReleaseDirectMemory(pa + s.op_first * (long)PG, len);
+        break;
+    case O_CHECKED:
+        r = sceKernelCheckedReleaseDirectMemory(pa + s.op_first * (long)PG, len);
+        break;
+    case O_MPROTECT:
+        r = sceKernelMprotect(at, len, s.prot >= 0 ? s.prot : 0x1);
+        break;
+    case O_SPAN:
+        r = sceKernelMtypeprotect(span, len, s.mtype, op_prot);
+        break;
+    }
+    l.ret("op", r);
+}
+
+static Line& aliases_part(Line& l, const Alias* al, int n, long pa, uint32_t tag) {
+    for (int k = 0; k < n; k++) {
+        char name[3] = {'B', 0, 0};
+        if (k)
+            name[1] = (char)('1' + k);
+        l.s(" | ");
+        va_part(l, name, al[k].va, pa + al[k].first * (long)PG, al[k].pages,
+                tag + (uint32_t)al[k].first, true, 0);
+    }
+    return l;
+}
+
+static void run_direct(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    const bool span = s.op == O_SPAN;
+    const int32_t prot = span ? 0x33 : 0x3;
+
+    // span: C's block first, so P's guard pages stay free
+    Block cblk;
+    if (span && !block_new(cblk, 4)) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP block C ").ret("alloc", cblk.r_alloc).ret("lo", cblk.r_guard_lo);
+        l.ret("hi", cblk.r_guard_hi).end();
+        if (cblk.pa > 0)
+            release_pages(cblk.pa, 4);
+        return;
+    }
+    Block blk;
+    if (!block_new(blk, NP)) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP block ").ret("alloc", blk.r_alloc).ret("lo", blk.r_guard_lo);
+        l.ret("hi", blk.r_guard_hi).end();
+        if (blk.pa > 0)
+            release_pages(blk.pa, NP);
+        if (span)
+            release_pages(cblk.pa, 4);
+        return;
+    }
+
+    // span: A 0-7 and C (the second block) side by side in one reservation
+    uint8_t* rsv = nullptr;
+    const long cpa = span ? cblk.pa : -1;
+    uint8_t* c = nullptr;
+    int32_t r_rsv = 0, r_c = 0;
+    if (span) {
+        void* v = nullptr;
+        r_rsv = sceKernelReserveVirtualRange(&v, (NP + 4) * PG, 0, PG);
+        rsv = r_rsv == 0 ? (uint8_t*)v : nullptr;
+    }
+
+    int32_t r_adj_rel = 0, r_adj = 0;
+    if (s.adj_type >= 0) {
+        long q = -1;
+        const long half = blk.pa + 4 * (long)PG;
+        r_adj_rel = sceKernelReleaseDirectMemory(half, 4 * PG);
+        r_adj =
+            sceKernelAllocateDirectMemory(half, half + 4 * (long)PG, 4 * PG, PG, s.adj_type, &q);
+        if (r_adj_rel != 0 || r_adj != 0 || q != half) {
+            Line l = head(s.id, s.name);
+            l.s("SKIP second alloc ").ret("rel", r_adj_rel).ret("alloc", r_adj);
+            l.s("at=");
+            rel_page(l, q, blk.pa).end();
+            release_pages(blk.pa, NP);
+            return;
+        }
+    }
+
+    int32_t r_a = 0;
+    uint8_t* a = (span && !rsv) ? nullptr : map_at(rsv, blk.pa, NP, prot, &r_a);
+    if (span && a && cpa >= 0)
+        c = map_at(rsv + NP * PG, cpa, 4, prot, &r_c);
+    if (!a || (span && !c)) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP setup ").ret("mapA", r_a);
+        if (span)
+            l.ret("rsv", r_rsv).ret("mapC", r_c);
+        l.end();
+        unmap_pages(a, NP);
+        unmap_pages(c, 4);
+        if (rsv)
+            sceKernelMunmap(rsv, (NP + 4) * PG);
+        release_pages(blk.pa, NP);
+        release_pages(cpa, 4);
+        return;
+    }
+    stamp(a, NP, tag);
+    if (c)
+        stamp(c, 4, tag + 0x80);
+
+    // creator
+    Alias al[3];
+    int nal = 0;
+    Line pre = head(s.id, s.name);
+    pre.s("pre ");
+    if (s.adj_type >= 0)
+        pre.ret("rel4-7", r_adj_rel).ret("alloc4-7", r_adj);
+    const long bpa = blk.pa + s.b_first * (long)PG;
+    switch (s.creator) {
+    case C_NONE:
+        break;
+    case C_KEEP:
+    case C_UNMAP:
+    case C_MTYPE_SAME:
+    case C_MTYPE_OTHER: {
+        int32_t r = 0;
+        al[0].va = map_at(nullptr, bpa, s.b_pages, 0x3, &r);
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("mapB", r);
+        if (al[0].va && s.creator == C_UNMAP)
+            pre.ret("unmapB", sceKernelMunmap(al[0].va, s.b_pages * PG));
+        else if (al[0].va && s.creator == C_MTYPE_SAME)
+            pre.ret("mtypeB", sceKernelMtypeprotect(al[0].va, s.b_pages * PG, 3, 0x3));
+        else if (al[0].va && s.creator == C_MTYPE_OTHER)
+            pre.ret("mtypeB", sceKernelMtypeprotect(al[0].va, s.b_pages * PG, 0, 0x3));
+        break;
+    }
+    case C_KEEP_UNMAP_A: {
+        int32_t r = 0;
+        al[0].va = map_at(nullptr, bpa, s.b_pages, 0x3, &r);
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("mapB", r).ret("unmapA", sceKernelMunmap(a, NP * PG));
+        break;
+    }
+    case C_DISJOINT: {
+        pre.ret("unmapA", sceKernelMunmap(a + s.b_first * PG, s.b_pages * PG));
+        int32_t r = 0;
+        al[0].va = map_at(nullptr, bpa, s.b_pages, 0x3, &r);
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("mapB", r);
+        if (al[0].va)
+            stamp(al[0].va, s.b_pages, tag + (uint32_t)s.b_first);
+        break;
+    }
+    case C_MAP2: {
+        void* v = nullptr;
+        const int32_t r = sceKernelMapDirectMemory2(&v, s.b_pages * PG, s.b_type, 0x3, 0, bpa, PG);
+        al[0].va = r == 0 ? (uint8_t*)v : nullptr;
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("map2B", r);
+        break;
+    }
+    case C_NAMED_UNMAP: {
+        void* v = nullptr;
+        const int32_t r =
+            sceKernelMapNamedDirectMemory(&v, s.b_pages * PG, 0x3, 0, bpa, PG, "carve");
+        al[0].va = r == 0 ? (uint8_t*)v : nullptr;
+        al[0].first = s.b_first;
+        al[0].pages = s.b_pages;
+        nal = 1;
+        pre.ret("namedB", r);
+        if (al[0].va)
+            pre.ret("unmapB", sceKernelMunmap(al[0].va, s.b_pages * PG));
+        break;
+    }
+    case C_THREE: {
+        static const char* const map_tag[3] = {"mapB", "mapB2", "mapB3"};
+        static const char* const unmap_tag[3] = {"unmapB", "unmapB2", "unmapB3"};
+        for (int k = 0; k < 3; k++) {
+            int32_t r = 0;
+            al[k].va = map_at(nullptr, bpa + k * (long)PG, 1, 0x3, &r);
+            al[k].first = s.b_first + k;
+            al[k].pages = 1;
+            pre.ret(map_tag[k], r);
+        }
+        nal = 3;
+        for (int k = 0; k < 3; k++)
+            if (al[k].va)
+                pre.ret(unmap_tag[k], sceKernelMunmap(al[k].va, PG));
+        break;
+    }
+    }
+    pre.s("| ");
+    phys_part(pre, blk.pa, NP).s(" | ");
+    va_part(pre, "A", a, blk.pa, NP, tag, true, 0);
+    aliases_part(pre, al, nal, blk.pa, tag);
+    if (c) {
+        pre.s(" | ");
+        va_part(pre, "C", c, cpa, 4, tag + 0x80, true, 0);
+    }
+    pre.end();
+
+    Line post = head(s.id, s.name);
+    if (s.on_b && !al[0].va)
+        post.s("SKIP no B ");
+    else
+        op_run(post, s, s.on_b ? al[0].va : a, blk.pa, rsv, prot);
+    post.s("| ");
+    phys_part(post, blk.pa, NP).s(" | ");
+    va_part(post, "A", a, blk.pa, NP, tag, true, 0);
+    aliases_part(post, al, nal, blk.pa, tag);
+    if (c) {
+        post.s(" | ");
+        va_part(post, "C", c, cpa, 4, tag + 0x80, true, 0);
+        post.s(" ");
+        phys_part(post, cpa, 4);
+    }
+    post.end();
+
+    unmap_pages(a, NP);
+    for (int k = 0; k < nal; k++)
+        unmap_pages(al[k].va, al[k].pages);
+    unmap_pages(c, 4);
+    if (rsv)
+        sceKernelMunmap(rsv, (NP + 4) * PG);
+    release_pages(blk.pa, NP);
+    release_pages(cpa, 4);
+}
+
+// ---- C0: can the same memory be mapped twice, before and after enabling aliasing -------------
+
+static void run_alias_gate(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    long pa = -1;
+    const int32_t ra = sceKernelAllocateDirectMemory(0, (long)g_dmem, 2 * PG, PG, 3, &pa);
+    Line l = head(s.id, s.name);
+    if (ra != 0) {
+        l.s("SKIP ").ret("alloc", ra).ret("enable", sceKernelEnableDmemAliasing()).end();
+        return;
+    }
+    int32_t r1 = 0, r2 = 0, r3 = 0;
+    uint8_t* v1 = map_at(nullptr, pa, 2, 0x3, &r1);
+    if (v1)
+        stamp(v1, 2, tag);
+    uint8_t* v2 = map_at(nullptr, pa, 2, 0x3, &r2);
+    const int32_t re = sceKernelEnableDmemAliasing();
+    uint8_t* v3 = map_at(nullptr, pa, 2, 0x3, &r3);
+    l.ret("map1", r1).ret("before", r2).ret("enable", re).ret("after", r3).s("| ");
+    va_part(l, "V1", v1, pa, 2, tag, true, 0).s(" | ");
+    va_part(l, "V2", v2, pa, 2, tag, true, 0).s(" | ");
+    va_part(l, "V3", v3, pa, 2, tag, true, 0).end();
+    unmap_pages(v1, 2);
+    unmap_pages(v2, 2);
+    unmap_pages(v3, 2);
+    release_pages(pa, 2);
+}
+
+// ---- C8: flexible memory, the other branch of the physical-area unmap -------------------------
+
+static void run_flex(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    void* v = nullptr;
+    const int32_t rm = sceKernelMapFlexibleMemory(&v, 4 * PG, 0x3, 0);
+    uint8_t* f = rm == 0 ? (uint8_t*)v : nullptr;
+    if (!f) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP ").ret("map", rm).end();
+        return;
+    }
+    stamp(f, 4, tag);
+    Line pre = head(s.id, s.name);
+    pre.s("pre ").ret("map", rm).ret("unmap1", sceKernelMunmap(f + PG, PG)).s("| ");
+    va_part(pre, "F", f, -1, 4, tag, false, 0).end();
+    Line post = head(s.id, s.name);
+    post.ret("unmap0", sceKernelMunmap(f, PG)).ret("unmap23", sceKernelMunmap(f + 2 * PG, 2 * PG));
+    post.s("| ");
+    va_part(post, "F", f, -1, 4, tag, false, 0).end();
+    unmap_pages(f, 4);
+}
+
+// ---- C40-C44: pool -----------------------------------------------------------------------------
+
+static void run_pool(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    const uint64_t blk = 0x10000, rsv = 0x200000;
+    const int pages = (int)(blk / PG);
+    uint64_t pp = 0;
+    const int32_t re = sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &pp);
+    void* v = nullptr;
+    const int32_t rr = re == 0 ? sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) : -1;
+    const int32_t rc = rr == 0 ? sceKernelMemoryPoolCommit(v, blk, 3, 0x3, 0) : -1;
+    uint8_t* va = rc == 0 ? (uint8_t*)v : nullptr;
+    if (!va) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP ").ret("expand", re).ret("reserve", rr).ret("commit", rc).end();
+        if (rr == 0)
+            sceKernelMunmap(v, rsv);
+        if (re == 0)
+            sceKernelReleaseDirectMemory((long)pp, 2 * blk);
+        return;
+    }
+    stamp(va, pages, tag);
+    const long pa = (long)pp;
+
+    // VirtualQuery's address for the committed block is used only if it lies in the memory this
+    // probe expanded, so a release never reaches anything else; the expanded range otherwise.
+    long vq0 = -1, vq1 = -1;
+    int32_t t0 = -1;
+    vq_page(va, &vq0, &t0);
+    vq_page(va + PG, &vq1, &t0);
+    const bool use_vq = vq0 >= pa && vq0 + (long)blk <= pa + 2 * (long)blk;
+    const long blk_pa = use_vq ? vq0 : pa;
+
+    Line pre = head(s.id, s.name);
+    pre.s("pre ").ret("expand", re).ret("reserve", rr).ret("commit", rc).s("vq=");
+    if (vq0 < 0)
+        pre.c('-');
+    else if (vq0 == 0)
+        pre.c('0');
+    else
+        rel_page(pre, vq0, pa);
+    pre.c(' ');
+    uint32_t released = 0;
+    if (s.creator == C_POOL_REL1) {
+        const long p1 = blk_pa + (long)PG;
+        pre.s(use_vq ? "rel1(vq) " : "rel1(expand) ");
+        pre.ret("ret", sceKernelReleaseDirectMemory(p1, PG));
+        released = 0x2;
+    } else if (s.creator == C_POOL_RELALL) {
+        pre.s(use_vq ? "relall(vq) " : "relall(expand) ");
+        pre.ret("ret", sceKernelReleaseDirectMemory(blk_pa, blk));
+        released = 0xF;
+    }
+    pre.s("| expand ");
+    phys_part(pre, pa, 2 * pages);
+    if (blk_pa != pa) {
+        pre.s(" | block ");
+        phys_part(pre, blk_pa, pages);
+    }
+    pre.s(" | ");
+    va_part(pre, "V", va, blk_pa, pages, tag, false, released).end();
+
+    Line post = head(s.id, s.name);
+    int32_t ro = 0;
+    if (s.op == O_DECOMMIT)
+        ro = sceKernelMemoryPoolDecommit(va, blk, 0);
+    else if (s.op == O_MTYPE)
+        ro = sceKernelMtypeprotect(va, blk, 3, 0x3);
+    else
+        ro = sceKernelMunmap(va, blk);
+    // decommitted memory is not read: PS4 still reports it readable and the read ends the app
+    if (s.op == O_DECOMMIT)
+        released = 0xF;
+    post.ret("op", ro).s("| expand ");
+    phys_part(post, pa, 2 * pages);
+    if (blk_pa != pa) {
+        post.s(" | block ");
+        phys_part(post, blk_pa, pages);
+    }
+    post.s(" | ");
+    va_part(post, "V", va, blk_pa, pages, tag, false, released).end();
+
+    if (s.op == O_MTYPE)
+        sceKernelMemoryPoolDecommit(va, blk, 0);
+    sceKernelMunmap(va, rsv);
+    sceKernelReleaseDirectMemory(pa, 2 * blk);
+}
+
+// ---- C70-C103: pool sweeps, one mtypeprotect over a mapping and its alias, VirtualQuery regions
+
+static const uint64_t POOL_BLK = 0x10000, POOL_RSV = 0x200000;
+
+static Line& hex2(Line& l, uint32_t v) {
+    return l.c(hexc(v >> 4)).c(hexc(v));
+}
+
+// Per page: VirtualQuery flags, memory type and protection, then QueryMemoryProtection. The memory
+// itself is never read.
+static Line& pool_va(Line& l, const char* tag, uint8_t* va, int pages) {
+    unsigned char vi[0x60];
+    for (int pass = 0; pass < 4; pass++) {
+        static const char* const field[4] = {"f=[", "t=[", "v=[", "p=["};
+        l.s(pass ? "] " : "").s(tag).s(field[pass]);
+        for (int i = 0; i < pages; i++) {
+            if (pass == 3) {
+                int32_t prot = 0;
+                if (mapped(va + i * PG, &prot))
+                    hex2(l, (uint32_t)prot);
+                else
+                    l.s("--");
+                continue;
+            }
+            my_memset(vi, 0, sizeof(vi));
+            if (sceKernelVirtualQuery(va + i * PG, 0, vi, 0x48) != 0) {
+                l.s(pass == 1 ? "-" : "--");
+                continue;
+            }
+            if (pass == 0)
+                hex2(l, vi[0x20]);
+            else if (pass == 1)
+                l.c(hexc(vi[0x1C]));
+            else
+                hex2(l, vi[0x18]);
+        }
+    }
+    return l.c(']');
+}
+
+struct Pool {
+    uint64_t pp = 0;
+    uint8_t* va = nullptr;
+    int32_t re = 0, rr = 0;
+};
+
+static bool pool_reserve(Pool& p) {
+    p.re = sceKernelMemoryPoolExpand(0, g_dmem, 2 * POOL_BLK, POOL_BLK, &p.pp);
+    void* v = nullptr;
+    p.rr = p.re == 0 ? sceKernelMemoryPoolReserve(0, POOL_RSV, 0, 0, &v) : -1;
+    p.va = p.rr == 0 ? (uint8_t*)v : nullptr;
+    return p.va != nullptr;
+}
+
+static void pool_drop(Pool& p) {
+    if (p.va) {
+        sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0);
+        sceKernelMunmap(p.va, POOL_RSV);
+    }
+    if (p.re == 0)
+        sceKernelReleaseDirectMemory((long)p.pp, 2 * POOL_BLK);
+}
+
+static void run_pcommit(int idx) {
+    const Spec& s = SPECS[idx];
+    Pool p;
+    Line pre = head(s.id, s.name);
+    if (!pool_reserve(p)) {
+        pre.s("SKIP ").ret("expand", p.re).ret("reserve", p.rr).end();
+        pool_drop(p);
+        return;
+    }
+    const int32_t rc = sceKernelMemoryPoolCommit(p.va, POOL_BLK, s.mtype, s.prot, 0);
+    pre.s("pre ").ret("commit", rc).s("| ");
+    pool_va(pre, "V", p.va, 8).end();
+    Line post = head(s.id, s.name);
+    post.ret("op", rc == 0 ? sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0) : 0).s("| ");
+    pool_va(post, "V", p.va, 8).end();
+    pool_drop(p);
+}
+
+static void run_punmap(int idx) {
+    const Spec& s = SPECS[idx];
+    Pool p;
+    Line pre = head(s.id, s.name);
+    if (!pool_reserve(p)) {
+        pre.s("SKIP ").ret("expand", p.re).ret("reserve", p.rr).end();
+        pool_drop(p);
+        return;
+    }
+    pre.s("pre ");
+    if (s.creator != 0)
+        pre.ret("commit", sceKernelMemoryPoolCommit(p.va, POOL_BLK, 3, 0x3, 0));
+    if (s.creator == 4)
+        pre.ret("decommit", sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0));
+    pre.s("| ");
+    pool_va(pre, "V", p.va, 8).end();
+    int32_t r;
+    if (s.creator == 1)
+        r = sceKernelMunmap(p.va, POOL_BLK);
+    else if (s.creator == 3)
+        r = sceKernelMunmap(p.va + POOL_BLK, POOL_RSV - POOL_BLK);
+    else
+        r = sceKernelMunmap(p.va, POOL_RSV);
+    Line post = head(s.id, s.name);
+    post.ret("op", r).s("| ");
+    pool_va(post, "V", p.va, 8).end();
+    pool_drop(p);
+}
+
+static void run_prel(int idx) {
+    const Spec& s = SPECS[idx];
+    const int pages = (int)(2 * POOL_BLK / PG);
+    uint64_t pp = 0;
+    const int32_t re = sceKernelMemoryPoolExpand(0, g_dmem, 2 * POOL_BLK, POOL_BLK, &pp);
+    Line pre = head(s.id, s.name);
+    if (re != 0) {
+        pre.s("SKIP ").ret("expand", re).end();
+        return;
+    }
+    pre.s("pre ");
+    if (s.creator == 2) {
+        void* v = nullptr;
+        const int32_t rr = sceKernelMemoryPoolReserve(0, POOL_RSV, 0, 0, &v);
+        pre.ret("reserve", rr);
+        if (rr == 0) {
+            pre.ret("commit", sceKernelMemoryPoolCommit(v, POOL_BLK, 3, 0x3, 0));
+            pre.ret("decommit", sceKernelMemoryPoolDecommit(v, POOL_BLK, 0));
+            pre.ret("munmap", sceKernelMunmap(v, POOL_RSV));
+        }
+    }
+    pre.s("| ");
+    phys_part(pre, (long)pp, pages).end();
+    const int32_t r = s.creator == 1 ? sceKernelCheckedReleaseDirectMemory((long)pp, 2 * POOL_BLK)
+                                     : sceKernelReleaseDirectMemory((long)pp, 2 * POOL_BLK);
+    uint64_t pp2 = 0;
+    const int32_t re2 = sceKernelMemoryPoolExpand(0, g_dmem, 2 * POOL_BLK, POOL_BLK, &pp2);
+    Line post = head(s.id, s.name);
+    post.ret("op", r).ret("expand2", re2);
+    if (re2 == 0) {
+        post.s("at=");
+        rel_page(post, (long)pp2, (long)pp);
+    }
+    post.s(" | ");
+    phys_part(post, (long)pp, pages).end();
+    sceKernelReleaseDirectMemory((long)pp, 2 * POOL_BLK);
+    if (re2 == 0)
+        sceKernelReleaseDirectMemory((long)pp2, 2 * POOL_BLK);
+}
+
+static Line& dq_next(Line& l, const char* tag, long at, long base) {
+    DmemInfo q;
+    my_memset(&q, 0, sizeof(q));
+    const int32_t r = sceKernelDirectMemoryQuery(at, 1, &q, sizeof(q));
+    l.ret(tag, r);
+    if (r == 0) {
+        rel_page(l, (long)q.start, base).c('-');
+        if (q.end == 0)
+            l.c('z');
+        else
+            rel_page(l, (long)q.end, base);
+        l.c(':').hex((uint32_t)q.mtype).c(' ');
+    }
+    return l;
+}
+
+static void run_pquery(int idx) {
+    const Spec& s = SPECS[idx];
+    Pool p;
+    Line pre = head(s.id, s.name);
+    if (!pool_reserve(p)) {
+        pre.s("SKIP ").ret("expand", p.re).ret("reserve", p.rr).end();
+        pool_drop(p);
+        return;
+    }
+    pre.s("pre ");
+    dq_next(pre, "next", (long)p.pp, (long)p.pp).end();
+    Line post = head(s.id, s.name);
+    post.ret("op", sceKernelMemoryPoolCommit(p.va, POOL_BLK, 3, 0x3, 0));
+    dq_next(post, "next", (long)p.pp, (long)p.pp).end();
+    pool_drop(p);
+}
+
+static void run_span_alias(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    Block blk;
+    if (!block_new(blk, NP)) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP block ").ret("alloc", blk.r_alloc).end();
+        if (blk.pa > 0)
+            release_pages(blk.pa, NP);
+        return;
+    }
+    void* v = nullptr;
+    const int32_t r_rsv = sceKernelReserveVirtualRange(&v, (NP + 2) * PG, 0, PG);
+    uint8_t* rsv = r_rsv == 0 ? (uint8_t*)v : nullptr;
+    int32_t r_a = 0, r_b = 0;
+    uint8_t* a = rsv ? map_at(rsv, blk.pa, NP, 0x3, &r_a) : nullptr;
+    uint8_t* b = a ? map_at(rsv + NP * PG, blk.pa + 3 * (long)PG, 2, 0x3, &r_b) : nullptr;
+    if (!b) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP ").ret("rsv", r_rsv).ret("mapA", r_a).ret("mapB", r_b).end();
+        unmap_pages(a, NP);
+        if (rsv)
+            sceKernelMunmap(rsv, (NP + 2) * PG);
+        release_pages(blk.pa, NP);
+        return;
+    }
+    stamp(a, NP, tag);
+    Line pre = head(s.id, s.name);
+    pre.s("pre ").ret("mapA", r_a).ret("mapB", r_b).s("| ");
+    phys_part(pre, blk.pa, NP).s(" | ");
+    va_part(pre, "A", a, blk.pa, NP, tag, true, 0).s(" | ");
+    va_part(pre, "B", b, blk.pa + 3 * (long)PG, 2, tag + 3, true, 0).end();
+    Line post = head(s.id, s.name);
+    post.ret("op", sceKernelMtypeprotect(rsv, (NP + 2) * PG, 0, 0x1)).s("| ");
+    phys_part(post, blk.pa, NP).s(" | ");
+    va_part(post, "A", a, blk.pa, NP, tag, true, 0).s(" | ");
+    va_part(post, "B", b, blk.pa + 3 * (long)PG, 2, tag + 3, true, 0).end();
+    unmap_pages(a, NP);
+    unmap_pages(b, 2);
+    sceKernelMunmap(rsv, (NP + 2) * PG);
+    release_pages(blk.pa, NP);
+}
+
+// VirtualQuery's region for every page of va, one token per run of pages it reports alike:
+// start-end:type in pages from va
+static Line& vq_region_str(Line& l, const char* tag, uint8_t* va, int pages) {
+    l.s(tag).c('[');
+    unsigned char vi[0x60];
+    uint64_t ps = 0, pe = 0;
+    int32_t pr = 0, pt = 0;
+    for (int i = 0; i < pages; i++) {
+        my_memset(vi, 0, sizeof(vi));
+        const int32_t r = sceKernelVirtualQuery(va + i * PG, 0, vi, 0x48);
+        const uint64_t st = r == 0 ? le64(vi) : 0, en = r == 0 ? le64(vi + 8) : 0;
+        const int32_t t = r == 0 ? (int32_t)vi[0x1C] : 0;
+        if (i > 0 && r == pr && st == ps && en == pe && t == pt)
+            continue;
+        if (i > 0)
+            l.c(' ');
+        if (r != 0)
+            l.dec(i).c('!').hex((uint32_t)r);
+        else {
+            rel_page(l, (long)st, (long)va).c('-');
+            rel_page(l, (long)en, (long)va).c(':').hex((uint32_t)t);
+        }
+        pr = r;
+        ps = st;
+        pe = en;
+        pt = t;
+    }
+    return l.c(']');
+}
+
+static void run_vq_region(int idx) {
+    const Spec& s = SPECS[idx];
+    const uint32_t tag = tag_of(idx);
+    Block blk;
+    if (!block_new(blk, NP)) {
+        Line l = head(s.id, s.name);
+        l.s("SKIP block ").ret("alloc", blk.r_alloc).end();
+        if (blk.pa > 0)
+            release_pages(blk.pa, NP);
+        return;
+    }
+    Line l = head(s.id, s.name);
+    if (s.creator == 0) {
+        long q = -1;
+        const long half = blk.pa + 4 * (long)PG;
+        l.ret("rel4-7", sceKernelReleaseDirectMemory(half, 4 * PG));
+        l.ret("alloc4-7",
+              sceKernelAllocateDirectMemory(half, half + 4 * (long)PG, 4 * PG, PG, 0, &q));
+    }
+    int32_t r_a = 0;
+    uint8_t* a = map_at(nullptr, blk.pa, NP, 0x3, &r_a);
+    l.ret("mapA", r_a);
+    uint8_t* b = nullptr;
+    if (a) {
+        stamp(a, NP, tag);
+        if (s.creator == 1) {
+            void* v = nullptr;
+            const int32_t r =
+                sceKernelMapDirectMemory2(&v, 2 * PG, 0, 0x3, 0, blk.pa + 3 * (long)PG, PG);
+            b = r == 0 ? (uint8_t*)v : nullptr;
+            l.ret("map2B", r);
+        } else if (s.creator == 2) {
+            l.ret("mtypeA", sceKernelMtypeprotect(a + 2 * PG, 3 * PG, 0, 0x3));
+        } else if (s.creator == 3) {
+            int32_t r = 0;
+            b = map_at(nullptr, blk.pa + 3 * (long)PG, 2, 0x3, &r);
+            l.ret("mapB", r);
+        }
+        l.s("| ");
+        phys_part(l, blk.pa, NP).s(" | ");
+        vq_region_str(l, "Avq", a, NP).s(" ");
+        va_part(l, "A", a, blk.pa, NP, tag, true, 0);
+        if (b) {
+            l.s(" | ");
+            vq_region_str(l, "Bvq", b, 2);
+        }
+    }
+    l.end();
+    unmap_pages(a, NP);
+    unmap_pages(b, 2);
+    release_pages(blk.pa, NP);
+}
+
+// ---- main -------------------------------------------------------------------------------------
+
+static void run_one(int idx) {
+    switch (SPECS[idx].kind) {
+    case K_ALIAS_GATE:
+        run_alias_gate(idx);
+        break;
+    case K_FLEX:
+        run_flex(idx);
+        break;
+    case K_POOL:
+        run_pool(idx);
+        break;
+    case K_PCOMMIT:
+        run_pcommit(idx);
+        break;
+    case K_PUNMAP:
+        run_punmap(idx);
+        break;
+    case K_PREL:
+        run_prel(idx);
+        break;
+    case K_PQUERY:
+        run_pquery(idx);
+        break;
+    case K_SPAN_ALIAS:
+        run_span_alias(idx);
+        break;
+    case K_VQ_REGION:
+        run_vq_region(idx);
+        break;
+    default:
+        run_direct(idx);
+        break;
+    }
+}
+
+} // namespace carve
+
+static void run_carve() {
+    carve::g_dmem = g_dmem;
+    say("== CV CarveTest probes (carve branch, carve-3); IDs CV0-CV103");
+    say("phys: A alloc F free | va: M ok m changed n no-read r backing freed . unmapped | "
+        "o: = expected phys # other - none");
+    for (int i = 0; i < carve::NSPECS; i++)
+        carve::run_one(i);
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -9161,6 +10274,8 @@ int main(void) {
         run_ex();
         g_section = "df";
         run_df();
+        g_section = "cv";
+        run_carve();
         g_section = "sf8";
         run_sf8();
         g_section = "last";

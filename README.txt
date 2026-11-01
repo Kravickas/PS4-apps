@@ -138,6 +138,10 @@ SECTIONS
      directory), every named anon flag, MapDirectMemory2 checks; SF8 (after EX) dmem aliasing
   AV/AL memory_test AvailableDirectMemorySize / AllocateDirectMemory findings inside a free 4 MiB area
   DF (after EX) memory_test device file findings: /dev/dmem1, /dev/gc, flexible budget (no writes)
+  CV (after DF, before SF8) CarveTest's probes (carve branch, carve-3) as CV0-CV103: physical ranges
+     split by aliases then mtypeprotect / munmap / release / checked release, partly released pool
+     memory, pool commit of every type and protection, VirtualQuery regions; see that branch's README
+     for each probe and the line format
   FM/FX memory_test file mapping (private/shared writes, unaligned offsets) and flexible findings
      (budget for 1 MiB maps of each kind, VirtualQuery, contents after unmap/remap/overwrite)
   DT memory_test DirectTest findings: double mappings, contents after release, partial release,
