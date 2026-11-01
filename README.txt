@@ -144,7 +144,8 @@ SECTIONS
      backing per type, type changes and which direct memory areas merge
   CO memory_test coalescing findings: for each kind of mapping, the areas after outside-in mapping,
      a middle mapping, a rename, an mprotect and an mlock; CO9/CO10 = CO1/CO4 without GPU protection;
-     CO11/CO12 reservations mapped left to right, right to left and in the middle of a range
+     CO11/CO12 reservations mapped left to right, right to left and in the middle of a range;
+     CO13/CO14 a reservation ending at the end of the reserved range, mapped before or after its neighbour
   PT/TP memory_test protect / type protect findings: reserved splits, one mprotect over several
      kinds, execute on a file mapping, mprotect alignment, mtypeprotect with type 10, splits and
      merges by type, and where mtypeprotect fails (never GPU protection on reserved memory)

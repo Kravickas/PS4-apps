@@ -8028,6 +8028,37 @@ static void run_co() {
         }
         unk(l).end();
     }
+    // does a reservation ending at the end of the reserved range merge? a) 5-piece range: piece 4
+    // (the end) then 3; b) a new 5-piece range: 3 then 4; c) a 7-piece range: 3 then 4 (not at the end)
+    for (int shared = 1; shared >= 0; shared--) {
+        say(shared ? "CO13" : "CO14");
+        Line l = head(shared ? "CO13" : "CO14",
+                      shared ? "void 111: a) 5 pieces: 4,3 | b) 5 pieces: 3,4 | c) 7 pieces: 3,4"
+                             : "void 110: a) 5 pieces: 4,3 | b) 5 pieces: 3,4 | c) 7 pieces: 3,4");
+        const int32_t fl = shared ? 0x111 : 0x110;
+        struct Case {
+            int pieces, first, second;
+        };
+        static const Case cases[] = {{5, 4, 3}, {5, 3, 4}, {7, 3, 4}};
+        for (const Case& c : cases) {
+            void* a = 0;
+            if (sceKernelReserveVirtualRange(&a, c.pieces * 0x20000, 0, 0) != 0) {
+                l.s("SKIP | ");
+                continue;
+            }
+            const uint64_t b = (uint64_t)a;
+            const int order[] = {c.first, c.second};
+            for (int i : order) {
+                void* o = 0;
+                l.c(ncode(sceKernelMmap((void*)(b + i * 0x20000), 0x20000, 0, fl, -1, 0, &o)));
+            }
+            l.c(' ');
+            co_scan(l, b, c.pieces * 0x20000);
+            l.s(" | ");
+            sceKernelMunmap(a, c.pieces * 0x20000);
+        }
+        unk(l).end();
+    }
     // :3441 NoCoalesce reservations, the middle one without the flag
     co_kind("CO8", ":3441 reserve 400111, middle 111", 0x20000, [](uint64_t at, int i) {
         void* o = 0;
