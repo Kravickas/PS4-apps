@@ -1213,10 +1213,11 @@ static void show_previous_results(const CkState& st) {
 }
 
 // Every test under its group, failures with each failed check on its own line, alone on screen.
-static void summary(const CkState& st) {
+static void summary(const CkState& st, bool ran_now) {
     load_results();
     g_screen.clear();
-    say("===== RESULT =====");
+    say(ran_now ? "===== RESULT ====="
+                : "===== RESULT of earlier launches: nothing was run now =====");
     int all = 0, all_ok = 0, all_ended = 0;
     for (const char* gp = "ARL"; *gp; gp++) {
         const char g = *gp;
@@ -1289,6 +1290,7 @@ int main(void) {
     }
 
     const bool tests_left = st.next < NTESTS || st.inflight >= 0;
+    const bool ran_now = tests_left;
     if (resumed && tests_left && st.done)
         show_previous_results(st);
     say("===== CARVE CHECK =====");
@@ -1348,7 +1350,7 @@ int main(void) {
             state_save(&st);
         }
     }
-    summary(st);
+    summary(st, ran_now);
     show_fresh_run_note();
     for (;;)
         sceKernelUsleep(1000000);
