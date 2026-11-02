@@ -33,6 +33,9 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
           exec restored to all lanes
   t_zfar  MRTZ Z 0.75 (32_R), MRT0 (colour x 3, A)
+  t_lod   samples the mip-constant texture at LOD 1 (u = attr0.x / 4, v = 0.5) and stores its
+          alpha to B[i]: the quad's derivatives
+vs_screen: screen-space positions (0, 0), (128, 0), (0, 128) for the clip-disabled draws.
   t_mark  stores 1 to B[i] (did the pixel shader run for the pixel)
   t_cov   stores the sample coverage input (v4, SPI_PS_INPUT_ENA.SAMPLE_COVERAGE_ENA) to B[i]
   t_pknorm_u16 / t_pknorm_i16 / t_pkrtz / t_pk_u16 / t_pk_i16  the conversion of (A, C) stored to
@@ -450,6 +453,42 @@ SHADERS = [
         "buffer_store_dword v19, v18, s[4:7], 0 offen",
         "s_waitcnt vmcnt(0)",
         "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
+    # derivatives across the quad: u = attr0.x / 4 (2 texels per pixel of the 256 texel mip chain,
+    # LOD 1), v = 0.5; the mip-constant texture (T# at 36, point-mip S# at 44) alpha to B[i]
+    ("t_lod", 0xA2A0C131, "ps", [
+        "s_mov_b64 s[40:41], exec",
+        "s_wqm_b64 exec, exec",
+    ] + PS_HEAD + [
+        "s_mov_b32 m0, s2",
+        "v_interp_p1_f32 v19, v0, attr0.x",
+        "v_interp_p2_f32 v19, v1, attr0.x",
+        "v_mul_f32 v19, 0.25, v19",
+        "v_mov_b32 v20, 0.5",
+        "s_load_dwordx8 s[16:23], s[0:1], 0x24",
+        "s_load_dwordx4 s[24:27], s[0:1], 0x2c",
+        "s_waitcnt lgkmcnt(0)",
+        "image_sample v[21:24], v[19:20], s[16:23], s[24:27] dmask:0xf",
+        "s_waitcnt vmcnt(0)",
+        "s_mov_b64 exec, s[40:41]",
+        "buffer_store_dword v24, v18, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "exp mrt0 v10, v10, v10, v9 done vm",
+    ]),
+    # vertices in screen space (for PA_CL_CLIP_CNTL.CLIP_DISABLE with the viewport transform off):
+    # (0, 0), (128, 0), (0, 128); z from s0
+    ("vs_screen", 0xA2A0C132, "vs", [
+        "v_and_b32 v1, 1, v0",
+        "v_lshrrev_b32 v2, 1, v0",
+        "v_and_b32 v2, 1, v2",
+        "v_cvt_f32_u32 v1, v1",
+        "v_cvt_f32_u32 v2, v2",
+        "v_mul_f32 v1, 0x43000000, v1",
+        "v_mul_f32 v2, 0x43000000, v2",
+        "v_mov_b32 v3, s0",
+        "v_mov_b32 v4, 1.0",
+        "exp param0 v1, v1, v1, v1",
+        "exp pos0 v1, v2, v3, v4 done",
     ]),
     # MRTZ Z 0.75 (the interpolated Z is 0.5), MRT0 (colour x 3, A)
     ("t_zfar", 0xA2A0C130, "ps", PS_HEAD + [
