@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-20"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-21"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -141,6 +141,9 @@ enum {
     V_KP_SAVEEXEC,
     V_KP_TWOEXP,
     V_KP_RESTORE,
+    V_KP_ANDN2,
+    V_KP_CLASS,
+    V_KP_LATE_RESTORE,
     V_MARK,
     V_COV,
     V_LOD,
@@ -193,6 +196,9 @@ static const char* const k_alpha_to_mask_vname[ALPHA_TO_MASK_NSH] = {
     "t_kp_saveexec (v_cmp, s_and_saveexec_b64 where B & 1, exp vm)",
     "t_kp_twoexp (v_cmpx, MRT0 without vm, null export with vm where B & 1, exp vm)",
     "t_kp_restore (v_cmpx, then s_mov_b64 exec, -1 where B & 1, exp vm)",
+    "t_kp_andn2 (v_cmp, s_andn2_b64 exec where B & 1, exp vm)",
+    "t_kp_class (v_cmpx_class_f32 where B & 1, exp vm)",
+    "t_kp_late_restore (s_and_saveexec_b64, exp vm, exec restored)",
     "t_mark (1 to B: the pixel shader ran)",
     "t_cov (the sample coverage input to B)",
     "t_lod (mip-constant texture at LOD 1 to B: quad derivatives)",
@@ -252,6 +258,12 @@ static const struct {
      ALPHA_TO_MASK_T_KP_TWOEXP_RSRC1},
     {alpha_to_mask_t_kp_restore_bin, sizeof(alpha_to_mask_t_kp_restore_bin),
      ALPHA_TO_MASK_T_KP_RESTORE_RSRC1},
+    {alpha_to_mask_t_kp_andn2_bin, sizeof(alpha_to_mask_t_kp_andn2_bin),
+     ALPHA_TO_MASK_T_KP_ANDN2_RSRC1},
+    {alpha_to_mask_t_kp_class_bin, sizeof(alpha_to_mask_t_kp_class_bin),
+     ALPHA_TO_MASK_T_KP_CLASS_RSRC1},
+    {alpha_to_mask_t_kp_late_restore_bin, sizeof(alpha_to_mask_t_kp_late_restore_bin),
+     ALPHA_TO_MASK_T_KP_LATE_RESTORE_RSRC1},
     {alpha_to_mask_t_mark_bin, sizeof(alpha_to_mask_t_mark_bin), ALPHA_TO_MASK_T_MARK_RSRC1},
     {alpha_to_mask_t_cov_bin, sizeof(alpha_to_mask_t_cov_bin), ALPHA_TO_MASK_T_COV_RSRC1},
     {alpha_to_mask_t_lod_bin, sizeof(alpha_to_mask_t_lod_bin), ALPHA_TO_MASK_T_LOD_RSRC1},
@@ -899,6 +911,19 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "KP10", .what = "v_cmp, s_and_saveexec_b64 + alpha-to-mask, 8x D1",
                        .ns = 8, .ps = V_KP_SAVEEXEC, .db_alpha_to_mask = ALPHA_TO_MASK_D1,
                        .bmode = BM_KILL, .kind = AK_RANDOM, .seed = 0x800Au),
+    ALPHA_TO_MASK_CASE(.id = "KP11", .what = "v_cmp, s_andn2_b64 exec (scope opener), exp vm",
+                       .ps = V_KP_ANDN2, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL,
+                       .kind = AK_RANDOM, .seed = 0x800Bu),
+    ALPHA_TO_MASK_CASE(.id = "KP12", .what = "v_cmpx_class_f32, exp vm", .ps = V_KP_CLASS,
+                       .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL, .kind = AK_RANDOM,
+                       .seed = 0x800Cu),
+    ALPHA_TO_MASK_CASE(.id = "KP13",
+                       .what = "s_and_saveexec_b64, exp vm, then s_mov_b64 exec restore",
+                       .ps = V_KP_LATE_RESTORE, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .seed = 0x800Du),
+    ALPHA_TO_MASK_CASE(.id = "KP14", .what = "s_andn2_b64 exec + alpha-to-mask, 4x D1",
+                       .ps = V_KP_ANDN2, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .bmode = BM_KILL,
+                       .kind = AK_RANDOM, .seed = 0x800Eu),
     /* PA_SC_AA_MASK, also different per quad pixel */
     ALPHA_TO_MASK_CASE(.id = "AM01", .what = "AA_MASK 0x5, alpha-to-mask off",
                        .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .aa_mask = 0x5, .kind = AK_RANDOM,
@@ -1913,7 +1938,7 @@ static uint32_t alpha_to_mask_vdbsc(int v) {
     if (v == V_ALL)
         return ALPHA_TO_MASK_ZEXP | ALPHA_TO_MASK_MASKEXP | ALPHA_TO_MASK_KILL;
     return (v == V_KILL || v == V_KILL2 || v == V_KILL3 || v == V_KILL_NOVM ||
-            (v >= V_KP_E64 && v <= V_KP_RESTORE))
+            (v >= V_KP_E64 && v <= V_KP_LATE_RESTORE))
                ? ALPHA_TO_MASK_KILL
                : 0u;
 }
@@ -2380,7 +2405,8 @@ static int alpha_to_mask_killed(const struct AlphaToMaskTest* t, int h) {
         return t->hyp == H_RESTORE && h;
     if (t->ps == V_KP_TWOEXP)
         return !(t->hyp == H_TWOEXP && h);
-    if (t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC)
+    if ((t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC) ||
+        (t->ps >= V_KP_ANDN2 && t->ps <= V_KP_LATE_RESTORE))
         return 1;
     if (t->ps != V_KILL && t->ps != V_KILL2 && t->ps != V_KILL3)
         return 0;
