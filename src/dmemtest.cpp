@@ -8,7 +8,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef DMEM_BISECT
+// The SDK bisect package (make BISECT=1): its own versions, file names, and only the sections whose
+// lines change with the SDK version.
+#include "sdk_bisect.h"
+#define DMEM_NAME "dmem_bisect"
+#else
 #include "sdk_chain.h"
+#define DMEM_NAME "dmem"
+#endif
 
 extern "C" {
 // the process SDK version (from the executable's process parameter): the kernel picks some
@@ -438,7 +446,7 @@ static void log_init() {
     static const char* const dirs[] = {"/data/", "/temp0/"};
     for (const char* dir : dirs) {
         int n = put_str(g_log_buf, 0, dir);
-        n = put_str(g_log_buf, n, "dmem_results_");
+        n = put_str(g_log_buf, n, DMEM_NAME "_results_");
         n = put_hex8(g_log_buf, n, sdk);
         put_str(g_log_buf, n, ".txt");
         const int fd = sceKernelOpen(g_log_path, 0x0601, 0777);
@@ -10401,6 +10409,28 @@ static void run_c() {
     release_all(hi, 1);
 }
 
+// Which sections run: all of them, except in the SDK bisect package, which runs only those holding a
+// line that changes with the SDK version (SDK chain on FW 12.02: B10, LA1/LA2, U10, Y4, Z1, M1, NU5,
+// VQ10-VQ17, FL1-FL6, CO4/CO10, TP2, FW1/FW2/FW4/FW5, BT1/BT3/BT5/BT6, EX2, DF4).
+static bool sec(const char* name) {
+#ifdef DMEM_BISECT
+    static const char* const keep[] = {"b",  "u",        "y",  "z",     "m",        "l",
+                                       "nu", "followups", "fl", "co",    "pt_tp",    "fw_tl_tf",
+                                       "bt", "ex",       "df", "xv"};
+    for (const char* k : keep) {
+        int i = 0;
+        while (k[i] && k[i] == name[i])
+            i++;
+        if (k[i] == 0 && name[i] == 0)
+            return true;
+    }
+    return false;
+#else
+    (void)name;
+    return true;
+#endif
+}
+
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. dmem_chain.state (next to the
 // results) holds the index of the next version to run, then one attempt count per version. A run
@@ -10408,8 +10438,8 @@ static void run_c() {
 // not repeated straight away. After the last version, versions whose results have no DONE line are
 // run again, up to two attempts each (a run that ends the app twice is left as it is).
 
-static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
-                                                  "/temp0/dmem_chain.state"};
+static const char* const g_chain_state_paths[] = {"/data/" DMEM_NAME "_chain.state",
+                                                  "/temp0/" DMEM_NAME "_chain.state"};
 static const int g_chain_max_attempts = 2;
 
 struct ChainState {
@@ -10454,7 +10484,7 @@ static bool chain_run_done(int idx) {
     for (const char* dir : dirs) {
         char path[64];
         int n = put_str(path, 0, dir);
-        n = put_str(path, n, "dmem_results_");
+        n = put_str(path, n, DMEM_NAME "_results_");
         n = put_hex8(path, n, g_chain_sdks[idx]);
         put_str(path, n, ".txt");
         const int fd = sceKernelOpen(path, 0x0000, 0);
@@ -10484,8 +10514,11 @@ static bool chain_run_done(int idx) {
 
 // The next chain entry to run, or -1 when every one is finished or has had its attempts.
 static int chain_pick(const ChainState* st) {
-    if (st->next < g_chain_n)
-        return st->next;
+    // in order first; a version whose attempts are used up (its executable refused twice, or its run
+    // ended the app twice) is passed over
+    for (int k = st->next; k < g_chain_n; k++)
+        if (st->attempts[k] < g_chain_max_attempts)
+            return k;
     for (int k = 0; k < g_chain_n; k++)
         if (st->attempts[k] < g_chain_max_attempts && !chain_run_done(k))
             return k;
@@ -10504,6 +10537,15 @@ static void chain_exe_path(char* out, int idx) {
 
 // Hands over to chain entry idx; returns only if the system refused.
 static void chain_exec(int idx) {
+    // The attempt is counted before LoadExec: the system can refuse the executable by ending the app
+    // ("corrupted"), and then nothing here would run again to count it.
+    ChainState st;
+    chain_state_read(&st);
+    if (st.attempts[idx] < 255)
+        st.attempts[idx]++;
+    if (st.next < idx)
+        st.next = (unsigned char)idx;
+    chain_state_write(&st);
     char path[64];
     chain_exe_path(path, idx);
     const char* args[] = {nullptr};
@@ -10531,7 +10573,8 @@ int main(void) {
     if (own == 0) {
         const int pick = chain_pick(&chain);
         if (pick < 0) {
-            say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
+            say("SDK chain: all runs are done (" DMEM_NAME "_results_<SDK>.txt). Delete " DMEM_NAME
+                "_chain.state");
             say("next to them to run the chain again.");
             idle_forever();
         }
@@ -10541,8 +10584,9 @@ int main(void) {
         }
     }
     if (own >= 0) {
-        if (chain.attempts[own] < 255)
-            chain.attempts[own]++;
+        // eboot.bin (entry 0) is started from the menu, not by chain_exec: it counts its own attempt
+        if (own == 0 && chain.attempts[0] < 255)
+            chain.attempts[0]++;
         if (chain.next <= own)
             chain.next = (unsigned char)(own + 1);
         chain_state_write(&chain);
@@ -10579,137 +10623,207 @@ int main(void) {
     if (sanity()) {
         neighbours();
         g_section = "bp";
-        run_bp();
+        if (sec("bp"))
+            run_bp();
         g_section = "start";
-        run_a();
-        run_b();
-        run_d();
-        run_q();
-        run_v();
-        run_e();
-        run_f();
-        run_h();
-        run_h7();
-        run_p();
+        if (sec("a"))
+            run_a();
+        if (sec("b"))
+            run_b();
+        if (sec("d"))
+            run_d();
+        if (sec("q"))
+            run_q();
+        if (sec("v"))
+            run_v();
+        if (sec("e"))
+            run_e();
+        if (sec("f"))
+            run_f();
+        if (sec("h"))
+            run_h();
+        if (sec("h7"))
+            run_h7();
+        if (sec("p"))
+            run_p();
         pool_checkpoint("p2");
-        run_p2();
+        if (sec("p2"))
+            run_p2();
         pool_checkpoint("p4");
-        run_p4();
+        if (sec("p4"))
+            run_p4();
         pool_checkpoint("p7");
-        run_p7();
+        if (sec("p7"))
+            run_p7();
         pool_checkpoint("p8");
-        run_p8();
+        if (sec("p8"))
+            run_p8();
         pool_checkpoint("p9");
-        run_p9();
+        if (sec("p9"))
+            run_p9();
         pool_checkpoint("t");
-        run_t();
+        if (sec("t"))
+            run_t();
         pool_checkpoint("u");
-        run_u();
+        if (sec("u"))
+            run_u();
         pool_checkpoint("w");
-        run_w();
+        if (sec("w"))
+            run_w();
         pool_checkpoint("x");
-        run_x();
+        if (sec("x"))
+            run_x();
         pool_checkpoint("y");
-        run_y();
+        if (sec("y"))
+            run_y();
         pool_checkpoint("z");
-        run_z();
+        if (sec("z"))
+            run_z();
         pool_checkpoint("j");
-        run_j();
+        if (sec("j"))
+            run_j();
         pool_checkpoint("m");
-        run_m();
+        if (sec("m"))
+            run_m();
         pool_checkpoint("n");
-        run_n();
+        if (sec("n"))
+            run_n();
         pool_checkpoint("l");
-        run_l();
+        if (sec("l"))
+            run_l();
         pool_checkpoint("hb");
-        run_hb();
+        if (sec("hb"))
+            run_hb();
         pool_checkpoint("xc");
-        run_xc();
+        if (sec("xc"))
+            run_xc();
         pool_checkpoint("cg");
-        run_cg();
+        if (sec("cg"))
+            run_cg();
         pool_checkpoint("k");
-        run_k();
+        if (sec("k"))
+            run_k();
         pool_checkpoint("p54");
-        run_p54();
+        if (sec("p54"))
+            run_p54();
         pool_checkpoint("c");
-        run_c();
+        if (sec("c"))
+            run_c();
         pool_checkpoint("g");
-        run_g();
+        if (sec("g"))
+            run_g();
         pool_checkpoint("r");
-        run_r();
+        if (sec("r"))
+            run_r();
         pool_checkpoint("mf2");
-        run_mf2();
+        if (sec("mf2"))
+            run_mf2();
         pool_checkpoint("mf3");
-        run_mf3();
+        if (sec("mf3"))
+            run_mf3();
         pool_checkpoint("mfg");
-        run_mfg();
+        if (sec("mfg"))
+            run_mfg();
         pool_checkpoint("mf25");
-        run_mf25();
+        if (sec("mf25"))
+            run_mf25();
         pool_checkpoint("vq");
-        run_vq();
+        if (sec("vq"))
+            run_vq();
         pool_checkpoint("u12");
-        run_u12();
+        if (sec("u12"))
+            run_u12();
         pool_checkpoint("mf16");
-        run_mf16();
+        if (sec("mf16"))
+            run_mf16();
         pool_checkpoint("mf21");
-        run_mf21();
+        if (sec("mf21"))
+            run_mf21();
         pool_checkpoint("mf24");
-        run_mf24();
+        if (sec("mf24"))
+            run_mf24();
         pool_checkpoint("mfw");
-        run_mfw();
+        if (sec("mfw"))
+            run_mfw();
         pool_checkpoint("nu");
-        run_nu();
+        if (sec("nu"))
+            run_nu();
         g_section = "rv";
-        run_rv();
+        if (sec("rv"))
+            run_rv();
         g_section = "nm";
-        run_nm();
+        if (sec("nm"))
+            run_nm();
         g_section = "fl";
-        run_fl();
+        if (sec("fl"))
+            run_fl();
         g_section = "bm";
-        run_bm();
+        if (sec("bm"))
+            run_bm();
         g_section = "pb";
-        run_pb();
+        if (sec("pb"))
+            run_pb();
         g_section = "px";
-        run_px();
+        if (sec("px"))
+            run_px();
         g_section = "ms";
-        run_ms();
+        if (sec("ms"))
+            run_ms();
         g_section = "followups";
-        run_followups();
+        if (sec("followups"))
+            run_followups();
         g_section = "rg";
-        run_rg();
+        if (sec("rg"))
+            run_rg();
         g_section = "sf";
-        run_sf();
+        if (sec("sf"))
+            run_sf();
         g_section = "av";
-        run_av_al();
+        if (sec("av_al"))
+            run_av_al();
         g_section = "fm";
-        run_fm_fx();
+        if (sec("fm_fx"))
+            run_fm_fx();
         g_section = "dt";
-        run_dt();
+        if (sec("dt"))
+            run_dt();
         g_section = "co";
-        run_co();
+        if (sec("co"))
+            run_co();
         g_section = "pt";
-        run_pt_tp();
+        if (sec("pt_tp"))
+            run_pt_tp();
         g_section = "fw";
-        run_fw_tl_tf();
+        if (sec("fw_tl_tf"))
+            run_fw_tl_tf();
         g_section = "bt";
-        run_bt();
+        if (sec("bt"))
+            run_bt();
         remove_scratch_files();
         g_section = "ex";
-        run_ex();
+        if (sec("ex"))
+            run_ex();
         g_section = "df";
-        run_df();
+        if (sec("df"))
+            run_df();
         g_section = "cv";
-        run_carve();
+        if (sec("carve"))
+            run_carve();
         g_section = "xv";
-        run_xv();
+        if (sec("xv"))
+            run_xv();
         g_section = "sf8";
-        run_sf8();
+        if (sec("sf8"))
+            run_sf8();
         g_section = "last";
-        run_last();
+        if (sec("last"))
+            run_last();
         g_section = "pt3";
-        run_pt3();
+        if (sec("pt3"))
+            run_pt3();
         g_section = "xr";
-        run_xr();
+        if (sec("xr"))
+            run_xr();
         // the cross-check scratch file, kept open until here (not part of UL1's list)
         if (g_xc_fd >= 0) {
             sceKernelClose(g_xc_fd);

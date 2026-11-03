@@ -70,6 +70,17 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | address 0 with MAP_FIXED for MapFlexibleMemory, MapDirectMemory, ReserveVirtualRange (FW1, BT1/BT3/BT5 bit 4) | SDK 1.00, 1.50: accepted | SDK 2.00: EINVAL (shadPS4: from 1.70, memory_test) | SDK chain on FW 12.02 |
 | flexible memory available at start (FL1-FL6, DF4) | SDK 1.00, 1.50: 0x1B800000 | SDK 2.00: 0x1BB00000 | SDK chain on FW 12.02 |
 | address layout at start: first mappings at 0x20036C000 | SDK 1.00, 1.50 | SDK 2.00: 0x20001C000 (Y, K, MF, HB, J6, LA3, XC5, VQ9) | SDK chain on FW 12.02 |
+| MapDirectMemory of memory already mapped, aliasing off (B10) | SDK 2.00: 0 | SDK 2.50: EBUSY | SDK chain on FW 12.02 |
+| direct mappings in the system area 0x7F0000000 and above (VQ10, VQ11, VQ15, VQ17, LA1, LA2) | SDK 2.00: mapped | SDK 2.50: EINVAL | SDK chain on FW 12.02 |
+| MapDirectMemory with execute (EX2) | SDK 2.00: EACCES | SDK 2.50: EINVAL | SDK chain on FW 12.02 |
+| MapDirectMemory protection bits 8-31 (BT6) | SDK 2.00: EINVAL | SDK 2.50: accepted; SDK 3.00: EINVAL again | SDK chain on FW 12.02 |
+| fixed direct mapping at or past 0x1000000000, hint above (VQ10, FW4) | SDK 2.50: mapped | SDK 3.00: EINVAL / ENOMEM | SDK chain on FW 12.02 |
+| mapping more than the flexible budget (FW5) | SDK 3.00: EINVAL | SDK 3.50: ENOMEM | SDK chain on FW 12.02 |
+| largest pool reservation (U10) | SDK 4.50: 0x3FFE00000 | SDK 5.00: 0x5ED400000 | SDK chain on FW 12.02 |
+| pool cache counters around type 10 commits (Y4, Z1, M1, NU5) | SDK 4.50 | SDK 5.00: different counts | SDK chain on FW 12.02 |
+
+No line changes from SDK 5.50 to 9.50. The exact released version of each change is for the SDK bisect package
+(README); this table names the full-chain versions around it.
 
 From SDK 2.50 every probe mapping direct memory over pool memory is skipped (README).
 

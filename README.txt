@@ -225,3 +225,18 @@ SDK VERSION (CHAIN)
   (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.
   analysis/sdk_sweep.py takes all the result files and lists every line that changes, with the
   first SDK version at which it does. make SDK=0x... still builds eboot.bin at one version.
+  The chain counts an attempt before handing over (sceSystemServiceLoadExec): if the system refuses an
+  executable (reported as corrupted, which ends the app), launching again tries it once more and then
+  passes it over. 10.00 and above are not in the list: on FW 12.02 the 10.00 executable was refused as
+  corrupted. The one change tried: from SDK 10.00 create-fself also gets -fwversion = the SDK version
+  (the 8-byte firmware version field at 0x338 of the executable, 0 otherwise); the bisect package runs
+  that 10.00 executable last.
+
+SDK BISECT (make BISECT=1)
+  A second package, "DmemTest SDK bisect" (SHAD00095), for the rules the chain found changing with the
+  SDK version (at 2.00, 2.50, 3.00, 3.50, 5.00; none from 5.50 to 9.50). It runs every released
+  firmware version from 1.50 to 3.50 and from 4.50 to 5.00 (src/sdk_bisect.h, 34 runs, then one
+  more: SDK 10.00 with the executable's firmware version field set, see below) and only the sections
+  holding those lines (b, u, y, z, m, l, nu, followups, fl, co, pt_tp, fw_tl_tf, bt, ex, df, xv). Its
+  results are dmem_bisect_results_<SDK version>.txt with dmem_bisect_chain.state; sdk_sweep.py on them
+  names the exact version of each change. CI builds both packages.

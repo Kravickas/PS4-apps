@@ -9,7 +9,18 @@ VERSION     := 01.00
 TITLE_ID    := SHAD00090
 CONTENT_ID  := IV0000-SHAD00090_00-SHADDMEMTEST0000
 
-EXTRAFLAGS  :=
+# make BISECT=1: the SDK bisect package (its own title, results and state; only the sections whose
+# lines change with the SDK version; versions from src/sdk_bisect.h, eboot.bin at the first one).
+CHAIN_H     := sdk_chain.h
+ifeq ($(BISECT),1)
+TITLE       := DmemTest SDK bisect
+TITLE_ID    := SHAD00095
+CONTENT_ID  := IV0000-SHAD00095_00-SHADDMEMBISECT00
+CHAIN_H     := sdk_bisect.h
+SDK         ?= $(firstword $(shell grep -oE '0x[0-9A-F]{8}' src/sdk_bisect.h))
+endif
+
+EXTRAFLAGS  := $(if $(filter 1,$(BISECT)),-DDMEM_BISECT)
 
 # ---- Toolchain / paths (don't usually need to touch) ----
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
@@ -63,13 +74,15 @@ eboot.bin: $(OBJS)
 	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001 $(if $(SDK),-sdkver $(SDK))
 
 # The same program at every other SDK version of src/sdk_chain.h (the first is eboot.bin's default):
-# each run hands over to the next with sceSystemServiceLoadExec.
-SDK_CHAIN   := $(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h))
+# each run hands over to the next with sceSystemServiceLoadExec. From SDK 10.00 the executable also
+# gets its firmware version field (-fwversion, 0 otherwise) set to its SDK version: with it unset, FW
+# 12.02 refused the 10.00 executable as corrupted.
+SDK_CHAIN   := $(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/$(CHAIN_H)))
 SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
 
 sdk/eboot_%.bin: eboot.bin
 	@mkdir -p sdk
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $*
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $* $(if $(filter 0x1%,$*),-fwversion $*)
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@
