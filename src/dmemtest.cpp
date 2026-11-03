@@ -9885,6 +9885,211 @@ static void run_carve() {
         carve::run_one(i);
 }
 
+// ---- XV: cross-verification probes. Rules taken from fpPS4's kern branch (reconstructed from the PS4
+//      kernel) and widened versions of rules measured before; each line names its source. Runs after
+//      CV (dmem aliasing is on). Areas print as in CO (0x1000 units). ---------------------------------
+static void xv_vq(Line& l, uint64_t at, int32_t flags) {
+    unsigned char vi[0x60];
+    my_memset(vi, 0, sizeof(vi));
+    const int32_t r = sceKernelVirtualQuery((void*)at, flags, vi, 0x48);
+    l.c(ncode(r));
+    if (r == 0) {
+        uint64_t st = 0;
+        for (int k = 7; k >= 0; k--)
+            st = (st << 8) | vi[k];
+        l.c(':').hex(st);
+    }
+}
+
+static void run_xv() {
+    say("== XV cross-verification (fpPS4 kern rules, widened rules)");
+    int32_t rr = 0;
+    {
+        // fpPS4 sys_virtual_query: find-next skips entries inside 7F0000000-FF0000000 and reports the
+        // first one after them
+        say("VQ16 starting");
+        Line l = head("VQ16", "page at 1000000000; vq1 from 7EFFFC000 | from FD0000000 (free)");
+        const long pa = alloc(1, 3, &rr);
+        void* m = (void*)0x1000000000ull;
+        const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
+        l.c(ncode(r)).s(" | ");
+        if (r == 0) {
+            xv_vq(l, 0x7EFFFC000ull, 1);
+            l.s(" | ");
+            xv_vq(l, 0xFD0000000ull, 1);
+            sceKernelMunmap(m, PG);
+        }
+        release_all(pa, 1);
+        unk(l).end();
+    }
+    {
+        // fpPS4: only entries lying entirely in the area are refused; one reaching below it is reported
+        say("VQ17 starting");
+        Line l = head("VQ17", "4 pages at 7EFFF8000 (straddling 7F0000000): map | vq0 at 7F0000000 | at 7EFFF8000");
+        const long pa = alloc(4, 3, &rr);
+        void* m = (void*)0x7EFFF8000ull;
+        const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, 4 * PG, 0x3, 0x90, pa, PG) : -1;
+        l.c(ncode(r)).s(" | ");
+        if (r == 0) {
+            xv_vq(l, 0x7F0000000ull, 0);
+            l.s(" | ");
+            xv_vq(l, 0x7EFFF8000ull, 0);
+            sceKernelMunmap(m, 4 * PG);
+        }
+        release_all(pa, 4);
+        unk(l).end();
+    }
+    {
+        // fpPS4 sys_query_memory_protection below SDK 10.00: the whole map entry (the reservation)
+        say("PG4 starting");
+        Line l = head("PG4", "qprot on a committed block (2nd of 2M): start-end rel reservation, prot");
+        uint64_t px = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        void* rv = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
+            uint8_t* R = (uint8_t*)rv;
+            if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0) {
+                void* s0 = 0;
+                void* e0 = 0;
+                int32_t p = 0;
+                const int32_t q = sceKernelQueryMemoryProtection(R + 0x10000, &s0, &e0, &p);
+                l.c(ncode(q));
+                if (q == 0)
+                    l.c(' ').shex((long long)((uint64_t)s0 - (uint64_t)R)).c('-').shex(
+                        (long long)((uint64_t)e0 - (uint64_t)R)).s(" p=").hex((uint32_t)p);
+            }
+            sceKernelMunmap(rv, 0x200000);
+        }
+        unk(l).end();
+    }
+    {
+        // fpPS4 sys_mmap maximum protection for files
+        say("TF6 starting");
+        Line l = head("TF6", "wo file sh p0, mprotect 33: vprot | ro file: sh 21 | pr 20 | sh 20");
+        char path[64];
+        mf_named(path, "dmem_tf.bin");
+        int fd = sceKernelOpen(path, 0x0602, 0777);
+        if (fd >= 0) {
+            static unsigned char ones[0x4000];
+            for (int k = 0; k < 0x4000; k++)
+                ones[k] = 1;
+            sceKernelWrite(fd, ones, sizeof(ones));
+            sceKernelClose(fd);
+        }
+        fd = sceKernelOpen(path, 0x1, 0);
+        if (fd >= 0) {
+            void* m = 0;
+            if (sceKernelMmap(0, 0x4000, 0x0, 0x1, fd, 0, &m) == 0) {
+                l.c(ncode(sceKernelMprotect(m, 0x4000, 0x33))).c(' ').hex((uint32_t)sb_read_vprot(m));
+                sceKernelMunmap(m, 0x4000);
+            }
+            sceKernelClose(fd);
+        }
+        fd = sceKernelOpen(path, 0x0, 0);
+        if (fd >= 0) {
+            struct Case {
+                int32_t prot, flags;
+            };
+            static const Case cases[] = {{0x21, 0x1}, {0x20, 0x2}, {0x20, 0x1}};
+            for (const Case& c : cases) {
+                void* m = 0;
+                const int32_t r = sceKernelMmap(0, 0x4000, c.prot, c.flags, fd, 0, &m);
+                l.s(" | ").c(ncode(r));
+                if (r == 0)
+                    sceKernelMunmap(m, 0x4000);
+            }
+            sceKernelClose(fd);
+        }
+        unk(l).end();
+    }
+    // fpPS4 vm_map_simplify_entry: only anonymous entries charged to the budget (writable) never merge
+    co_kind("CO15", "anon 1010 p1 (read-only)", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0x1, 0x1010, -1, 0, &o);
+    }, 0x1);
+    co_kind("CO16", "anon 1010 p0", 0x20000, [](uint64_t at, int) {
+        void* o = 0;
+        return sceKernelMmap((void*)at, 0x20000, 0x0, 0x1010, -1, 0, &o);
+    }, 0x0);
+    {
+        // fpPS4 vm_map_type_protect on pool memory: 64 KiB aligned, within one entry
+        say("TP4 starting");
+        Line l = head("TP4", "pool mtype: +4000 len 10000 | two reservations | one, aligned");
+        uint64_t px = 0;
+        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        void* a = 0;
+        void* b = 0;
+        if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &a) == 0 &&
+            sceKernelMemoryPoolReserve((uint8_t*)a + 0x200000, 0x200000, 0, 0x90, &b) == 0) {
+            uint8_t* A = (uint8_t*)a;
+            l.c(ncode(sceKernelMtypeprotect(A + 0x4000, 0x10000, 3, 0x3))).s(" | ");
+            l.c(ncode(sceKernelMtypeprotect(A + 0x1F0000, 0x20000, 3, 0x3))).s(" | ");
+            l.c(ncode(sceKernelMtypeprotect(A + 0x10000, 0x10000, 3, 0x3)));
+            sceKernelMunmap(b, 0x200000);
+            sceKernelMunmap(a, 0x200000);
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    {
+        // GetDirectMemoryType regions, widened: neighbouring allocations of other / the same type,
+        // and split by a free gap
+        say("GT1 starting");
+        Line l = head("GT1", "t3|t0 areas | t3|t3 areas | t3 x3, middle released: first, last");
+        const long R = av_free_area();
+        if (R >= 0) {
+            long a = dt_alloc_at(R, 3), b = dt_alloc_at(R + PG, 0);
+            dt_area(l, R, R);
+            l.c(',');
+            dt_area(l, R, R + PG);
+            sceKernelReleaseDirectMemory(R, 2 * PG);
+            a = dt_alloc_at(R, 3);
+            b = dt_alloc_at(R + PG, 3);
+            l.s(" | ");
+            dt_area(l, R, R);
+            sceKernelReleaseDirectMemory(R, 2 * PG);
+            long p = -1;
+            if (sceKernelAllocateDirectMemory(R, R + 3 * PG, 3 * PG, PG, 3, &p) == 0) {
+                sceKernelReleaseDirectMemory(R + PG, PG);
+                l.s(" | ");
+                dt_area(l, R, R);
+                l.c(',');
+                dt_area(l, R, R + 2 * PG);
+                sceKernelReleaseDirectMemory(R, 3 * PG);
+            }
+            (void)a;
+            (void)b;
+        } else {
+            l.s("SKIP");
+        }
+        unk(l).end();
+    }
+    {
+        // EBUSY on aliased memory, widened: the range includes the aliased page at its end; stops just
+        // before it; after the alias is unmapped
+        say("EB1 starting");
+        Line l = head("EB1", "A 8 pages, alias of 4-5: mtype A 2-4 | A 0-3 | alias gone: A 2-4");
+        int32_t r2 = 0;
+        const long pa = alloc(8, 3, &r2);
+        void* A = 0;
+        void* B = 0;
+        if (pa >= 0 && sceKernelMapDirectMemory(&A, 8 * PG, 0x3, 0, pa, PG) == 0 &&
+            sceKernelMapDirectMemory(&B, 2 * PG, 0x3, 0, pa + 4 * PG, PG) == 0) {
+            uint8_t* a = (uint8_t*)A;
+            l.c(ncode(sceKernelMtypeprotect(a + 2 * PG, 3 * PG, 3, 0x3))).s(" | ");
+            l.c(ncode(sceKernelMtypeprotect(a, 4 * PG, 3, 0x3))).s(" | ");
+            sceKernelMunmap(B, 2 * PG);
+            l.c(ncode(sceKernelMtypeprotect(a + 2 * PG, 3 * PG, 3, 0x3)));
+            sceKernelMunmap(A, 8 * PG);
+        } else {
+            l.s("SKIP");
+        }
+        release_all(pa, 8);
+        unk(l).end();
+    }
+}
+
 // ---- EX (very last, after the cleanup): execute permission on each kind of memory. Each case
 //      prints the result and the protection read back; only when both allow execution does it write
 //      "mov eax, 42; ret" and call it. ------------------------------------------------------------
@@ -10276,6 +10481,8 @@ int main(void) {
         run_df();
         g_section = "cv";
         run_carve();
+        g_section = "xv";
+        run_xv();
         g_section = "sf8";
         run_sf8();
         g_section = "last";
