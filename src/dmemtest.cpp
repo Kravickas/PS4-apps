@@ -10066,6 +10066,28 @@ static void run_xv() {
         unk(l).end();
     }
     {
+        // mlock on memory without CPU access is ENOMEM (reserved: CO2/CO3/CO8; anonymous p0: CO16);
+        // direct memory with protection 0, 1 and 3
+        say("ML1 starting");
+        Line l = head("ML1", "mlock on direct p0 | p1 | p3");
+        static const int32_t prots[] = {0x0, 0x1, 0x3};
+        for (int32_t pr : prots) {
+            int32_t r2 = 0;
+            const long pa = alloc(1, 3, &r2);
+            void* m = 0;
+            if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, pr, 0, pa, PG) == 0) {
+                l.c(ncode(sceKernelMlock(m, PG)));
+                sceKernelMunlock(m, PG);
+                sceKernelMunmap(m, PG);
+            } else {
+                l.c('-');
+            }
+            release_all(pa, 1);
+            l.s(pr == 0x3 ? "" : " | ");
+        }
+        unk(l).end();
+    }
+    {
         // EBUSY on aliased memory, widened: the range includes the aliased page at its end; stops just
         // before it; after the alias is unmapped
         say("EB1 starting");

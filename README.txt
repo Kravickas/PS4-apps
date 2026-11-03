@@ -146,7 +146,7 @@ SECTIONS
      and widened measured rules: VirtualQuery find-next past the system area and straddling entries,
      QueryMemoryProtection's range on pool memory, file maximum protection (GPU bits), read-only and
      protection-0 anonymous merging, pool mtypeprotect alignment, GetDirectMemoryType regions, EBUSY
-     edges
+     edges; ML1 mlock on direct memory with protection 0, 1, 3
   FM/FX memory_test file mapping (private/shared writes, unaligned offsets) and flexible findings
      (budget for 1 MiB maps of each kind, VirtualQuery, contents after unmap/remap/overwrite)
   DT memory_test DirectTest findings: double mappings, contents after release, partial release,

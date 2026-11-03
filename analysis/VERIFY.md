@@ -20,7 +20,7 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | mtypeprotect: physical memory mapped twice → EBUSY | CV21, CV22, CV50, CV51, CV56, CV99 | `vm_map_type_protect`: `rmem_map_test(rt_continuity)` → KERN_BUSY | confirmed |
 | ... checked only over the requested range | CV52 (op=0) | kern tests the whole map entry (would be EBUSY) | measured wins |
 | mtypeprotect sets the type of the physical memory (every mapping sees it) | CV54, CV62 | `dmem_map_set_mtype` | confirmed |
-| mtypeprotect on pool memory: 64 KiB aligned, within one entry, else EINVAL | TP4 (new) | `vm_map_type_protect`: OBJT_BLOCKPOOL branch | from kern, probe |
+| mtypeprotect on pool memory: 64 KiB aligned, within one entry, else EINVAL | TP4 (`I`, `I`, `o`) | `vm_map_type_protect`: OBJT_BLOCKPOOL branch | confirmed |
 | pool block class: type 3 (WC_GARLIC) flushed, every other type cached | TR trace (576 = 576) | kern_blockpool.pas `get_mflags` | confirmed |
 | pool commit over a committed block → EBUSY | PB5, NU | kern_blockpool.pas `kern_blockpool_map` | confirmed |
 | mmap: sanitizer flag → EINVAL; length 0 → EINVAL | BT9 bit 21, SF2 | vm_mmap.pas `sys_mmap` | confirmed |
@@ -31,26 +31,39 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | mmap: no address → search from the user heap | K1, SF5 | `sys_mmap`: `SCE_USR_HEAP_START` | confirmed |
 | file mapping never gets execute | XR6, PT3 | `sys_mmap` DTYPE_VNODE: "no VM_PROT_EXECUTE at all" | confirmed |
 | file without read access: any read, write or GPU read → EACCES; no access OK | TF3 | `sys_mmap` DTYPE_VNODE | confirmed |
-| file without read access: maximum protection write and GPU write only | TF3 (CPU read), TF6 (new: GPU read) | `sys_mmap` maxprot | confirmed / from kern, probe |
-| shared mapping, file without write access: write → EACCES | TF4 (CPU write), TF6 (new: GPU write) | `sys_mmap` maxprot | confirmed / from kern, probe |
+| file without read access: maximum protection write and GPU write only | TF3, TF6 (`mprotect 0x33` → `0x22`) | `sys_mmap` maxprot | confirmed |
+| shared mapping, file without write access: write or GPU write → EACCES; private with GPU write OK | TF4, TF6 (`A`, `o`, `A`) | `sys_mmap` maxprot | confirmed |
 | private file mapping: writable copy | FM1, TF2, TF4, TF5 | `sys_mmap`: private → maxprot has write | confirmed |
 | VirtualQuery: entry entirely in 0x7F0000000-0xFF0000000 refused (EACCES) | VQ9-VQ15 | kern_dmem.pas `sys_virtual_query` (`ET_DYN_LOAD_ADDR_SYS`) | confirmed |
-| ... find-next skips those entries and reports the next one | VQ15 (nothing above), VQ16 (new) | `sys_virtual_query` | from kern, probe |
-| ... an entry reaching below the area is reported | VQ17 (new) | `sys_virtual_query`: `(start shr 28) < 127` | from kern, probe |
+| ... find-next skips those entries and reports the next one | VQ15 (nothing above), VQ16 | `sys_virtual_query` | confirmed |
+| ... an entry reaching below the area is reported | VQ17 | `sys_virtual_query`: `(start shr 28) < 127` | confirmed |
 | ... callers in that area (system libraries) are answered | VQ14 (modules there) | `sys_virtual_query`: `is_libsys_call` | from kern (not measurable from a homebrew) |
 | QueryMemoryProtection on pool memory: 0x33 below SDK 10.00 (whole entry) | CV40-CV42, CV70-CV94 | kern_dmem.pas `sys_query_memory_protection`: sdk < 0x10000000 → entry prot | confirmed |
-| ... start and end: the whole reservation below SDK 10.00 | PG4 (new) | same | from kern, probe |
+| ... start and end: the whole reservation below SDK 10.00 | PG4 (`0-200000`) | same | confirmed |
 | QueryMemoryProtection on direct memory hides execute | XR2, XR3 | `sys_query_memory_protection`: DMEM → `and (GPU_ALL or RW)` | confirmed |
-| writable anonymous mappings never merge (budget credential), any SDK | CO1, CO9, FW6 | vm_map.pas `vm_map_simplify_entry`: `if entry^.cred then Exit` | confirmed |
-| read-only / no-access anonymous mappings follow the normal rules | CO15, CO16 (new) | same | from kern, probe |
+| anonymous mappings made writable never merge (budget credential, kept after mprotect), any SDK | CO1, CO9 (prot step), FW6 | vm_map.pas `vm_map_simplify_entry`: `if entry^.cred then Exit`; the credential is set at insert | confirmed |
+| anonymous mappings made with any access never merge (read-only too) | CO15 | kern: credential only for writable ones | measured wins |
+| anonymous mappings without access merge like void reservations without MAP_SHARED (no end-of-range rule); mprotect does not merge them | CO16 | — | measured |
+| mlock over memory without CPU access → ENOMEM | CO2, CO3, CO8, CO16; ML1 (new: direct p0) | `vm_map_wire` faults pages in (FreeBSD) | confirmed (mechanism) / probe |
 | direct memory never merges below SDK 2.00; pool entries never merge | (SDK 4.508) | `vm_map_simplify_entry` | confirmed |
 | merging needs the same name and, below SDK 5.50, the same caller | VQ6-VQ8, FW6 | `vm_map_simplify_entry`: name and `anon_addr` unless sdk_55 | confirmed |
 | MAP_NO_COALESCE keeps entries apart | CO8 | `vm_map_simplify_entry`: NO_COALESCE / entry_id | confirmed |
 | new anonymous/void entry extends its left neighbour, then simplify | CO11, CO12 | vm_map.pas `vm_map_insert` (vm_object_coalesce, simplify) | confirmed (left merge) |
-| void reservation: right merge only with MAP_SHARED or without a left merge; end-of-range piece | CO2, CO3, CO12-CO14 | not explained by kern's code alone | measured |
+| void reservation: right merge only with MAP_SHARED or without a left merge; end-of-range piece | CO2, CO3, CO11-CO14 (simulated against all six before implementing) | not explained by kern's code alone | measured |
+| void reservation without MAP_SHARED: mprotect does not merge it | CO3 (prot step) | — | measured |
+| MapDirectMemory2 keeps an area apart only when it changes the type | DT5 (change), CV23 (same type) | — | measured |
+| VirtualQuery on direct memory: region = run of pages with the same physical type, offset at its start | CV100, CV101 | — | measured |
 | direct mapping split by mprotect/mtypeprotect does not re-merge | FW2, TP2 | kern calls `vm_map_simplify_entry` after type protect | measured wins |
-| GetDirectMemoryType region over neighbouring same-type areas | CV3-CV35, CV61, GT1 (new) | (dmem query not in kern's syscalls read here) | measured |
+| GetDirectMemoryType region over neighbouring same-type areas | CV3-CV35, CV61, GT1 | (dmem query not in kern's syscalls read here) | measured |
+| mtypeprotect EBUSY: only when the requested range holds an aliased page | EB1 (`EBUSY`, `o`, `o`), CV52 | kern tests the whole entry | measured wins |
 | pool batch move | PB3-PB5 | not implemented in kern | measured |
+
+## GPU protection on file mappings
+
+shadPS4's MapFile asserted, noting that on real hardware GPU file mappings crash the system. Round 69
+ran TF6 on the PS4 (FW 12.02) without any crash: a private mapping with GPU write succeeds, a shared
+one of a read-only file is EACCES, and the run reached DONE. TF6 never lets the GPU use such memory;
+what the GPU does with it is not measured.
 
 ## Open, by design of the sources
 
