@@ -207,36 +207,22 @@ analysis/
                       and differing lines per section, SB/PS lines on one side only, TR differences
 
 SDK VERSION (CHAIN)
-  The PS4 kernel and libkernel pick some behaviour by the process SDK version (fpPS4's kernel
-  reconstruction has thresholds at 2.00, 2.50, 3.00, 3.50, 5.00, 5.50, 7.00 and 10.00 on the memory
-  paths, from one kernel version), so which checks exist is only known by running them on the
-  console. The package holds this program at every major SDK version, 1.00 to 12.00 in steps of
-  0.50 (src/sdk_chain.h; the Makefile builds sdk/eboot_0xXXXXXXXX.bin with create-fself -sdkver,
-  eboot.bin keeps create-fself's default 0x01000051, SDK 1.00).
+  The PS4 kernel and libkernel pick some behaviour by the process SDK version, so which checks exist
+  is only known by running them on the console. The package holds this program at every SDK version
+  of src/sdk_chain.h: every major version 1.00 to 12.00 in steps of 0.50, and every released firmware
+  version between those where a rule changed (1.50-3.50 and 4.50-5.00). eboot.bin is create-fself's
+  default (SDK 1.00); the Makefile builds the others as sdk/eboot_<version>.bin with create-fself
+  -sdkver, and from 10.00 also -fwversion = the SDK version (the executable's firmware version field
+  at 0x338, 0 otherwise: with it unset, FW 12.02 refused the 10.00 executable as corrupted).
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
-  sceSystemServiceLoadExec. dmem_chain.state next to the results holds the next one to run; a run
-  records it before testing, so if a run ends the app, launching again goes on with the next SDK
-  version. After the last version, versions whose results have no DONE line are run again, up to
-  two attempts each. When all have run, a launch only says so; delete dmem_chain.state to run the
-  chain again.
+  sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE
+  line, so versions already run are not run again, also after the list changes. dmem_chain.state
+  counts the attempts per version (for this list): the attempt is counted before the hand-over, and a
+  version is passed over after two attempts without DONE (an executable the system refuses ends the
+  app). When all have run, a launch only says so; delete the results (or one of them) to run again.
   From SDK 2.50, a fixed direct mapping over pool memory (T19) did not return on the PS4 and the
   console soft-locked (at 2.00 it is ENOMEM). Every probe that maps direct memory over pool memory
   (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.
-  analysis/sdk_sweep.py takes all the result files and lists every line that changes, with the
-  first SDK version at which it does. make SDK=0x... still builds eboot.bin at one version.
-  The chain counts an attempt before handing over (sceSystemServiceLoadExec): if the system refuses an
-  executable (reported as corrupted, which ends the app), launching again tries it once more and then
-  passes it over. 10.00 and above are not in the list: on FW 12.02 the 10.00 executable was refused as
-  corrupted. The one change tried: from SDK 10.00 create-fself also gets -fwversion = the SDK version
-  (the 8-byte firmware version field at 0x338 of the executable, 0 otherwise); the bisect package runs
-  that 10.00 executable last.
-
-SDK BISECT (make BISECT=1)
-  A second package, "DmemTest SDK bisect" (SHAD00095), for the rules the chain found changing with the
-  SDK version (at 2.00, 2.50, 3.00, 3.50, 5.00; none from 5.50 to 9.50). It runs every released
-  firmware version from 1.50 to 3.50 and from 4.50 to 5.00 (src/sdk_bisect.h, 34 runs, then one
-  more: SDK 10.00 with the executable's firmware version field set, see below) and only the sections
-  holding those lines (b, u, y, z, m, l, nu, followups, fl, co, pt_tp, fw_tl_tf, bt, ex, df, xv). Its
-  results are dmem_bisect_results_<SDK version>.txt with dmem_bisect_chain.state; sdk_sweep.py on them
-  names the exact version of each change. CI builds both packages.
+  analysis/sdk_sweep.py takes all the result files and lists every line that changes, with the first
+  SDK version at which it does. make SDK=0x... still builds eboot.bin at one version.

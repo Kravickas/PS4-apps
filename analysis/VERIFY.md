@@ -79,8 +79,8 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | largest pool reservation (U10) | SDK 4.50: 0x3FFE00000 | SDK 5.00: 0x5ED400000 | SDK chain on FW 12.02 |
 | pool cache counters around type 10 commits (Y4, Z1, M1, NU5) | SDK 4.50 | SDK 5.00: different counts | SDK chain on FW 12.02 |
 
-No line changes from SDK 5.50 to 9.50. The exact released version of each change is for the SDK bisect package
-(README); this table names the full-chain versions around it.
+No line changes from SDK 5.50 to 9.50. The chain also runs every released firmware version between
+the versions in this table (README), which places each change to the released version.
 
 From SDK 2.50 every probe mapping direct memory over pool memory is skipped (README).
 
