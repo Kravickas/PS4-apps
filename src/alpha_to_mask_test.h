@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-21"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-22"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -144,6 +144,9 @@ enum {
     V_KP_ANDN2,
     V_KP_CLASS,
     V_KP_LATE_RESTORE,
+    V_KP_CMPX_RESTORE,
+    V_KP_CMPX_AFTER,
+    V_KP_OR_RESTORE,
     V_MARK,
     V_COV,
     V_LOD,
@@ -199,6 +202,9 @@ static const char* const k_alpha_to_mask_vname[ALPHA_TO_MASK_NSH] = {
     "t_kp_andn2 (v_cmp, s_andn2_b64 exec where B & 1, exp vm)",
     "t_kp_class (v_cmpx_class_f32 where B & 1, exp vm)",
     "t_kp_late_restore (s_and_saveexec_b64, exp vm, exec restored)",
+    "t_kp_cmpx_restore (v_cmpx where B & 1, exp vm, exec -1)",
+    "t_kp_cmpx_after (exp vm, then v_cmpx where B & 1)",
+    "t_kp_or_restore (s_and_saveexec_b64, exp vm, s_or_b64 exec restore)",
     "t_mark (1 to B: the pixel shader ran)",
     "t_cov (the sample coverage input to B)",
     "t_lod (mip-constant texture at LOD 1 to B: quad derivatives)",
@@ -264,6 +270,12 @@ static const struct {
      ALPHA_TO_MASK_T_KP_CLASS_RSRC1},
     {alpha_to_mask_t_kp_late_restore_bin, sizeof(alpha_to_mask_t_kp_late_restore_bin),
      ALPHA_TO_MASK_T_KP_LATE_RESTORE_RSRC1},
+    {alpha_to_mask_t_kp_cmpx_restore_bin, sizeof(alpha_to_mask_t_kp_cmpx_restore_bin),
+     ALPHA_TO_MASK_T_KP_CMPX_RESTORE_RSRC1},
+    {alpha_to_mask_t_kp_cmpx_after_bin, sizeof(alpha_to_mask_t_kp_cmpx_after_bin),
+     ALPHA_TO_MASK_T_KP_CMPX_AFTER_RSRC1},
+    {alpha_to_mask_t_kp_or_restore_bin, sizeof(alpha_to_mask_t_kp_or_restore_bin),
+     ALPHA_TO_MASK_T_KP_OR_RESTORE_RSRC1},
     {alpha_to_mask_t_mark_bin, sizeof(alpha_to_mask_t_mark_bin), ALPHA_TO_MASK_T_MARK_RSRC1},
     {alpha_to_mask_t_cov_bin, sizeof(alpha_to_mask_t_cov_bin), ALPHA_TO_MASK_T_COV_RSRC1},
     {alpha_to_mask_t_lod_bin, sizeof(alpha_to_mask_t_lod_bin), ALPHA_TO_MASK_T_LOD_RSRC1},
@@ -335,6 +347,7 @@ enum {
     H_DTMN, /* AA_MASK_CENTROID_DTMN: h0 0 = mask before centroid, h1 the other way round */
     H_CFULL, /* centroid of a fully covered pixel: h0 the centre, h1 the first priority sample */
     H_NOOP2, /* no-op draw, KILL_ENABLE set: h0 the shader runs, h1 it does not */
+    H_VMEND, /* valid mask: h0 EXEC at the end of the program, h1 EXEC at the vm export */
 };
 static const char* const k_alpha_to_mask_hname[][2] = {
     {"model", "-"},
@@ -367,6 +380,7 @@ static const char* const k_alpha_to_mask_hname[][2] = {
     {"0 = before centroid", "0 = after centroid"},
     {"centre", "first priority sample"},
     {"pixel shader runs", "pixel shader not run"},
+    {"EXEC at the program end", "EXEC at the vm export"},
 };
 
 struct AlphaToMaskTest {
@@ -914,16 +928,26 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "KP11", .what = "v_cmp, s_andn2_b64 exec (scope opener), exp vm",
                        .ps = V_KP_ANDN2, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL,
                        .kind = AK_RANDOM, .seed = 0x800Bu),
-    ALPHA_TO_MASK_CASE(.id = "KP12", .what = "v_cmpx_class_f32, exp vm", .ps = V_KP_CLASS,
-                       .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL, .kind = AK_RANDOM,
-                       .seed = 0x800Cu),
     ALPHA_TO_MASK_CASE(.id = "KP13",
                        .what = "s_and_saveexec_b64, exp vm, then s_mov_b64 exec restore",
                        .ps = V_KP_LATE_RESTORE, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
-                       .bmode = BM_KILL, .kind = AK_RANDOM, .seed = 0x800Du),
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .hyp = H_VMEND, .seed = 0x800Du),
     ALPHA_TO_MASK_CASE(.id = "KP14", .what = "s_andn2_b64 exec + alpha-to-mask, 4x D1",
                        .ps = V_KP_ANDN2, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .bmode = BM_KILL,
                        .kind = AK_RANDOM, .seed = 0x800Eu),
+    ALPHA_TO_MASK_CASE(.id = "KP15", .what = "v_cmpx, exp vm, then s_mov_b64 exec -1",
+                       .ps = V_KP_CMPX_RESTORE, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .hyp = H_VMEND, .seed = 0x800Fu),
+    ALPHA_TO_MASK_CASE(.id = "KP16", .what = "exp vm, then v_cmpx (exec narrowed after the export)",
+                       .ps = V_KP_CMPX_AFTER, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .hyp = H_VMEND, .seed = 0x8010u),
+    ALPHA_TO_MASK_CASE(.id = "KP17",
+                       .what = "s_and_saveexec_b64, exp vm, then s_or_b64 exec restore",
+                       .ps = V_KP_OR_RESTORE, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .hyp = H_VMEND, .seed = 0x8011u),
+    ALPHA_TO_MASK_CASE(.id = "KP18", .what = "exp vm, then v_cmpx + alpha-to-mask, 4x D1",
+                       .ps = V_KP_CMPX_AFTER, .db_alpha_to_mask = ALPHA_TO_MASK_D1,
+                       .bmode = BM_KILL, .kind = AK_RANDOM, .hyp = H_VMEND, .seed = 0x8012u),
     /* PA_SC_AA_MASK, also different per quad pixel */
     ALPHA_TO_MASK_CASE(.id = "AM01", .what = "AA_MASK 0x5, alpha-to-mask off",
                        .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .aa_mask = 0x5, .kind = AK_RANDOM,
@@ -1415,6 +1439,10 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "E16b", .what = "16 coverage samples, no targets, EXEC_ON_NOOP, D0",
                        .ns = 16, .cbf = CBF_NONE, .nodepth = 1, .dbsc = ALPHA_TO_MASK_EXEC_NOOP,
                        .risky = 1),
+    /* v_cmpx_class_f32: shadPS4 has no translation for it, run last */
+    ALPHA_TO_MASK_CASE(.id = "KP12", .what = "v_cmpx_class_f32, exp vm", .ps = V_KP_CLASS,
+                       .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL, .kind = AK_RANDOM,
+                       .seed = 0x800Cu),
     /* shadPS4 asserts on DEPTH_BEFORE_SHADER with a Z export: run them last */
     ALPHA_TO_MASK_CASE(.id = "DB04",
                        .what = "DEPTH_BEFORE_SHADER + sample mask export, alpha-to-mask off",
@@ -1555,7 +1583,7 @@ static void alpha_to_mask_f(uint32_t b) {
    bad_variants: pixel shader variants that crashed or hung (ALPHA_TO_MASK_GROUP of the variant). */
 #define ALPHA_TO_MASK_CAPTURE 0x10000
 struct AlphaToMaskState {
-    char build[16];
+    char build[32];
     int32_t next, inflight, regread_bad;
     uint64_t bad_variants;
 };
@@ -1575,10 +1603,13 @@ static int alpha_to_mask_state_load(struct AlphaToMaskState* st) {
     sceKernelClose(fd);
     if (n != (long)sizeof(*st))
         return 0;
-    for (int i = 0; ALPHA_TO_MASK_BUILD[i] || st->build[i]; i++)
+    for (int i = 0; i < (int)sizeof(st->build); i++) {
         if (ALPHA_TO_MASK_BUILD[i] != st->build[i])
             return 0;
-    return 1;
+        if (!ALPHA_TO_MASK_BUILD[i])
+            return 1;
+    }
+    return 0;
 }
 
 static int alpha_to_mask_pop(uint32_t m) {
@@ -1938,7 +1969,7 @@ static uint32_t alpha_to_mask_vdbsc(int v) {
     if (v == V_ALL)
         return ALPHA_TO_MASK_ZEXP | ALPHA_TO_MASK_MASKEXP | ALPHA_TO_MASK_KILL;
     return (v == V_KILL || v == V_KILL2 || v == V_KILL3 || v == V_KILL_NOVM ||
-            (v >= V_KP_E64 && v <= V_KP_LATE_RESTORE))
+            (v >= V_KP_E64 && v <= V_KP_OR_RESTORE))
                ? ALPHA_TO_MASK_KILL
                : 0u;
 }
@@ -2405,8 +2436,11 @@ static int alpha_to_mask_killed(const struct AlphaToMaskTest* t, int h) {
         return t->hyp == H_RESTORE && h;
     if (t->ps == V_KP_TWOEXP)
         return !(t->hyp == H_TWOEXP && h);
-    if ((t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC) ||
-        (t->ps >= V_KP_ANDN2 && t->ps <= V_KP_LATE_RESTORE))
+    if (t->ps == V_KP_LATE_RESTORE || t->ps == V_KP_CMPX_RESTORE || t->ps == V_KP_OR_RESTORE)
+        return t->hyp == H_VMEND && h; /* exec restored after the export */
+    if (t->ps == V_KP_CMPX_AFTER)
+        return !(t->hyp == H_VMEND && h); /* exec narrowed after the export */
+    if ((t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC) || t->ps == V_KP_ANDN2 || t->ps == V_KP_CLASS)
         return 1;
     if (t->ps != V_KILL && t->ps != V_KILL2 && t->ps != V_KILL3)
         return 0;

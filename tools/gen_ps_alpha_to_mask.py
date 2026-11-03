@@ -32,7 +32,8 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           v_cmpx then VALU work, v_cmpx then exec copied through SGPRs, v_cmp +
           s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
           exec restored to all lanes; v_cmp + s_andn2_b64 exec; v_cmpx_class_f32 (+0 kept);
-          s_and_saveexec_b64, exp vm, then exec restored
+          s_and_saveexec_b64, exp vm, then exec restored; v_cmpx, exp vm, s_mov_b64 exec -1;
+          exp vm, then v_cmpx; s_and_saveexec_b64, exp vm, s_or_b64 exec restore
   t_zfar  MRTZ Z 0.75 (32_R), MRT0 (colour x 3, A)
   t_bcopt PRIM_MASK bit 31 (BC_OPTIMIZE applied: one IJ set for centre and centroid) to B[i]
   t_centroid  the centroid sample's x offset (1/16 pixel) to B[i]: centroid minus centre of
@@ -459,6 +460,21 @@ SHADERS = [
             "s_and_saveexec_b64 s[24:25], vcc",
             "exp mrt0 v10, v10, v10, v9 done vm",
             "s_mov_b64 exec, s[24:25]",
+        ]),
+        ("t_kp_cmpx_restore", 0xA2A0C138, [
+            "v_cmpx_eq_u32 vcc, 0, v16",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+            "s_mov_b64 exec, -1",
+        ]),
+        ("t_kp_cmpx_after", 0xA2A0C139, [
+            "exp mrt0 v10, v10, v10, v9 done vm",
+            "v_cmpx_eq_u32 vcc, 0, v16",
+        ]),
+        ("t_kp_or_restore", 0xA2A0C13A, [
+            "v_cmp_eq_u32 vcc, 0, v16",
+            "s_and_saveexec_b64 s[24:25], vcc",
+            "exp mrt0 v10, v10, v10, v9 done vm",
+            "s_or_b64 exec, exec, s[24:25]",
         ]),
     ]
 ] + [
