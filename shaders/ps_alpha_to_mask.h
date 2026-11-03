@@ -362,6 +362,14 @@ static const uint32_t alpha_to_mask_t_centroid_bin[] __attribute__((aligned(256)
     0xDEADBEEF, 0xA2A0C133, 0x00000000,
 };
 
+#define ALPHA_TO_MASK_T_BCOPT_RSRC1 0x00000043u /* v0-v14, s0-s7 + VCC */
+static const uint32_t alpha_to_mask_t_bcopt_bin[] __attribute__((aligned(256))) = {
+    0xBEEB03FF, 0x00000009, 0x90039F02, 0x7E140203, 0xC0820100, 0x7E180F04, 0x7E1A0F05, 0x341A1A86,
+    0x4A181B0C, 0x34181882, 0x4A1818FF, 0x00004000, 0xBF8C007F, 0xE0701000, 0x80010A0C, 0xBF8C0F70,
+    0x7E1C02F2, 0xF800180F, 0x0E0E0E0E, 0xBF810000, 0x5362724F, 0x00726468, 0x00005000, 0x00000000,
+    0xDEADBEEF, 0xA2A0C134, 0x00000000,
+};
+
 #define ALPHA_TO_MASK_T_ZFAR_RSRC1 0x00000084u /* v0-v18, s0-s15 + VCC */
 static const uint32_t alpha_to_mask_t_zfar_bin[] __attribute__((aligned(256))) = {
     0xBEEB03FF, 0x0000000C, 0xC0820100, 0xC0C40104, 0xBF8C007F, 0x7E080F02, 0x7E0A0F03, 0x340C0A86,

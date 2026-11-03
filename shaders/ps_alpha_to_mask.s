@@ -909,6 +909,24 @@ v_mov_b32 v14, 1.0
 exp mrt0 v14, v14, v14, v14 done vm
 s_nop 0
 s_endpgm
+; ---- t_bcopt (ps) ----
+.long 0xbeeb03ff
+.long 0x9
+s_lshr_b32 s3, s2, 31
+v_mov_b32 v10, s3
+s_load_dwordx4 s[4:7], s[0:1], 0x0
+v_cvt_u32_f32 v12, v4
+v_cvt_u32_f32 v13, v5
+v_lshlrev_b32 v13, 6, v13
+v_add_i32 v12, vcc, v12, v13
+v_lshlrev_b32 v12, 2, v12
+v_add_i32 v12, vcc, 0x4000, v12
+s_waitcnt lgkmcnt(0)
+buffer_store_dword v10, v12, s[4:7], 0 offen
+s_waitcnt vmcnt(0)
+v_mov_b32 v14, 1.0
+exp mrt0 v14, v14, v14, v14 done vm
+s_endpgm
 ; ---- t_zfar (ps) ----
 .long 0xbeeb03ff
 .long 0xc
