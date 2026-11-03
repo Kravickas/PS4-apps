@@ -33,6 +33,8 @@ sample, 32 / 33 t_raw's colour halves (RG pair, B).
           s_and_saveexec_b64, v_cmpx then MRT0 without vm and a null export with vm, v_cmpx then
           exec restored to all lanes
   t_zfar  MRTZ Z 0.75 (32_R), MRT0 (colour x 3, A)
+  t_centroid  the centroid sample's x offset (1/16 pixel) to B[i]: centroid minus centre of
+          attr0.x times 512, rounded
   t_lod   samples the mip-constant texture at LOD 1 (u = attr0.x / 4, v = 0.5) and stores its
           alpha to B[i]: the quad's derivatives
 vs_screen: screen-space positions (0, 0), (128, 0), (0, 128) for the clip-disabled draws.
@@ -489,6 +491,31 @@ SHADERS = [
         "v_mov_b32 v4, 1.0",
         "exp param0 v1, v1, v1, v1",
         "exp pos0 v1, v2, v3, v4 done",
+    ]),
+    # centroid: (attr0.x at the centroid - at the centre) * 512 = the centroid sample's x offset in
+    # 1/16 pixel (attr0.x = NDC x, 1/32 per pixel), rounded, to B[i]; inputs PERSP_CENTER (v0, v1),
+    # PERSP_CENTROID (v2, v3), POS_X / POS_Y (v4, v5)
+    ("t_centroid", 0xA2A0C133, "ps", [
+        "s_mov_b32 m0, s2",
+        "v_interp_p1_f32 v10, v2, attr0.x",
+        "v_interp_p2_f32 v10, v3, attr0.x",
+        "v_interp_p1_f32 v11, v0, attr0.x",
+        "v_interp_p2_f32 v11, v1, attr0.x",
+        "v_sub_f32 v10, v10, v11",
+        "v_mul_f32 v10, 0x44000000, v10",
+        "v_cvt_rpi_i32_f32 v10, v10",
+        "s_load_dwordx4 s[4:7], s[0:1], 0x0",
+        "v_cvt_u32_f32 v12, v4",
+        "v_cvt_u32_f32 v13, v5",
+        "v_lshlrev_b32 v13, 6, v13",
+        "v_add_i32 v12, vcc, v12, v13",
+        "v_lshlrev_b32 v12, 2, v12",
+        "v_add_i32 v12, vcc, 0x4000, v12",
+        "s_waitcnt lgkmcnt(0)",
+        "buffer_store_dword v10, v12, s[4:7], 0 offen",
+        "s_waitcnt vmcnt(0)",
+        "v_mov_b32 v14, 1.0",
+        "exp mrt0 v14, v14, v14, v14 done vm",
     ]),
     # MRTZ Z 0.75 (the interpolated Z is 0.5), MRT0 (colour x 3, A)
     ("t_zfar", 0xA2A0C130, "ps", PS_HEAD + [
