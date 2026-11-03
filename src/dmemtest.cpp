@@ -538,6 +538,18 @@ struct Line {
     }
 };
 
+// From SDK 2.50, a fixed direct mapping over pool memory (T19: a reservation holding a committed
+// block) did not return on the PS4 (FW 12.02): the console soft-locked (SDK chain, run 0x02508001;
+// at 2.00 the same call is ENOMEM). Every probe that maps direct memory over pool memory is skipped
+// from SDK 2.50 on.
+static uint32_t g_own_sdk = 0;
+static bool skip_dmem_over_pool(Line& l) {
+    if (g_own_sdk < 0x02500000)
+        return false;
+    l.s("SKIP from SDK 2.50: fixed direct map over pool memory hung the PS4 (T19) ");
+    return true;
+}
+
 static void say(const char* t) {
     Line l;
     l.s(t).end();
@@ -2739,7 +2751,7 @@ static void run_t() {
         int32_t rr = 0;
         const long pa = alloc(4, 3, &rr);
         Line l = head("T19", "MAP_FIXED dmem over reserve | munmap");
-        if (pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
+        if (!skip_dmem_over_pool(l) && pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0 &&
             sceKernelMemoryPoolCommit(v, blk, 0, 0x3, 0) == 0) {
             PS a = ps();
             void* at = v;
@@ -2925,7 +2937,7 @@ static void run_u() {
             l.s("SKIP").end();
         } else {
             void* v = 0;
-            if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+            if (!skip_dmem_over_pool(l) && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
                 PS a = ps();
                 void* at = v;
                 pdelta_run(l, "rsv=", sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa, PG), a);
@@ -3014,7 +3026,7 @@ static void run_w() {
         const long pa = alloc(128, 3, &rr);
         Line l = head("W4", "fixed dmem: whole rsv / rsv tail");
         void* v = 0;
-        if (pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+        if (!skip_dmem_over_pool(l) && pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
             PS a = ps();
             void* at = v;
             pdelta_run(l, "whole=", sceKernelMapDirectMemory(&at, rsv, 0x3, 0x10, pa, PG), a);
@@ -3077,7 +3089,7 @@ static void fixed_over(const char* id, const char* name, uint64_t at_off, uint64
     const long pa = alloc(pages, 3, &rr);
     void* v = 0;
     Line l = head(id, name);
-    if (pa < 0 || sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0) {
+    if (skip_dmem_over_pool(l) || pa < 0 || sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) != 0) {
         l.s("SKIP").end();
         release_all(pa, pages);
         return;
@@ -3385,7 +3397,7 @@ static void run_j() {
         const long pa = alloc(128, 3, &rr);
         Line l = head("J5", "fixed+no-overwrite: rsv start / whole");
         void* v = 0;
-        if (pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
+        if (!skip_dmem_over_pool(l) && pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
             PS a = ps();
             void* at = v;
             pdelta_run(l, "start=", sceKernelMapDirectMemory(&at, PG, 0x3, 0x90, pa, PG), a);
@@ -10391,11 +10403,19 @@ static void run_c() {
 
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. dmem_chain.state (next to the
-// results) holds the index of the next version to run. A run records the one after it before it
-// starts testing, so a run that ends the app is not repeated; at DONE it hands over to the next.
+// results) holds the index of the next version to run, then one attempt count per version. A run
+// counts its attempt and moves the index on before it starts testing, so a run that ends the app is
+// not repeated straight away. After the last version, versions whose results have no DONE line are
+// run again, up to two attempts each (a run that ends the app twice is left as it is).
 
 static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
                                                   "/temp0/dmem_chain.state"};
+static const int g_chain_max_attempts = 2;
+
+struct ChainState {
+    unsigned char next;
+    unsigned char attempts[64];
+};
 
 static int chain_index(uint32_t sdk) {
     for (int i = 0; i < g_chain_n; i++)
@@ -10404,30 +10424,72 @@ static int chain_index(uint32_t sdk) {
     return -1;
 }
 
-static int chain_state_read() {
+static void chain_state_read(ChainState* st) {
+    my_memset(st, 0, sizeof(*st));
     for (const char* path : g_chain_state_paths) {
         const int fd = sceKernelOpen(path, 0x0000, 0);
         if (fd < 0)
             continue;
-        unsigned char b = 0;
-        const long r = sceKernelRead(fd, &b, 1);
+        sceKernelRead(fd, st, sizeof(*st));
         sceKernelClose(fd);
-        return r == 1 ? (int)b : 0;
+        return;
     }
-    return 0;
 }
 
-static void chain_state_write(int next) {
-    const unsigned char b = (unsigned char)next;
+static void chain_state_write(const ChainState* st) {
     for (const char* path : g_chain_state_paths) {
         const int fd = sceKernelOpen(path, 0x0601, 0777);
         if (fd < 0)
             continue;
-        sceKernelWrite(fd, &b, 1);
+        sceKernelWrite(fd, st, sizeof(*st));
         sceKernelFsync(fd);
         sceKernelClose(fd);
         return;
     }
+}
+
+// Whether the results of chain entry idx end with a finished run (a DONE line near the end).
+static bool chain_run_done(int idx) {
+    static const char* const dirs[] = {"/data/", "/temp0/"};
+    for (const char* dir : dirs) {
+        char path[64];
+        int n = put_str(path, 0, dir);
+        n = put_str(path, n, "dmem_results_");
+        n = put_hex8(path, n, g_chain_sdks[idx]);
+        put_str(path, n, ".txt");
+        const int fd = sceKernelOpen(path, 0x0000, 0);
+        if (fd < 0)
+            continue;
+        const long size = sceKernelLseek(fd, 0, 2);
+        char tail[513];
+        const long from = size > 512 ? size - 512 : 0;
+        sceKernelLseek(fd, from, 0);
+        const long got = sceKernelRead(fd, tail, 512);
+        sceKernelClose(fd);
+        if (got <= 0)
+            return false;
+        tail[got] = 0;
+        static const char done[] = "===== DONE =====";
+        for (long k = 0; k + (long)sizeof(done) - 1 <= got; k++) {
+            bool same = true;
+            for (int c = 0; c < (int)sizeof(done) - 1 && same; c++)
+                same = tail[k + c] == done[c];
+            if (same)
+                return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+// The next chain entry to run, or -1 when every one is finished or has had its attempts.
+static int chain_pick(const ChainState* st) {
+    if (st->next < g_chain_n)
+        return st->next;
+    for (int k = 0; k < g_chain_n; k++)
+        if (st->attempts[k] < g_chain_max_attempts && !chain_run_done(k))
+            return k;
+    return -1;
 }
 
 static void chain_exe_path(char* out, int idx) {
@@ -10463,20 +10525,28 @@ int main(void) {
     uint32_t own_sdk = 0;
     sceKernelGetCompiledSdkVersion(&own_sdk);
     const int own = chain_index(own_sdk);
+    g_own_sdk = own_sdk;
+    ChainState chain;
+    chain_state_read(&chain);
     if (own == 0) {
-        const int next = chain_state_read();
-        if (next >= g_chain_n) {
+        const int pick = chain_pick(&chain);
+        if (pick < 0) {
             say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
             say("next to them to run the chain again.");
             idle_forever();
         }
-        if (next > 0) {
-            chain_exec(next);
+        if (pick > 0) {
+            chain_exec(pick);
             idle_forever();
         }
     }
-    if (own >= 0)
-        chain_state_write(own + 1);
+    if (own >= 0) {
+        if (chain.attempts[own] < 255)
+            chain.attempts[own]++;
+        if (chain.next <= own)
+            chain.next = (unsigned char)(own + 1);
+        chain_state_write(&chain);
+    }
     log_init();
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
     {
@@ -10650,13 +10720,17 @@ int main(void) {
         }
     }
     say("===== DONE =====");
-    if (own >= 0 && own + 1 < g_chain_n) {
-        Line l;
-        l.s("SDK chain: run ").dec(own + 1).s(" of ").dec(g_chain_n).s(" done, next SDK version ").hex(g_chain_sdks[own + 1]);
-        l.end();
-        chain_exec(own + 1);
-    } else if (own >= 0) {
-        say("SDK chain: all runs are done");
+    if (own >= 0) {
+        chain_state_read(&chain);
+        const int pick = chain_pick(&chain);
+        if (pick >= 0) {
+            Line l;
+            l.s("SDK chain: run ").dec(own + 1).s(" of ").dec(g_chain_n).s(" done, next SDK version ").hex(g_chain_sdks[pick]);
+            l.end();
+            chain_exec(pick);
+        } else {
+            say("SDK chain: all runs are done");
+        }
     }
     idle_forever();
     return 0;

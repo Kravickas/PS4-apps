@@ -217,6 +217,11 @@ SDK VERSION (CHAIN)
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. dmem_chain.state next to the results holds the next one to run; a run
   records it before testing, so if a run ends the app, launching again goes on with the next SDK
-  version. When all have run, a launch only says so; delete dmem_chain.state to run the chain again.
+  version. After the last version, versions whose results have no DONE line are run again, up to
+  two attempts each. When all have run, a launch only says so; delete dmem_chain.state to run the
+  chain again.
+  From SDK 2.50, a fixed direct mapping over pool memory (T19) did not return on the PS4 and the
+  console soft-locked (at 2.00 it is ENOMEM). Every probe that maps direct memory over pool memory
+  (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.
   analysis/sdk_sweep.py takes all the result files and lists every line that changes, with the
   first SDK version at which it does. make SDK=0x... still builds eboot.bin at one version.

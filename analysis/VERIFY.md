@@ -56,10 +56,22 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | void reservation without MAP_SHARED: mprotect does not merge it | CO3 (prot step) | — | measured |
 | MapDirectMemory2 keeps an area apart only when it changes the type | DT5 (change), CV23 (same type) | — | measured |
 | VirtualQuery on direct memory: region = run of pages with the same physical type, offset at its start | CV100, CV101 | — | measured |
-| direct mapping split by mprotect/mtypeprotect does not re-merge | FW2, TP2 (SDK 1.00) | kern: no direct merging below 2.00, simplify after type protect | measured below 2.00 only: needs the SDK builds |
+| direct mapping split by mprotect/mtypeprotect does not re-merge below SDK 2.00, does from 2.00 | FW2, TP2 at SDK 1.00, 1.50, 2.00 | kern: no direct merging below 2.00, simplify after type protect | confirmed |
 | GetDirectMemoryType region over neighbouring same-type areas | CV3-CV35, CV61, GT1 | (dmem query not in kern's syscalls read here) | measured |
 | mtypeprotect EBUSY: only when the requested range holds an aliased page | EB1 (`EBUSY`, `o`, `o`), CV52 | kern tests the whole entry | measured wins |
 | pool batch move | PB3-PB5 | not implemented in kern | measured |
+
+## Measured SDK differences
+
+| what | below | from | runs |
+|---|---|---|---|
+| fixed direct mapping over pool memory holding a committed block (T19) | SDK 2.00: ENOMEM | SDK 2.50: the call does not return, the PS4 soft-locks | SDK chain on FW 12.02: 0x02008001 finished, 0x02508001 stopped in T19 |
+| direct mappings merge with neighbours, also after mprotect / mtypeprotect back (CO4, CO10, FW2, TP2) | SDK 1.00, 1.50: never | SDK 2.00: yes | SDK chain on FW 12.02 |
+| address 0 with MAP_FIXED for MapFlexibleMemory, MapDirectMemory, ReserveVirtualRange (FW1, BT1/BT3/BT5 bit 4) | SDK 1.00, 1.50: accepted | SDK 2.00: EINVAL (shadPS4: from 1.70, memory_test) | SDK chain on FW 12.02 |
+| flexible memory available at start (FL1-FL6, DF4) | SDK 1.00, 1.50: 0x1B800000 | SDK 2.00: 0x1BB00000 | SDK chain on FW 12.02 |
+| address layout at start: first mappings at 0x20036C000 | SDK 1.00, 1.50 | SDK 2.00: 0x20001C000 (Y, K, MF, HB, J6, LA3, XC5, VQ9) | SDK chain on FW 12.02 |
+
+From SDK 2.50 every probe mapping direct memory over pool memory is skipped (README).
 
 ## GPU protection on file mappings
 
