@@ -205,3 +205,18 @@ analysis/
   findings.py         generates FINDINGS.md from the memory_test sources and its coverage table
   compare_results.py  compares the PS4 and the shadPS4 results file: where each run ended, matching
                       and differing lines per section, SB/PS lines on one side only, TR differences
+
+SDK VERSION (CHAIN)
+  The PS4 kernel and libkernel pick some behaviour by the process SDK version (fpPS4's kernel
+  reconstruction has thresholds at 2.00, 2.50, 3.00, 3.50, 5.00, 5.50, 7.00 and 10.00 on the memory
+  paths, from one kernel version), so which checks exist is only known by running them on the
+  console. The package holds this program at every major SDK version, 1.00 to 12.00 in steps of
+  0.50 (src/sdk_chain.h; the Makefile builds sdk/eboot_0xXXXXXXXX.bin with create-fself -sdkver,
+  eboot.bin keeps create-fself's default 0x01000051, SDK 1.00).
+  One launch runs them all: each run prints its SDK version below the title, writes
+  dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
+  sceSystemServiceLoadExec. dmem_chain.state next to the results holds the next one to run; a run
+  records it before testing, so if a run ends the app, launching again goes on with the next SDK
+  version. When all have run, a launch only says so; delete dmem_chain.state to run the chain again.
+  analysis/sdk_sweep.py takes all the result files and lists every line that changes, with the
+  first SDK version at which it does. make SDK=0x... still builds eboot.bin at one version.

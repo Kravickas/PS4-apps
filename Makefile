@@ -60,7 +60,16 @@ $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
 eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001 $(if $(SDK),-sdkver $(SDK))
+
+# The same program at every other SDK version of src/sdk_chain.h (the first is eboot.bin's default):
+# each run hands over to the next with sceSystemServiceLoadExec.
+SDK_CHAIN   := $(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h))
+SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
+
+sdk/eboot_%.bin: eboot.bin
+	@mkdir -p sdk
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $*
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@
@@ -76,13 +85,13 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
 # ---- No assets: the test draws its own text. ----
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
+pkg.gp4: eboot.bin $(SDK_EBOOTS) sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
 	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) $^
 
 $(CONTENT_ID).pkg: pkg.gp4
 	$(PKG)/PkgTool.Core pkg_build $< .
 
 clean:
-	rm -rf $(INTDIR) eboot.bin pkg.gp4 sce_sys/param.sfo *.pkg
+	rm -rf $(INTDIR) eboot.bin sdk pkg.gp4 sce_sys/param.sfo *.pkg
 
 .PHONY: all clean

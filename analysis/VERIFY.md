@@ -2,7 +2,10 @@
 
 Each rule implemented in shadPS4 (branch memory-tests) against independent sources:
 
-- **DmemTest**: measured on the PS4 (FW 12.02 console, SDK 4.508 eboot), IDs as in the results.
+- **DmemTest**: measured on the PS4 (FW 12.02 console), IDs as in the results. Every result up to
+  round 71 is at process SDK version 0x01000051 (SDK 1.00, create-fself's default; shadPS4 reads the
+  same value). Rules behind an SDK threshold (2.00, 2.50, 3.00, 3.50, 5.00, 5.50, 10.00) are measured
+  below it only, until the SDK builds (README, SDK VERSION) have run.
 - **fpPS4 kern**: red-prig/fpPS4, branch `kern` (2026-10-22), whose kernel side is reconstructed
   from the PS4 kernel. File and function given; "kern" = that branch.
 - **FreeBSD 9**: the PS4 kernel's base, for the generic VM parts (fpPS4 kern follows it there).
@@ -45,7 +48,7 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | anonymous mappings made with any access never merge (read-only too) | CO15 | kern: credential only for writable ones | measured wins |
 | anonymous mappings without access merge like void reservations without MAP_SHARED (no end-of-range rule); mprotect does not merge them | CO16 | — | measured |
 | mlock over memory without CPU access → ENOMEM | CO2, CO3, CO8, CO16; ML1 (new: direct p0) | `vm_map_wire` faults pages in (FreeBSD) | confirmed (mechanism) / probe |
-| direct memory never merges below SDK 2.00; pool entries never merge | (SDK 4.508) | `vm_map_simplify_entry` | confirmed |
+| direct memory never merges below SDK 2.00; pool entries never merge | (all results at SDK 1.00) | `vm_map_simplify_entry` | confirmed below 2.00 |
 | merging needs the same name and, below SDK 5.50, the same caller | VQ6-VQ8, FW6 | `vm_map_simplify_entry`: name and `anon_addr` unless sdk_55 | confirmed |
 | MAP_NO_COALESCE keeps entries apart | CO8 | `vm_map_simplify_entry`: NO_COALESCE / entry_id | confirmed |
 | new anonymous/void entry extends its left neighbour, then simplify | CO11, CO12 | vm_map.pas `vm_map_insert` (vm_object_coalesce, simplify) | confirmed (left merge) |
@@ -53,7 +56,7 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 | void reservation without MAP_SHARED: mprotect does not merge it | CO3 (prot step) | — | measured |
 | MapDirectMemory2 keeps an area apart only when it changes the type | DT5 (change), CV23 (same type) | — | measured |
 | VirtualQuery on direct memory: region = run of pages with the same physical type, offset at its start | CV100, CV101 | — | measured |
-| direct mapping split by mprotect/mtypeprotect does not re-merge | FW2, TP2 | kern calls `vm_map_simplify_entry` after type protect | measured wins |
+| direct mapping split by mprotect/mtypeprotect does not re-merge | FW2, TP2 (SDK 1.00) | kern: no direct merging below 2.00, simplify after type protect | measured below 2.00 only: needs the SDK builds |
 | GetDirectMemoryType region over neighbouring same-type areas | CV3-CV35, CV61, GT1 | (dmem query not in kern's syscalls read here) | measured |
 | mtypeprotect EBUSY: only when the requested range holds an aliased page | EB1 (`EBUSY`, `o`, `o`), CV52 | kern tests the whole entry | measured wins |
 | pool batch move | PB3-PB5 | not implemented in kern | measured |

@@ -8,7 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdk_chain.h"
+
 extern "C" {
+// the process SDK version (from the executable's process parameter): the kernel picks some
+// behaviour by it, so every run names it
+int32_t sceKernelGetCompiledSdkVersion(uint32_t* version);
+// replaces this process with another executable of the package (the next SDK version)
+int32_t sceSystemServiceLoadExec(const char* path, const char* args[]);
 int32_t sceKernelAllocateDirectMemory(long search_start, long search_end, size_t len,
                                       size_t alignment, int memory_type, long* phys_out);
 int32_t sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, long phys,
@@ -406,21 +413,45 @@ static Screen g_screen;
 // ---- log ------------------------------------------------------------------------------------
 // Each line is opened, written, fsynced and closed, so it survives the process dying mid-test.
 
-static const char* g_log_path = "/data/dmem_results.txt";
+// dmem_results_<SDK version>.txt in /data (or /temp0): one file per SDK version of the chain.
+// Empty until log_init: nothing is written to a file before then.
+static char g_log_buf[64] = "";
+static const char* g_log_path = g_log_buf;
+
+static int put_str(char* out, int n, const char* s) {
+    while (*s)
+        out[n++] = *s++;
+    out[n] = 0;
+    return n;
+}
+static int put_hex8(char* out, int n, uint32_t v) {
+    n = put_str(out, n, "0x");
+    for (int sh = 28; sh >= 0; sh -= 4)
+        out[n++] = "0123456789ABCDEF"[(v >> sh) & 0xF];
+    out[n] = 0;
+    return n;
+}
 
 static void log_init() {
-    int fd = sceKernelOpen(g_log_path, 0x0601, 0777);
-    if (fd < 0) {
-        g_log_path = "/temp0/dmem_results.txt";
-        fd = sceKernelOpen(g_log_path, 0x0601, 0777);
+    uint32_t sdk = 0;
+    sceKernelGetCompiledSdkVersion(&sdk);
+    static const char* const dirs[] = {"/data/", "/temp0/"};
+    for (const char* dir : dirs) {
+        int n = put_str(g_log_buf, 0, dir);
+        n = put_str(g_log_buf, n, "dmem_results_");
+        n = put_hex8(g_log_buf, n, sdk);
+        put_str(g_log_buf, n, ".txt");
+        const int fd = sceKernelOpen(g_log_path, 0x0601, 0777);
+        if (fd >= 0) {
+            sceKernelClose(fd);
+            return;
+        }
     }
-    if (fd >= 0)
-        sceKernelClose(fd);
 }
 
 static void emit(const char* s, int n) {
     sceKernelWrite(1, s, (unsigned long)n);
-    const int fd = sceKernelOpen(g_log_path, 0x0209, 0777);
+    const int fd = g_log_path[0] ? sceKernelOpen(g_log_path, 0x0209, 0777) : -1;
     if (fd >= 0) {
         sceKernelWrite(fd, s, (unsigned long)n);
         sceKernelFsync(fd);
@@ -10358,8 +10389,94 @@ static void run_c() {
     release_all(hi, 1);
 }
 
+// ---- SDK chain --------------------------------------------------------------------------------
+// The package holds this program at every SDK version of sdk_chain.h. dmem_chain.state (next to the
+// results) holds the index of the next version to run. A run records the one after it before it
+// starts testing, so a run that ends the app is not repeated; at DONE it hands over to the next.
+
+static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
+                                                  "/temp0/dmem_chain.state"};
+
+static int chain_index(uint32_t sdk) {
+    for (int i = 0; i < g_chain_n; i++)
+        if (g_chain_sdks[i] == sdk)
+            return i;
+    return -1;
+}
+
+static int chain_state_read() {
+    for (const char* path : g_chain_state_paths) {
+        const int fd = sceKernelOpen(path, 0x0000, 0);
+        if (fd < 0)
+            continue;
+        unsigned char b = 0;
+        const long r = sceKernelRead(fd, &b, 1);
+        sceKernelClose(fd);
+        return r == 1 ? (int)b : 0;
+    }
+    return 0;
+}
+
+static void chain_state_write(int next) {
+    const unsigned char b = (unsigned char)next;
+    for (const char* path : g_chain_state_paths) {
+        const int fd = sceKernelOpen(path, 0x0601, 0777);
+        if (fd < 0)
+            continue;
+        sceKernelWrite(fd, &b, 1);
+        sceKernelFsync(fd);
+        sceKernelClose(fd);
+        return;
+    }
+}
+
+static void chain_exe_path(char* out, int idx) {
+    if (idx == 0) {
+        put_str(out, 0, "/app0/eboot.bin");
+        return;
+    }
+    int n = put_str(out, 0, "/app0/sdk/eboot_");
+    n = put_hex8(out, n, g_chain_sdks[idx]);
+    put_str(out, n, ".bin");
+}
+
+// Hands over to chain entry idx; returns only if the system refused.
+static void chain_exec(int idx) {
+    char path[64];
+    chain_exe_path(path, idx);
+    const char* args[] = {nullptr};
+    const int32_t r = sceSystemServiceLoadExec(path, args);
+    Line l;
+    l.s("SDK chain: LoadExec ").s(path).s(" failed ").hex((uint32_t)r);
+    l.end();
+}
+
+static void idle_forever() {
+    for (;;)
+        sceKernelUsleep(1000000);
+}
+
 int main(void) {
     g_screen.init();
+    // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
+    // progress goes on with the next SDK version, and a finished chain is not run over again.
+    uint32_t own_sdk = 0;
+    sceKernelGetCompiledSdkVersion(&own_sdk);
+    const int own = chain_index(own_sdk);
+    if (own == 0) {
+        const int next = chain_state_read();
+        if (next >= g_chain_n) {
+            say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
+            say("next to them to run the chain again.");
+            idle_forever();
+        }
+        if (next > 0) {
+            chain_exec(next);
+            idle_forever();
+        }
+    }
+    if (own >= 0)
+        chain_state_write(own + 1);
     log_init();
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
     {
@@ -10372,6 +10489,16 @@ int main(void) {
         }
     }
     say("===== DMEM RELEASE TEST =====");
+    {
+        uint32_t sdk = 0;
+        Line l;
+        l.s("SDK version ");
+        if (sceKernelGetCompiledSdkVersion(&sdk) == 0)
+            l.hex(sdk);
+        else
+            l.s("unknown");
+        l.end();
+    }
     {
         Line l;
         l.s("dmem size=").hex(g_dmem).s("  page=").hex(PG).s("  screen=").c(g_screen.ok ? '1' : '0');
@@ -10523,7 +10650,14 @@ int main(void) {
         }
     }
     say("===== DONE =====");
-    for (;;)
-        sceKernelUsleep(1000000);
+    if (own >= 0 && own + 1 < g_chain_n) {
+        Line l;
+        l.s("SDK chain: run ").dec(own + 1).s(" of ").dec(g_chain_n).s(" done, next SDK version ").hex(g_chain_sdks[own + 1]);
+        l.end();
+        chain_exec(own + 1);
+    } else if (own >= 0) {
+        say("SDK chain: all runs are done");
+    }
+    idle_forever();
     return 0;
 }
