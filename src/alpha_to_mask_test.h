@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-22"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-23"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -1469,6 +1469,19 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "E16c", .what = "16 coverage samples, EQAA_DISABLE, no targets, D1",
                        .ns = 16, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .eqaa_dis = 1,
                        .cbf = CBF_NONE, .nodepth = 1, .dbsc = ALPHA_TO_MASK_EXEC_NOOP, .risky = 1),
+    /* the ramps again, right after the 16 sample draws without targets (as the visual captures
+       ran in a relaunch after a crash) */
+    ALPHA_TO_MASK_CASE(.id = "VR01", .what = "as V04 (ramp 2x D1), after the 16 sample draws",
+                       .ns = 2, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .kind = AK_RAMP),
+    ALPHA_TO_MASK_CASE(.id = "VR02", .what = "as V05 (ramp 1x D1), after the 16 sample draws",
+                       .ns = 1, .db_alpha_to_mask = ALPHA_TO_MASK_D1, .kind = AK_RAMP),
+    ALPHA_TO_MASK_CASE(.id = "VR03", .what = "as V06 (ramp 4x D1, EQAA_DISABLE), after them",
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .eqaa_dis = 1, .kind = AK_RAMP),
+    ALPHA_TO_MASK_CASE(.id = "VR04", .what = "as V08 (ramp 8x D1, NUM_SAMPLES 2), after them",
+                       .ns = 8, .db_alpha_to_mask = ALPHA_TO_MASK_D1,
+                       .alpha_to_mask_num_samples = 2, .kind = AK_RAMP),
+    ALPHA_TO_MASK_CASE(.id = "VR05", .what = "as V09 (net 4x D1), after them",
+                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .kind = AK_NET),
 };
 #pragma clang diagnostic pop
 #define ALPHA_TO_MASK_NTESTS                                                                       \
