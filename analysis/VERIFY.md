@@ -96,6 +96,9 @@ Turismo 7's has SYSTEM_VER 0x11008000 (our derivation), no PUBTOOLINFO, and FORM
 PUBTOOLMINVER 0x02990000, which ours lacked; ours now has those two and no PUBTOOLINFO.
 Refused with that too (SDK 10.00, 10.50, 11.00, 11.50, 12.00). Next: the bundled OpenOrbis modules
 (libc.prx, libSceFios2.prx), module parameter SDK 1.00, now packaged with it set to 10.00.
+Refused with that too. Now the app finds the reason itself: execve from SDK 10.00 (the kernel's
+answer, without the system launcher) and the kernel's message buffer at every launch, in
+dmem_exec.txt (README).
 
 ## GPU protection on file mappings
 

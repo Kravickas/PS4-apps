@@ -16,6 +16,10 @@ extern "C" {
 int32_t sceKernelGetCompiledSdkVersion(uint32_t* version);
 // replaces this process with another executable of the package (the next SDK version)
 int32_t sceSystemServiceLoadExec(const char* path, const char* args[]);
+// the kernel's own exec: returns an error code to the caller instead of ending the app
+int execve(const char* path, char* const argv[], char* const envp[]);
+int* __error(void);
+int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, const void* newp, size_t newlen);
 int32_t sceKernelAllocateDirectMemory(long search_start, long search_end, size_t len,
                                       size_t alignment, int memory_type, long* phys_out);
 int32_t sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, long phys,
@@ -10401,6 +10405,95 @@ static void run_c() {
     release_all(hi, 1);
 }
 
+// ---- diagnostics for executables the system refuses --------------------------------------------
+// dmem_exec.txt (in /data, or /temp0) is appended to and never emptied: the kernel's message buffer
+// at every launch, and the result of execve for every executable from SDK 10.00. Through LoadExec
+// the system refused those as corrupted, which ends the app without a reason.
+static const char* const g_diag_paths[] = {"/data/dmem_exec.txt", "/temp0/dmem_exec.txt"};
+static char g_diag_buf[0x40000];
+
+static int put_dec(char* out, int n, long long v) {
+    char tmp[24];
+    int k = 0;
+    const bool neg = v < 0;
+    unsigned long long u = neg ? 0ull - (unsigned long long)v : (unsigned long long)v;
+    do {
+        tmp[k++] = (char)('0' + u % 10);
+        u /= 10;
+    } while (u);
+    if (neg)
+        out[n++] = '-';
+    while (k)
+        out[n++] = tmp[--k];
+    out[n] = 0;
+    return n;
+}
+
+static void diag_write(const char* data, long len) {
+    for (const char* path : g_diag_paths) {
+        const int fd = sceKernelOpen(path, 0x0209, 0777);
+        if (fd < 0)
+            continue;
+        sceKernelWrite(fd, data, (unsigned long)len);
+        sceKernelFsync(fd);
+        sceKernelClose(fd);
+        return;
+    }
+}
+
+// The kernel's message buffer: the sysctl kern.msgbuf (its last 32 KiB) and what /dev/klog has ready
+// without waiting. Each source's return values come first; a homebrew may not be allowed either.
+static void diag_kernel_log(const char* why) {
+    char line[200];
+    int n = put_str(line, 0, "\n=== ");
+    n = put_str(line, n, why);
+    n = put_str(line, n, ", process SDK ");
+    n = put_hex8(line, n, g_own_sdk);
+    n = put_str(line, n, " ===\n");
+    diag_write(line, n);
+    size_t len = sizeof(g_diag_buf);
+    *__error() = 0;
+    const int r = sysctlbyname("kern.msgbuf", g_diag_buf, &len, nullptr, 0);
+    const int e = *__error();
+    n = put_str(line, 0, "kern.msgbuf: return ");
+    n = put_dec(line, n, r);
+    n = put_str(line, n, " errno ");
+    n = put_dec(line, n, e);
+    n = put_str(line, n, " length ");
+    n = put_dec(line, n, (long long)len);
+    n = put_str(line, n, "\n");
+    diag_write(line, n);
+    if (r == 0 && len > 0 && len <= sizeof(g_diag_buf)) {
+        const size_t keep = len > 0x8000 ? 0x8000 : len;
+        diag_write(g_diag_buf + (len - keep), (long)keep);
+        diag_write("\n", 1);
+    }
+    const int fd = sceKernelOpen("/dev/klog", 0x0004, 0); // read only, O_NONBLOCK
+    n = put_str(line, 0, "/dev/klog: open ");
+    n = put_hex8(line, n, (uint32_t)fd);
+    n = put_str(line, n, "\n");
+    diag_write(line, n);
+    if (fd >= 0) {
+        long total = 0;
+        long got = 0;
+        while (total < (long)sizeof(g_diag_buf)) {
+            got = sceKernelRead(fd, g_diag_buf + total, sizeof(g_diag_buf) - (unsigned long)total);
+            if (got <= 0)
+                break;
+            total += got;
+        }
+        sceKernelClose(fd);
+        n = put_str(line, 0, "/dev/klog: ");
+        n = put_dec(line, n, total);
+        n = put_str(line, n, " bytes, last read ");
+        n = put_hex8(line, n, (uint32_t)got);
+        n = put_str(line, n, "\n");
+        diag_write(line, n);
+        diag_write(g_diag_buf, total);
+        diag_write("\n", 1);
+    }
+}
+
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. The next version to run is the
 // newest in the list whose results (dmem_results_<SDK>.txt) have no DONE line, so versions already
@@ -10526,6 +10619,33 @@ static void chain_exec(int idx) {
     chain_state_write(&st);
     char path[64];
     chain_exe_path(path, idx);
+    if (g_chain_sdks[idx] >= 0x10000000) {
+        // The kernel's own exec: if it refuses the executable it returns here with the reason, and
+        // the version is passed over without LoadExec (no "corrupted" from the system). If it
+        // accepts it, that executable runs in this process.
+        char* const argv[] = {path, nullptr};
+        char* const envp[] = {nullptr};
+        *__error() = 0;
+        const int r = execve(path, argv, envp);
+        const int e = *__error();
+        char line[160];
+        int n = put_str(line, 0, "\nexecve ");
+        n = put_str(line, n, path);
+        n = put_str(line, n, ": return ");
+        n = put_dec(line, n, r);
+        n = put_str(line, n, " errno ");
+        n = put_dec(line, n, e);
+        n = put_str(line, n, "\n");
+        diag_write(line, n);
+        diag_kernel_log("after execve");
+        chain_state_read(&st);
+        st.attempts[idx] = g_chain_max_attempts;
+        chain_state_write(&st);
+        Line l;
+        l.s("SDK chain: execve ").s(path).s(" refused, errno ").dec(e).s(" (dmem_exec.txt)");
+        l.end();
+        return;
+    }
     const char* args[] = {nullptr};
     const int32_t r = sceSystemServiceLoadExec(path, args);
     Line l;
@@ -10546,17 +10666,20 @@ int main(void) {
     sceKernelGetCompiledSdkVersion(&own_sdk);
     const int own = chain_index(own_sdk);
     g_own_sdk = own_sdk;
+    diag_kernel_log("launch");
     ChainState chain;
     chain_state_read(&chain);
     if (own == 0) {
-        const int pick = chain_pick(&chain);
+        // chain_exec returns only when the executable was refused: then the next one is tried
+        int pick = chain_pick(&chain);
+        while (pick > 0) {
+            chain_exec(pick);
+            chain_state_read(&chain);
+            pick = chain_pick(&chain);
+        }
         if (pick < 0) {
             say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
             say("next to them to run the chain again.");
-            idle_forever();
-        }
-        if (pick > 0) {
-            chain_exec(pick);
             idle_forever();
         }
     }
@@ -10741,15 +10864,16 @@ int main(void) {
     say("===== DONE =====");
     if (own >= 0) {
         chain_state_read(&chain);
-        const int pick = chain_pick(&chain);
-        if (pick >= 0) {
+        int pick = chain_pick(&chain);
+        while (pick >= 0) {
             Line l;
             l.s("SDK chain: run ").dec(own + 1).s(" of ").dec(g_chain_n).s(" done, next SDK version ").hex(g_chain_sdks[pick]);
             l.end();
             chain_exec(pick);
-        } else {
-            say("SDK chain: all runs are done");
+            chain_state_read(&chain);
+            pick = chain_pick(&chain);
         }
+        say("SDK chain: all runs are done");
     }
     idle_forever();
     return 0;
