@@ -100,6 +100,10 @@ Refused with that too. Now the app finds the reason itself: execve from SDK 10.0
 answer, without the system launcher) and the kernel's message buffer at every launch, in
 dmem_exec.txt (README).
 Kernel log from the app: sysctl kern.msgbuf EPERM, /dev/klog ENOENT (not readable for a homebrew).
+execve of the SDK 12.00 executable (from the SDK 1.00 one) did not return, so the kernel did not
+refuse the call, and the 12.00 image never wrote its first line: it ends while starting, before our
+code. With an execve control (5.00 -> target) and "early"/"main" markers, the app soft-locked the
+PS4 (could not be closed until the console turned off): execve is no longer used.
 
 ## GPU protection on file mappings
 

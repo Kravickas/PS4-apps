@@ -233,13 +233,11 @@ SDK VERSION (CHAIN)
   line; dmem_chain.state counts the attempts per version (counted before the hand-over), and a version
   is passed over after two attempts without DONE. When all have run, a launch only says so; delete
   the results (or one of them) to run again.
-  From SDK 10.00 the system refused every executable as corrupted through LoadExec, which ends the
-  app without a reason. For those versions the chain calls the kernel's own execve first: if the
-  kernel refuses, execve returns and its errno and the kernel messages are written to dmem_exec.txt
-  (next to the results), and the version is passed over without LoadExec; if it accepts, that
-  executable runs in the same process. Every launch also writes the kernel's message buffer there
-  (sysctl kern.msgbuf and /dev/klog, each with its return values: a homebrew may not be allowed to
-  read them). dmem_exec.txt is appended to and never emptied.
+  From SDK 10.00 the system refuses every executable as corrupted through LoadExec, which ends the
+  app without a reason. Every executable writes how far it got to dmem_exec.txt (next to the results,
+  appended, never emptied): "early" during the C runtime's start (a constructor, before main) and
+  "main" as main starts. (execve from the app soft-locked the PS4 and is not used. The kernel's message
+  buffer is closed to a homebrew: sysctl kern.msgbuf EPERM, /dev/klog ENOENT.)
   From SDK 2.50, a fixed direct mapping over pool memory (T19) did not return on the PS4 and the
   console soft-locked (at 2.00 it is ENOMEM). Every probe that maps direct memory over pool memory
   (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.

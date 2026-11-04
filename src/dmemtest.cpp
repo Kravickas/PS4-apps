@@ -16,10 +16,6 @@ extern "C" {
 int32_t sceKernelGetCompiledSdkVersion(uint32_t* version);
 // replaces this process with another executable of the package (the next SDK version)
 int32_t sceSystemServiceLoadExec(const char* path, const char* args[]);
-// the kernel's own exec: returns an error code to the caller instead of ending the app
-int execve(const char* path, char* const argv[], char* const envp[]);
-int* __error(void);
-int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, const void* newp, size_t newlen);
 int32_t sceKernelAllocateDirectMemory(long search_start, long search_end, size_t len,
                                       size_t alignment, int memory_type, long* phys_out);
 int32_t sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, long phys,
@@ -10406,27 +10402,35 @@ static void run_c() {
 }
 
 // ---- diagnostics for executables the system refuses --------------------------------------------
-// dmem_exec.txt (in /data, or /temp0) is appended to and never emptied: the kernel's message buffer
-// at every launch, and the result of execve for every executable from SDK 10.00. Through LoadExec
-// the system refused those as corrupted, which ends the app without a reason.
+// dmem_exec.txt (in /data, or /temp0) is appended to and never emptied. Through LoadExec the system
+// refused every executable from SDK 10.00 as corrupted, which ends the app without a reason. Every
+// executable writes where it got to: "early" during the C runtime's start (a constructor, before
+// main) and "main" as main starts. (execve from the app soft-locked the PS4: not used. The kernel's
+// message buffer is closed to a homebrew: sysctl kern.msgbuf EPERM, /dev/klog ENOENT.)
 static const char* const g_diag_paths[] = {"/data/dmem_exec.txt", "/temp0/dmem_exec.txt"};
-static char g_diag_buf[0x40000];
 
-static int put_dec(char* out, int n, long long v) {
-    char tmp[24];
-    int k = 0;
-    const bool neg = v < 0;
-    unsigned long long u = neg ? 0ull - (unsigned long long)v : (unsigned long long)v;
-    do {
-        tmp[k++] = (char)('0' + u % 10);
-        u /= 10;
-    } while (u);
-    if (neg)
-        out[n++] = '-';
-    while (k)
-        out[n++] = tmp[--k];
-    out[n] = 0;
-    return n;
+static void diag_write(const char* data, long len);
+
+static void diag_marker(const char* where, const char* extra) {
+    uint32_t sdk = 0;
+    sceKernelGetCompiledSdkVersion(&sdk);
+    char line[200];
+    int n = put_str(line, 0, where);
+    n = put_str(line, n, ": process SDK ");
+    n = put_hex8(line, n, sdk);
+    if (extra) {
+        n = put_str(line, n, " ");
+        int k = 0;
+        while (extra[k] && n < 190)
+            line[n++] = extra[k++];
+    }
+    n = put_str(line, n, "\n");
+    diag_write(line, n);
+}
+
+// runs during the C runtime's start, before main
+__attribute__((constructor)) static void diag_early_marker() {
+    diag_marker("early", nullptr);
 }
 
 static void diag_write(const char* data, long len) {
@@ -10441,58 +10445,6 @@ static void diag_write(const char* data, long len) {
     }
 }
 
-// The kernel's message buffer: the sysctl kern.msgbuf (its last 32 KiB) and what /dev/klog has ready
-// without waiting. Each source's return values come first; a homebrew may not be allowed either.
-static void diag_kernel_log(const char* why) {
-    char line[200];
-    int n = put_str(line, 0, "\n=== ");
-    n = put_str(line, n, why);
-    n = put_str(line, n, ", process SDK ");
-    n = put_hex8(line, n, g_own_sdk);
-    n = put_str(line, n, " ===\n");
-    diag_write(line, n);
-    size_t len = sizeof(g_diag_buf);
-    *__error() = 0;
-    const int r = sysctlbyname("kern.msgbuf", g_diag_buf, &len, nullptr, 0);
-    const int e = *__error();
-    n = put_str(line, 0, "kern.msgbuf: return ");
-    n = put_dec(line, n, r);
-    n = put_str(line, n, " errno ");
-    n = put_dec(line, n, e);
-    n = put_str(line, n, " length ");
-    n = put_dec(line, n, (long long)len);
-    n = put_str(line, n, "\n");
-    diag_write(line, n);
-    if (r == 0 && len > 0 && len <= sizeof(g_diag_buf)) {
-        const size_t keep = len > 0x8000 ? 0x8000 : len;
-        diag_write(g_diag_buf + (len - keep), (long)keep);
-        diag_write("\n", 1);
-    }
-    const int fd = sceKernelOpen("/dev/klog", 0x0004, 0); // read only, O_NONBLOCK
-    n = put_str(line, 0, "/dev/klog: open ");
-    n = put_hex8(line, n, (uint32_t)fd);
-    n = put_str(line, n, "\n");
-    diag_write(line, n);
-    if (fd >= 0) {
-        long total = 0;
-        long got = 0;
-        while (total < (long)sizeof(g_diag_buf)) {
-            got = sceKernelRead(fd, g_diag_buf + total, sizeof(g_diag_buf) - (unsigned long)total);
-            if (got <= 0)
-                break;
-            total += got;
-        }
-        sceKernelClose(fd);
-        n = put_str(line, 0, "/dev/klog: ");
-        n = put_dec(line, n, total);
-        n = put_str(line, n, " bytes, last read ");
-        n = put_hex8(line, n, (uint32_t)got);
-        n = put_str(line, n, "\n");
-        diag_write(line, n);
-        diag_write(g_diag_buf, total);
-        diag_write("\n", 1);
-    }
-}
 
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. The next version to run is the
@@ -10513,8 +10465,9 @@ struct ChainState {
 };
 
 // Bumped whenever how the chain hands over changes: a package with a new revision starts with fresh
-// attempt counts (revision 2: execve first from SDK 10.00).
-static const uint32_t g_chain_revision = 2;
+// attempt counts (revision 2: execve first from SDK 10.00; 3: execve control and markers; 4: no
+// execve, which soft-locked the PS4).
+static const uint32_t g_chain_revision = 4;
 
 static uint32_t chain_signature() {
     uint32_t h = 2166136261u ^ g_chain_revision;
@@ -10623,33 +10576,6 @@ static void chain_exec(int idx) {
     chain_state_write(&st);
     char path[64];
     chain_exe_path(path, idx);
-    if (g_chain_sdks[idx] >= 0x10000000) {
-        // The kernel's own exec: if it refuses the executable it returns here with the reason, and
-        // the version is passed over without LoadExec (no "corrupted" from the system). If it
-        // accepts it, that executable runs in this process.
-        char* const argv[] = {path, nullptr};
-        char* const envp[] = {nullptr};
-        *__error() = 0;
-        const int r = execve(path, argv, envp);
-        const int e = *__error();
-        char line[160];
-        int n = put_str(line, 0, "\nexecve ");
-        n = put_str(line, n, path);
-        n = put_str(line, n, ": return ");
-        n = put_dec(line, n, r);
-        n = put_str(line, n, " errno ");
-        n = put_dec(line, n, e);
-        n = put_str(line, n, "\n");
-        diag_write(line, n);
-        diag_kernel_log("after execve");
-        chain_state_read(&st);
-        st.attempts[idx] = g_chain_max_attempts;
-        chain_state_write(&st);
-        Line l;
-        l.s("SDK chain: execve ").s(path).s(" refused, errno ").dec(e).s(" (dmem_exec.txt)");
-        l.end();
-        return;
-    }
     const char* args[] = {nullptr};
     const int32_t r = sceSystemServiceLoadExec(path, args);
     Line l;
@@ -10662,7 +10588,9 @@ static void idle_forever() {
         sceKernelUsleep(1000000);
 }
 
-int main(void) {
+
+int main(int argc, char** argv) {
+    diag_marker("main", argc >= 2 && argv && argv[1] ? argv[1] : "(no argument)");
     g_screen.init();
     // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
     // progress goes on with the next SDK version, and a finished chain is not run over again.
@@ -10670,7 +10598,6 @@ int main(void) {
     sceKernelGetCompiledSdkVersion(&own_sdk);
     const int own = chain_index(own_sdk);
     g_own_sdk = own_sdk;
-    diag_kernel_log("launch");
     ChainState chain;
     chain_state_read(&chain);
     if (own == 0) {
