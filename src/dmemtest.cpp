@@ -10512,8 +10512,12 @@ struct ChainState {
     unsigned char attempts[128];
 };
 
+// Bumped whenever how the chain hands over changes: a package with a new revision starts with fresh
+// attempt counts (revision 2: execve first from SDK 10.00).
+static const uint32_t g_chain_revision = 2;
+
 static uint32_t chain_signature() {
-    uint32_t h = 2166136261u;
+    uint32_t h = 2166136261u ^ g_chain_revision;
     for (int i = 0; i < g_chain_n; i++) {
         h = (h ^ g_chain_sdks[i]) * 16777619u;
     }

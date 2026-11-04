@@ -99,6 +99,7 @@ Refused with that too (SDK 10.00, 10.50, 11.00, 11.50, 12.00). Next: the bundled
 Refused with that too. Now the app finds the reason itself: execve from SDK 10.00 (the kernel's
 answer, without the system launcher) and the kernel's message buffer at every launch, in
 dmem_exec.txt (README).
+Kernel log from the app: sysctl kern.msgbuf EPERM, /dev/klog ENOENT (not readable for a homebrew).
 
 ## GPU protection on file mappings
 
