@@ -111,8 +111,20 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
 # ---- No assets: the test draws its own text. ----
-pkg.gp4: eboot.bin $(SDK_EBOOTS) sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(LIBMODULES)
-	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) $^
+# The modules (libc.prx, libSceFios2.prx) go into the package with their module parameter set to the
+# first SDK version from 10.00 (tools/set_module_sdk.py; OpenOrbis' are SDK 1.00): FW 12.02 refused
+# every executable from 10.00 with them. All versions below 10.00 are measured already.
+MODULE_SDK  := $(firstword $(filter 0x1%,$(SDK_LIST)))
+PKG_MODULES := $(if $(MODULE_SDK),$(addprefix $(INTDIR)/,$(LIBMODULES)),$(LIBMODULES))
+
+$(INTDIR)/sce_module/%: sce_module/% tools/set_module_sdk.py
+	@mkdir -p $(INTDIR)/sce_module
+	python3 tools/set_module_sdk.py $< $@ $(MODULE_SDK)
+
+pkg.gp4: eboot.bin $(SDK_EBOOTS) sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx $(PKG_MODULES)
+	python3 tools/make_gp4.py --out $@ --content-id $(CONTENT_ID) eboot.bin $(SDK_EBOOTS) sce_sys/param.sfo \
+		sce_sys/icon0.png sce_sys/about/right.sprx \
+		$(if $(MODULE_SDK),$(foreach f,$(LIBMODULES),$(INTDIR)/$(f)=$(f)),$(LIBMODULES))
 
 $(CONTENT_ID).pkg: pkg.gp4
 	$(PKG)/PkgTool.Core pkg_build $< .

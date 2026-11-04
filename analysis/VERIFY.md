@@ -94,6 +94,8 @@ executable is now linked with a 0x60, 5-entry process parameter (README).
 Refused with that too. param.sfo next (red_prig: "perhaps more data is needed in param.sfo"): Gran
 Turismo 7's has SYSTEM_VER 0x11008000 (our derivation), no PUBTOOLINFO, and FORMAT "obs" and
 PUBTOOLMINVER 0x02990000, which ours lacked; ours now has those two and no PUBTOOLINFO.
+Refused with that too (SDK 10.00, 10.50, 11.00, 11.50, 12.00). Next: the bundled OpenOrbis modules
+(libc.prx, libSceFios2.prx), module parameter SDK 1.00, now packaged with it set to 10.00.
 
 ## GPU protection on file mappings
 

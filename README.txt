@@ -223,8 +223,10 @@ SDK VERSION (CHAIN)
   From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the layout
   of newer SDKs: 0x60 bytes and 5 entries, as Gran Turismo 7's (SDK 11.00), instead of OpenOrbis'
   0x50 bytes and 3 entries (tools/procparam60.py; the two added fields are 0, as in Gran Turismo 7).
-  The modules in sce_module (libc.prx, libSceFios2.prx) declare SDK 1.00 in their module parameter;
-  every executable of the package loads them.
+  The modules in sce_module (libc.prx, libSceFios2.prx) declare SDK 1.00 in their module parameter.
+  The package gets copies with it set to the first version from 10.00 (tools/set_module_sdk.py, both
+  stored copies of the field; nothing else changes), packed under the same paths (tools/make_gp4.py
+  takes source=target); every version below 10.00 is measured already.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. The next is the newest version in the list whose results have no DONE
