@@ -210,13 +210,16 @@ SDK VERSION (CHAIN)
   The PS4 kernel and libkernel pick some behaviour by the process SDK version. Running every released
   version from 1.00 to 9.50 on FW 12.02 found rules changing at exactly 1.70, 2.00, 2.50, 3.00, 3.50
   and 5.00, and nothing else (analysis/VERIFY.md). The package holds this program at SDK 1.00
-  (eboot.bin), at each of those versions, and at 10.00 (src/sdk_chain.h). A PS4 SDK version is
+  (eboot.bin), at each of those versions, and at the SDK versions 10.00, 10.50, 11.00, 11.50 and
+  12.00 (src/sdk_chain.h; 12.50 is newer than the console's FW 12.02). A PS4 SDK version is
   major.minor.patch with a three-digit minor and patch, stored digit for digit; the released SDK x.y0
   is x.y08.001 (11.008.001 = 11008001 in Gran Turismo 7's executable; Unreal Engine's PS4 notes list
   9.508.001, 10.008.011, 12.508.001 ...). The Makefile builds the others as
   sdk/eboot_<version>.bin with create-fself -sdkver (an executable's only SDK field: it has no module
-  parameter). param.sfo declares the highest version in the package: PUBTOOLINFO sdk_ver, and
-  SYSTEM_VER (required system software) as that version without its patch part.
+  parameter). param.sfo follows Gran Turismo 7's (SDK 11.00, runs on FW 12.02): SYSTEM_VER (required
+  system software) is the highest version in the package without its patch part, FORMAT "obs",
+  PUBTOOLMINVER 0x02990000. GT7's flags that change how an app runs (ATTRIBUTE, ATTRIBUTE2, ...) are
+  left out, as they could change what DmemTest measures.
   From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the layout
   of newer SDKs: 0x60 bytes and 5 entries, as Gran Turismo 7's (SDK 11.00), instead of OpenOrbis'
   0x50 bytes and 3 entries (tools/procparam60.py; the two added fields are 0, as in Gran Turismo 7).

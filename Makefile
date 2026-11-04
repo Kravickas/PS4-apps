@@ -71,10 +71,13 @@ SDK_LIST    := $(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h)
 SDK_CHAIN   := $(wordlist 2,999,$(SDK_LIST))
 # eboot.bin: the first version of the list (make SDK=0x... for another one)
 EBOOT_SDK   := $(if $(SDK),$(SDK),$(firstword $(SDK_LIST)))
-# param.sfo declares the highest version in the package: PUBTOOLINFO sdk_ver in the executables'
-# format, SYSTEM_VER (required system software) the same version without its patch part
+# param.sfo, as Gran Turismo 7's (SDK 11.00, runs on FW 12.02): SYSTEM_VER (required system software)
+# is the highest version in the package without its patch part (GT7: SDK 0x11008001, SYSTEM_VER
+# 0x11008000), FORMAT "obs", PUBTOOLMINVER 0x02990000. GT7's flags that change how an app runs
+# (ATTRIBUTE, ATTRIBUTE2, ...) are left out: they could change what DmemTest measures.
 SDK_TOP     := $(lastword $(SDK_LIST))
 SYSTEM_VER  := $(shell printf '%d' $$(( $(SDK_TOP) & 0xFFFFF000 )))
+PUBTOOLMINVER := $(shell printf '%d' 0x02990000)
 SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
 
 # From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the
@@ -100,7 +103,8 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
 	$(PKG)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
-	$(PKG)/PkgTool.Core sfo_setentry $@ PUBTOOLINFO --type Utf8 --maxsize 512 --value 'sdk_ver=$(patsubst 0x%,%,$(SDK_TOP))'
+	$(PKG)/PkgTool.Core sfo_setentry $@ FORMAT --type Utf8 --maxsize 4 --value 'obs'
+	$(PKG)/PkgTool.Core sfo_setentry $@ PUBTOOLMINVER --type Integer --maxsize 4 --value $(PUBTOOLMINVER)
 	$(PKG)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value $(SYSTEM_VER)
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'

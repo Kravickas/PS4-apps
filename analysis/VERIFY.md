@@ -91,6 +91,9 @@ Turismo 7's process parameter has 5 entries with _sceLibcParam, _sceKernelMemPar
 _sceKernelFsParam (0x60 bytes); OpenOrbis' crt1.o writes 0x50 bytes with 3 entries, its pointers to
 the same three parameters filled in by relocations at load (they read 0 in the file). The 10.00
 executable is now linked with a 0x60, 5-entry process parameter (README).
+Refused with that too. param.sfo next (red_prig: "perhaps more data is needed in param.sfo"): Gran
+Turismo 7's has SYSTEM_VER 0x11008000 (our derivation), no PUBTOOLINFO, and FORMAT "obs" and
+PUBTOOLMINVER 0x02990000, which ours lacked; ours now has those two and no PUBTOOLINFO.
 
 ## GPU protection on file mappings
 
