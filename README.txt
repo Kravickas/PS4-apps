@@ -210,11 +210,16 @@ SDK VERSION (CHAIN)
   The PS4 kernel and libkernel pick some behaviour by the process SDK version. Running every released
   version from 1.00 to 9.50 on FW 12.02 found rules changing at exactly 1.70, 2.00, 2.50, 3.00, 3.50
   and 5.00, and nothing else (analysis/VERIFY.md). The package holds this program at SDK 1.00
-  (eboot.bin), at each of those versions, and at 10.00 (src/sdk_chain.h). Versions are written in the
-  release format (major, minor, patch 001; 5.05 is 05050001); the Makefile builds the others as
+  (eboot.bin), at each of those versions, and at 10.00 (src/sdk_chain.h). A PS4 SDK version is
+  major.minor.patch with a three-digit minor and patch, stored digit for digit; the released SDK x.y0
+  is x.y08.001 (11.008.001 = 11008001 in Gran Turismo 7's executable; Unreal Engine's PS4 notes list
+  9.508.001, 10.008.011, 12.508.001 ...). The Makefile builds the others as
   sdk/eboot_<version>.bin with create-fself -sdkver (an executable's only SDK field: it has no module
   parameter). param.sfo declares the highest version in the package: PUBTOOLINFO sdk_ver, and
   SYSTEM_VER (required system software) as that version without its patch part.
+  From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the layout
+  of newer SDKs: 0x60 bytes and 5 entries, as Gran Turismo 7's (SDK 11.00), instead of OpenOrbis'
+  0x50 bytes and 3 entries (tools/procparam60.py; the two added fields are 0, as in Gran Turismo 7).
   The modules in sce_module (libc.prx, libSceFios2.prx) declare SDK 1.00 in their module parameter;
   every executable of the package loads them.
   One launch runs them all: each run prints its SDK version below the title, writes

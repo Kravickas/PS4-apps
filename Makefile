@@ -65,8 +65,8 @@ eboot.bin: $(OBJS)
 
 # The same program at every other SDK version of src/sdk_chain.h (the first is eboot.bin's default):
 # each run hands over to the next with sceSystemServiceLoadExec. An executable has no module
-# parameter: its SDK version is the process parameter only (create-fself -sdkver), in the release
-# format of src/sdk_chain.h.
+# parameter: its SDK version is the process parameter only (create-fself -sdkver), written as in
+# src/sdk_chain.h.
 SDK_LIST    := $(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h)
 SDK_CHAIN   := $(wordlist 2,999,$(SDK_LIST))
 # eboot.bin: the first version of the list (make SDK=0x... for another one)
@@ -77,9 +77,20 @@ SDK_TOP     := $(lastword $(SDK_LIST))
 SYSTEM_VER  := $(shell printf '%d' $$(( $(SDK_TOP) & 0xFFFFF000 )))
 SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
 
-sdk/eboot_%.bin: eboot.bin
+# From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the
+# layout of newer SDKs (0x60 bytes, 5 entries, as Gran Turismo 7's; tools/procparam60.py): FW 12.02
+# refused the 10.00 executable with OpenOrbis' 0x50 bytes, 3 entries. The others keep crt1.o.
+OUT_ELF_PP60 := $(INTDIR)/homebrew_pp60.elf
+
+$(INTDIR)/crt1_pp60.o: $(TOOLCHAIN)/lib/crt1.o tools/procparam60.py | $(INTDIR)
+	python3 tools/procparam60.py $< $@
+
+$(OUT_ELF_PP60): $(OBJS) $(INTDIR)/crt1_pp60.o
+	$(LD) $(OBJS) -o $@ $(subst $(TOOLCHAIN)/lib/crt1.o,$(INTDIR)/crt1_pp60.o,$(LDFLAGS))
+
+sdk/eboot_%.bin: eboot.bin $(OUT_ELF_PP60)
 	@mkdir -p sdk
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $*
+	$(PKG)/create-fself -in=$(if $(filter 0x1%,$*),$(OUT_ELF_PP60),$(OUT_ELF)) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $*
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@

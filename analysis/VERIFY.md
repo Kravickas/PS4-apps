@@ -76,12 +76,21 @@ exactly these versions and at no other.
 | 3.50 | flexible budget exceeded: EINVAL -> ENOMEM | FW5 |
 | 5.00 | pool reservations of 16 GiB and more allowed (largest 0x3FFE00000 -> 0x5ED400000); the pool counters after it follow from that | U10; Y4, Z1, M1, NU5 |
 
-The chain now runs SDK 1.00, these versions, and 10.00. Up to here versions were written 0xMMmm8001
-(and create-fself's default 0x01000051 for 1.00); from now on in the release format (major, minor,
-patch 001: 0x01000001 ... 0x05000001), which keeps every version inside the same band. 10.00 (written
-0x10008001) was refused by FW 12.02 as corrupted, with create-fself's firmware version field unset
-and also set to the SDK version; it now runs as 0x10000001 with param.sfo declaring it (PUBTOOLINFO
-sdk_ver, SYSTEM_VER 0x10000000).
+The chain now runs SDK 1.00, these versions, and 10.00, written as real SDK version numbers:
+major.minor.patch with three-digit minor and patch, digit for digit, the released SDK x.y0 being
+x.y08.001 (0x01008001 ... 0x05008001, 0x10008001; Gran Turismo 7's executable carries 0x11008001,
+Unreal Engine's PS4 notes list 9.508.001, 10.008.011, 12.508.001). These are the values the runs used,
+except 1.00, which was create-fself's default 0x01000051 (the same band). param.sfo declares the
+highest (PUBTOOLINFO sdk_ver=10008001, SYSTEM_VER 0x10008000).
+
+10.00 is refused by FW 12.02 as corrupted: started from an older SDK by LoadExec and as eboot.bin from
+the menu; with the firmware version field unset and set; with the SDK written 0x10008001 and
+0x10000001. Not the cause either: HEN's generic authentication info, which Gran Turismo 7's
+fake-signed executable (SDK 11.00, no embedded authentication info) also runs with. Open: Gran
+Turismo 7's process parameter has 5 entries with _sceLibcParam, _sceKernelMemParam and
+_sceKernelFsParam (0x60 bytes); OpenOrbis' crt1.o writes 0x50 bytes with 3 entries, its pointers to
+the same three parameters filled in by relocations at load (they read 0 in the file). The 10.00
+executable is now linked with a 0x60, 5-entry process parameter (README).
 
 ## GPU protection on file mappings
 
