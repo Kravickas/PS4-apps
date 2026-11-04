@@ -224,7 +224,7 @@ SDK VERSION (CHAIN)
   every executable of the package loads them.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
-  sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE
+  sceSystemServiceLoadExec. The next is the newest version in the list whose results have no DONE
   line; dmem_chain.state counts the attempts per version (counted before the hand-over), and a version
   is passed over after two attempts without DONE. When all have run, a launch only says so; delete
   the results (or one of them) to run again.

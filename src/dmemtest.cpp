@@ -10403,11 +10403,12 @@ static void run_c() {
 
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. The next version to run is the
-// first in the list whose results (dmem_results_<SDK>.txt) have no DONE line, so versions already
-// run are not run again, also when the list changes. dmem_chain.state (next to the results) counts
-// the attempts per version, for this list only (its signature): the attempt is counted before the
-// hand-over, and a version is passed over after two attempts without DONE (an executable the system
-// refuses ends the app, so does a run that hangs the app).
+// newest in the list whose results (dmem_results_<SDK>.txt) have no DONE line, so versions already
+// run are not run again, also when the list changes, and eboot.bin's own version (the first entry)
+// runs last. dmem_chain.state (next to the results) counts the attempts per version, for this list
+// only (its signature): the attempt is counted before the hand-over, and a version is passed over
+// after two attempts without DONE (an executable the system refuses ends the app, so does a run that
+// hangs the app).
 
 static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
                                                   "/temp0/dmem_chain.state"};
@@ -10496,7 +10497,9 @@ static bool chain_run_done(int idx) {
 
 // The next chain entry to run, or -1 when every one is finished or has had its attempts.
 static int chain_pick(const ChainState* st) {
-    for (int k = 0; k < g_chain_n; k++)
+    // newest version first: a launch goes straight to the last entry not yet run (eboot.bin's own
+    // version, the first entry, runs last)
+    for (int k = g_chain_n - 1; k >= 0; k--)
         if (!chain_run_done(k) && st->attempts[k] < g_chain_max_attempts)
             return k;
     return -1;
