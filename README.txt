@@ -207,20 +207,22 @@ analysis/
                       and differing lines per section, SB/PS lines on one side only, TR differences
 
 SDK VERSION (CHAIN)
-  The PS4 kernel and libkernel pick some behaviour by the process SDK version, so which checks exist
-  is only known by running them on the console. The package holds this program at every SDK version
-  of src/sdk_chain.h: every major version 1.00 to 12.00 in steps of 0.50, and every released firmware
-  version between those where a rule changed (1.50-3.50 and 4.50-5.00). eboot.bin is create-fself's
-  default (SDK 1.00); the Makefile builds the others as sdk/eboot_<version>.bin with create-fself
-  -sdkver, and from 10.00 also -fwversion = the SDK version (the executable's firmware version field
-  at 0x338, 0 otherwise: with it unset, FW 12.02 refused the 10.00 executable as corrupted).
+  The PS4 kernel and libkernel pick some behaviour by the process SDK version. Running every released
+  version from 1.00 to 9.50 on FW 12.02 found rules changing at exactly 1.70, 2.00, 2.50, 3.00, 3.50
+  and 5.00, and nothing else (analysis/VERIFY.md). The package holds this program at SDK 1.00
+  (eboot.bin), at each of those versions, and at 10.00 (src/sdk_chain.h). Versions are written in the
+  release format (major, minor, patch 001; 5.05 is 05050001); the Makefile builds the others as
+  sdk/eboot_<version>.bin with create-fself -sdkver (an executable's only SDK field: it has no module
+  parameter). param.sfo declares the highest version in the package: PUBTOOLINFO sdk_ver, and
+  SYSTEM_VER (required system software) as that version without its patch part.
+  The modules in sce_module (libc.prx, libSceFios2.prx) declare SDK 1.00 in their module parameter;
+  every executable of the package loads them.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE
-  line, so versions already run are not run again, also after the list changes. dmem_chain.state
-  counts the attempts per version (for this list): the attempt is counted before the hand-over, and a
-  version is passed over after two attempts without DONE (an executable the system refuses ends the
-  app). When all have run, a launch only says so; delete the results (or one of them) to run again.
+  line; dmem_chain.state counts the attempts per version (counted before the hand-over), and a version
+  is passed over after two attempts without DONE. When all have run, a launch only says so; delete
+  the results (or one of them) to run again.
   From SDK 2.50, a fixed direct mapping over pool memory (T19) did not return on the PS4 and the
   console soft-locked (at 2.00 it is ENOMEM). Every probe that maps direct memory over pool memory
   (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.

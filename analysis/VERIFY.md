@@ -63,26 +63,25 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 
 ## Measured SDK differences
 
-| what | below | from | runs |
-|---|---|---|---|
-| fixed direct mapping over pool memory holding a committed block (T19) | SDK 2.00: ENOMEM | SDK 2.50: the call does not return, the PS4 soft-locks | SDK chain on FW 12.02: 0x02008001 finished, 0x02508001 stopped in T19 |
-| direct mappings merge with neighbours, also after mprotect / mtypeprotect back (CO4, CO10, FW2, TP2) | SDK 1.00, 1.50: never | SDK 2.00: yes | SDK chain on FW 12.02 |
-| address 0 with MAP_FIXED for MapFlexibleMemory, MapDirectMemory, ReserveVirtualRange (FW1, BT1/BT3/BT5 bit 4) | SDK 1.00, 1.50: accepted | SDK 2.00: EINVAL (shadPS4: from 1.70, memory_test) | SDK chain on FW 12.02 |
-| flexible memory available at start (FL1-FL6, DF4) | SDK 1.00, 1.50: 0x1B800000 | SDK 2.00: 0x1BB00000 | SDK chain on FW 12.02 |
-| address layout at start: first mappings at 0x20036C000 | SDK 1.00, 1.50 | SDK 2.00: 0x20001C000 (Y, K, MF, HB, J6, LA3, XC5, VQ9) | SDK chain on FW 12.02 |
-| MapDirectMemory of memory already mapped, aliasing off (B10) | SDK 2.00: 0 | SDK 2.50: EBUSY | SDK chain on FW 12.02 |
-| direct mappings in the system area 0x7F0000000 and above (VQ10, VQ11, VQ15, VQ17, LA1, LA2) | SDK 2.00: mapped | SDK 2.50: EINVAL | SDK chain on FW 12.02 |
-| MapDirectMemory with execute (EX2) | SDK 2.00: EACCES | SDK 2.50: EINVAL | SDK chain on FW 12.02 |
-| MapDirectMemory protection bits 8-31 (BT6) | SDK 2.00: EINVAL | SDK 2.50: accepted; SDK 3.00: EINVAL again | SDK chain on FW 12.02 |
-| fixed direct mapping at or past 0x1000000000, hint above (VQ10, FW4) | SDK 2.50: mapped | SDK 3.00: EINVAL / ENOMEM | SDK chain on FW 12.02 |
-| mapping more than the flexible budget (FW5) | SDK 3.00: EINVAL | SDK 3.50: ENOMEM | SDK chain on FW 12.02 |
-| largest pool reservation (U10) | SDK 4.50: 0x3FFE00000 | SDK 5.00: 0x5ED400000 | SDK chain on FW 12.02 |
-| pool cache counters around type 10 commits (Y4, Z1, M1, NU5) | SDK 4.50 | SDK 5.00: different counts | SDK chain on FW 12.02 |
+Every released firmware version from 1.00 to 9.50 run on FW 12.02 (SDK chain): rules change at
+exactly these versions and at no other.
 
-No line changes from SDK 5.50 to 9.50. The chain also runs every released firmware version between
-the versions in this table (README), which places each change to the released version.
+| from SDK | what changes | probes |
+|---|---|---|
+| 1.70 | address 0 with MAP_FIXED for MapFlexibleMemory, MapDirectMemory, ReserveVirtualRange: accepted below, EINVAL from | FW1, BT1, BT3, BT5 bit 4 |
+| 2.00 | direct mappings merge with neighbours, also after mprotect / mtypeprotect back; flexible memory available at start 0x1B800000 -> 0x1BB00000; layout at start | CO4, CO10, FW2, TP2; FL1-FL6, DF4; Y, K, MF, HB, J6, LA3, XC5, VQ9 |
+| 2.50 | MapDirectMemory goes through MapDirectMemory2 (not with MAP_STACK): memory already mapped without aliasing EBUSY; execute EINVAL (was EACCES); protection bits 0x100+ accepted; a fixed mapping reaching 0x7F0000000-0xFF0000000 EINVAL (a page ending at 0x7F0000000 included) | B10, EX2, BT6, VQ10-VQ13, VQ15, VQ17, LA1, LA2 |
+| 2.50 | fixed direct mapping over pool memory holding a committed block: ENOMEM below, does not return from 2.50 (the PS4 soft-locks; those probes are skipped from 2.50) | T19 |
+| 3.00 | a mapping at or reaching past 0xFC00000000: fixed EINVAL, search ENOMEM (was mapped); protection bits 0x100+ EINVAL again | FW4, VQ10, BT6 |
+| 3.50 | flexible budget exceeded: EINVAL -> ENOMEM | FW5 |
+| 5.00 | pool reservations of 16 GiB and more allowed (largest 0x3FFE00000 -> 0x5ED400000); the pool counters after it follow from that | U10; Y4, Z1, M1, NU5 |
 
-From SDK 2.50 every probe mapping direct memory over pool memory is skipped (README).
+The chain now runs SDK 1.00, these versions, and 10.00. Up to here versions were written 0xMMmm8001
+(and create-fself's default 0x01000051 for 1.00); from now on in the release format (major, minor,
+patch 001: 0x01000001 ... 0x05000001), which keeps every version inside the same band. 10.00 (written
+0x10008001) was refused by FW 12.02 as corrupted, with create-fself's firmware version field unset
+and also set to the SDK version; it now runs as 0x10000001 with param.sfo declaring it (PUBTOOLINFO
+sdk_ver, SYSTEM_VER 0x10000000).
 
 ## GPU protection on file mappings
 

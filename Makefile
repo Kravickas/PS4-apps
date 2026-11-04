@@ -61,18 +61,25 @@ $(INTDIR)/%.o: $(SRCDIR)/%.s | $(INTDIR)
 	$(CC) $(CFLAGS) -o $@ $<
 eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(OUT_ELF) $(LDFLAGS)
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001 $(if $(SDK),-sdkver $(SDK))
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(OUT_OELF) --eboot "eboot.bin" --paid 0x3100000000000001 -sdkver $(EBOOT_SDK)
 
 # The same program at every other SDK version of src/sdk_chain.h (the first is eboot.bin's default):
-# each run hands over to the next with sceSystemServiceLoadExec. From SDK 10.00 the executable also
-# gets its firmware version field (-fwversion, 0 otherwise) set to its SDK version: with it unset, FW
-# 12.02 refused the 10.00 executable as corrupted.
-SDK_CHAIN   := $(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h))
+# each run hands over to the next with sceSystemServiceLoadExec. An executable has no module
+# parameter: its SDK version is the process parameter only (create-fself -sdkver), in the release
+# format of src/sdk_chain.h.
+SDK_LIST    := $(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h)
+SDK_CHAIN   := $(wordlist 2,999,$(SDK_LIST))
+# eboot.bin: the first version of the list (make SDK=0x... for another one)
+EBOOT_SDK   := $(if $(SDK),$(SDK),$(firstword $(SDK_LIST)))
+# param.sfo declares the highest version in the package: PUBTOOLINFO sdk_ver in the executables'
+# format, SYSTEM_VER (required system software) the same version without its patch part
+SDK_TOP     := $(lastword $(SDK_LIST))
+SYSTEM_VER  := $(shell printf '%d' $$(( $(SDK_TOP) & 0xFFFFF000 )))
 SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
 
 sdk/eboot_%.bin: eboot.bin
 	@mkdir -p sdk
-	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $* $(if $(filter 0x1%,$*),-fwversion $*)
+	$(PKG)/create-fself -in=$(OUT_ELF) -out=$(INTDIR)/sdk_$*.oelf --eboot "$@" --paid 0x3100000000000001 -sdkver $*
 
 sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_new $@
@@ -82,7 +89,8 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
 	$(PKG)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
-	$(PKG)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value 0
+	$(PKG)/PkgTool.Core sfo_setentry $@ PUBTOOLINFO --type Utf8 --maxsize 512 --value 'sdk_ver=$(patsubst 0x%,%,$(SDK_TOP))'
+	$(PKG)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value $(SYSTEM_VER)
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
