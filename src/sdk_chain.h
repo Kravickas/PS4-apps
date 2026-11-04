@@ -6,14 +6,11 @@
 // parameter (create-fself -sdkver), and param.sfo declares the last one.
 #pragma once
 #include <stdint.h>
+// Experiment: only 10.00, as eboot.bin itself (started from the menu, no LoadExec). Every 10.00
+// attempt so far was a hand-over from an older SDK version and was refused as corrupted; this shows
+// whether the executable itself is refused. The full list (1.00, 1.70, 2.00, 2.50, 3.00, 3.50,
+// 5.00, 10.00) is restored afterwards.
 static const uint32_t g_chain_sdks[] = {
-    0x01000001,
-    0x01700001,
-    0x02000001,
-    0x02500001,
-    0x03000001,
-    0x03500001,
-    0x05000001,
     0x10000001,
 };
 static const int g_chain_n = (int)(sizeof(g_chain_sdks) / sizeof(g_chain_sdks[0]));
