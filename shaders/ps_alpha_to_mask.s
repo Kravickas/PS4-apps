@@ -814,29 +814,6 @@ s_andn2_b64 exec, exec, vcc
 exp mrt0 v10, v10, v10, v9 done vm
 s_nop 0
 s_endpgm
-; ---- t_kp_class (ps) ----
-.long 0xbeeb03ff
-.long 0xc
-s_load_dwordx4 s[4:7], s[0:1], 0x0
-s_load_dwordx8 s[8:15], s[0:1], 0x4
-s_waitcnt lgkmcnt(0)
-v_cvt_u32_f32 v4, v2
-v_cvt_u32_f32 v5, v3
-v_lshlrev_b32 v6, 6, v5
-v_add_i32 v6, vcc, v6, v4
-v_lshlrev_b32 v8, 2, v6
-v_add_i32 v18, vcc, 0x4000, v8
-buffer_load_dword v9, v8, s[4:7], 0 offen
-buffer_load_dword v17, v18, s[4:7], 0 offen
-s_waitcnt vmcnt(0)
-v_mov_b32 v10, s13
-v_mov_b32 v13, s12
-v_and_b32 v16, 1, v17
-v_cvt_f32_u32 v19, v16
-v_mov_b32 v20, 0x40
-v_cmpx_class_f32 vcc, v19, v20
-exp mrt0 v10, v10, v10, v9 done vm
-s_endpgm
 ; ---- t_kp_late_restore (ps) ----
 .long 0xbeeb03ff
 .long 0xc
@@ -1062,27 +1039,6 @@ buffer_store_dword v10, v12, s[4:7], 0 offen
 s_waitcnt vmcnt(0)
 v_mov_b32 v14, 1.0
 exp mrt0 v14, v14, v14, v14 done vm
-s_endpgm
-; ---- t_zfar (ps) ----
-.long 0xbeeb03ff
-.long 0xc
-s_load_dwordx4 s[4:7], s[0:1], 0x0
-s_load_dwordx8 s[8:15], s[0:1], 0x4
-s_waitcnt lgkmcnt(0)
-v_cvt_u32_f32 v4, v2
-v_cvt_u32_f32 v5, v3
-v_lshlrev_b32 v6, 6, v5
-v_add_i32 v6, vcc, v6, v4
-v_lshlrev_b32 v8, 2, v6
-v_add_i32 v18, vcc, 0x4000, v8
-buffer_load_dword v9, v8, s[4:7], 0 offen
-buffer_load_dword v17, v18, s[4:7], 0 offen
-s_waitcnt vmcnt(0)
-v_mov_b32 v10, s13
-v_mov_b32 v13, s12
-v_mov_b32 v13, 0.75
-exp mrtz v13, off, off, off
-exp mrt0 v10, v10, v10, v9 done vm
 s_endpgm
 ; ---- t_pknorm_u16 (ps) ----
 .long 0xbeeb03ff

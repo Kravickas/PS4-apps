@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-23"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-24"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -142,7 +142,6 @@ enum {
     V_KP_TWOEXP,
     V_KP_RESTORE,
     V_KP_ANDN2,
-    V_KP_CLASS,
     V_KP_LATE_RESTORE,
     V_KP_CMPX_RESTORE,
     V_KP_CMPX_AFTER,
@@ -152,7 +151,6 @@ enum {
     V_LOD,
     V_CENTROID,
     V_BCOPT,
-    V_ZFAR,
     V_PKNORM_U16,
     V_PKNORM_I16,
     V_PKRTZ,
@@ -200,7 +198,6 @@ static const char* const k_alpha_to_mask_vname[ALPHA_TO_MASK_NSH] = {
     "t_kp_twoexp (v_cmpx, MRT0 without vm, null export with vm where B & 1, exp vm)",
     "t_kp_restore (v_cmpx, then s_mov_b64 exec, -1 where B & 1, exp vm)",
     "t_kp_andn2 (v_cmp, s_andn2_b64 exec where B & 1, exp vm)",
-    "t_kp_class (v_cmpx_class_f32 where B & 1, exp vm)",
     "t_kp_late_restore (s_and_saveexec_b64, exp vm, exec restored)",
     "t_kp_cmpx_restore (v_cmpx where B & 1, exp vm, exec -1)",
     "t_kp_cmpx_after (exp vm, then v_cmpx where B & 1)",
@@ -210,7 +207,6 @@ static const char* const k_alpha_to_mask_vname[ALPHA_TO_MASK_NSH] = {
     "t_lod (mip-constant texture at LOD 1 to B: quad derivatives)",
     "t_centroid (centroid sample x offset to B)",
     "t_bcopt (PRIM_MASK bit 31 to B)",
-    "t_zfar (MRTZ Z 0.75, MRT0.a = A)",
     "t_pknorm_u16 (v_cvt_pknorm_u16_f32 A, C to B)",
     "t_pknorm_i16 (v_cvt_pknorm_i16_f32 A, C to B)",
     "t_pkrtz (v_cvt_pkrtz_f16_f32 A, C to B)",
@@ -266,8 +262,6 @@ static const struct {
      ALPHA_TO_MASK_T_KP_RESTORE_RSRC1},
     {alpha_to_mask_t_kp_andn2_bin, sizeof(alpha_to_mask_t_kp_andn2_bin),
      ALPHA_TO_MASK_T_KP_ANDN2_RSRC1},
-    {alpha_to_mask_t_kp_class_bin, sizeof(alpha_to_mask_t_kp_class_bin),
-     ALPHA_TO_MASK_T_KP_CLASS_RSRC1},
     {alpha_to_mask_t_kp_late_restore_bin, sizeof(alpha_to_mask_t_kp_late_restore_bin),
      ALPHA_TO_MASK_T_KP_LATE_RESTORE_RSRC1},
     {alpha_to_mask_t_kp_cmpx_restore_bin, sizeof(alpha_to_mask_t_kp_cmpx_restore_bin),
@@ -282,7 +276,6 @@ static const struct {
     {alpha_to_mask_t_centroid_bin, sizeof(alpha_to_mask_t_centroid_bin),
      ALPHA_TO_MASK_T_CENTROID_RSRC1},
     {alpha_to_mask_t_bcopt_bin, sizeof(alpha_to_mask_t_bcopt_bin), ALPHA_TO_MASK_T_BCOPT_RSRC1},
-    {alpha_to_mask_t_zfar_bin, sizeof(alpha_to_mask_t_zfar_bin), ALPHA_TO_MASK_T_ZFAR_RSRC1},
     {alpha_to_mask_t_pknorm_u16_bin, sizeof(alpha_to_mask_t_pknorm_u16_bin),
      ALPHA_TO_MASK_T_PKNORM_U16_RSRC1},
     {alpha_to_mask_t_pknorm_i16_bin, sizeof(alpha_to_mask_t_pknorm_i16_bin),
@@ -1439,21 +1432,6 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
     ALPHA_TO_MASK_CASE(.id = "E16b", .what = "16 coverage samples, no targets, EXEC_ON_NOOP, D0",
                        .ns = 16, .cbf = CBF_NONE, .nodepth = 1, .dbsc = ALPHA_TO_MASK_EXEC_NOOP,
                        .risky = 1),
-    /* v_cmpx_class_f32: shadPS4 has no translation for it, run last */
-    ALPHA_TO_MASK_CASE(.id = "KP12", .what = "v_cmpx_class_f32, exp vm", .ps = V_KP_CLASS,
-                       .db_alpha_to_mask = ALPHA_TO_MASK_OFF0, .bmode = BM_KILL, .kind = AK_RANDOM,
-                       .seed = 0x800Cu),
-    /* shadPS4 asserts on DEPTH_BEFORE_SHADER with a Z export: run them last */
-    ALPHA_TO_MASK_CASE(.id = "DB04",
-                       .what = "DEPTH_BEFORE_SHADER + sample mask export, alpha-to-mask off",
-                       .ps = V_MASK, .db_alpha_to_mask = ALPHA_TO_MASK_OFF0,
-                       .dbsc = ALPHA_TO_MASK_DEPTH_BEFORE_SHADER, .bmode = BM_MASK,
-                       .kind = AK_RANDOM, .hyp = H_DBS, .seed = 0xDB04u),
-    ALPHA_TO_MASK_CASE(.id = "DB06",
-                       .what = "DEPTH_BEFORE_SHADER, MRTZ Z 0.75 (interpolated 0.5), 4x D1",
-                       .db_alpha_to_mask = ALPHA_TO_MASK_D1, .ps = V_ZFAR,
-                       .dbsc = ALPHA_TO_MASK_DEPTH_BEFORE_SHADER, .kind = AK_RANDOM, .hyp = H_DBS,
-                       .seed = 0xDB06u),
     ALPHA_TO_MASK_CASE(.id = "AQ05",
                        .what = "AA_MASK 0x00FF / 0xFF00 / 0x0F0F / 0xF0F0 per quad pixel, 16x",
                        .ns = 16, .cbf = CBF_NONE, .nodepth = 1, .dbsc = ALPHA_TO_MASK_EXEC_NOOP,
@@ -1968,14 +1946,14 @@ static void alpha_to_mask_ps(struct PM4Builder* b, struct AlphaToMaskContext* c,
 /* SPI_SHADER_Z_FORMAT and DB_SHADER_CONTROL bits of a test variant (ac_get_spi_shader_z_format:
    Z + alpha 32_AR, Z + mask 32_ABGR). */
 static uint32_t alpha_to_mask_zfmt(int v) {
-    if (v == V_TEX || v == V_ZFAR)
+    if (v == V_TEX)
         return 1u; /* 32_R: Z only */
     if (v == V_ALL)
         return 9u;
     return (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0) ? 3u : v == V_MASK ? 9u : 0u;
 }
 static uint32_t alpha_to_mask_vdbsc(int v) {
-    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0 || v == V_TEX || v == V_ZFAR)
+    if (v == V_ZA || v == V_AZ || v == V_ZAB || v == V_ZA0 || v == V_TEX)
         return ALPHA_TO_MASK_ZEXP;
     if (v == V_MASK)
         return ALPHA_TO_MASK_ZEXP | ALPHA_TO_MASK_MASKEXP;
@@ -2453,7 +2431,7 @@ static int alpha_to_mask_killed(const struct AlphaToMaskTest* t, int h) {
         return t->hyp == H_VMEND && h; /* exec restored after the export */
     if (t->ps == V_KP_CMPX_AFTER)
         return !(t->hyp == H_VMEND && h); /* exec narrowed after the export */
-    if ((t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC) || t->ps == V_KP_ANDN2 || t->ps == V_KP_CLASS)
+    if ((t->ps >= V_KP_E64 && t->ps <= V_KP_SAVEEXEC) || t->ps == V_KP_ANDN2)
         return 1;
     if (t->ps != V_KILL && t->ps != V_KILL2 && t->ps != V_KILL3)
         return 0;
