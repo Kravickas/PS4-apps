@@ -214,7 +214,11 @@ SDK VERSION (CHAIN)
   SDK versions 10.00 to 12.00. eboot.bin is create-fself's default (SDK 1.00); the Makefile builds the
   others as sdk/eboot_<version>.bin with create-fself -sdkver. It links with --apply-dynamic-relocs:
   lld otherwise leaves 0 in every field a relocation writes (the value is only in the relocation's
-  addend), and FW 12.02 refuses such an executable from SDK 10.00 on as corrupted.
+  addend), and FW 12.02 refuses such an executable from SDK 10.00 on as corrupted. It also refuses
+  an executable from 10.00 on whose modules (sce_module: libc.prx, libSceFios2.prx) declare the old
+  SDK version OpenOrbis' have (0x1000051): the package gets copies with their module parameter set to
+  the highest SDK version in the package (tools/set_module_sdk.py, packed under the same paths with
+  tools/make_gp4.py source=target).
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE

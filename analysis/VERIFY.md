@@ -87,6 +87,12 @@ writes it. Found by shrinking Gran Turismo 7's fake-signed executable toward our
 between the two (our program with Gran Turismo 7's linking data loads; with only its relocations
 switched off it loads).
 
+The same applies to the bundled modules: an executable from SDK 10.00 whose libc.prx / libSceFios2.prx
+declare OpenOrbis' SDK 0x1000051 in their module parameter is refused too. Isolated with five packages,
+each SDK 10.00 with the relocation fix and one more change: only the modules' SDK field set to 10.00
+runs; launched directly, the 0x60 process parameter, param.sfo SYSTEM_VER / FORMAT / PUBTOOLMINVER and
+no libSceLibcInternal are each refused. The package sets the modules to its highest SDK version.
+
 ## GPU protection on file mappings
 
 shadPS4's MapFile asserted, noting that on real hardware GPU file mappings crash the system. Round 69
