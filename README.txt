@@ -207,37 +207,21 @@ analysis/
                       and differing lines per section, SB/PS lines on one side only, TR differences
 
 SDK VERSION (CHAIN)
-  The PS4 kernel and libkernel pick some behaviour by the process SDK version. Running every released
-  version from 1.00 to 9.50 on FW 12.02 found rules changing at exactly 1.70, 2.00, 2.50, 3.00, 3.50
-  and 5.00, and nothing else (analysis/VERIFY.md). The package holds this program at SDK 1.00
-  (eboot.bin), at each of those versions, and at the SDK versions 10.00, 10.50, 11.00, 11.50 and
-  12.00 (src/sdk_chain.h; 12.50 is newer than the console's FW 12.02). A PS4 SDK version is
-  major.minor.patch with a three-digit minor and patch, stored digit for digit; the released SDK x.y0
-  is x.y08.001 (11.008.001 = 11008001 in Gran Turismo 7's executable; Unreal Engine's PS4 notes list
-  9.508.001, 10.008.011, 12.508.001 ...). The Makefile builds the others as
-  sdk/eboot_<version>.bin with create-fself -sdkver (an executable's only SDK field: it has no module
-  parameter). param.sfo follows Gran Turismo 7's (SDK 11.00, runs on FW 12.02): SYSTEM_VER (required
-  system software) is the highest version in the package without its patch part, FORMAT "obs",
-  PUBTOOLMINVER 0x02990000. GT7's flags that change how an app runs (ATTRIBUTE, ATTRIBUTE2, ...) are
-  left out, as they could change what DmemTest measures.
-  From SDK 10.00 the executable is linked with a copy of crt1.o whose process parameter has the layout
-  of newer SDKs: 0x60 bytes and 5 entries, as Gran Turismo 7's (SDK 11.00), instead of OpenOrbis'
-  0x50 bytes and 3 entries (tools/procparam60.py; the two added fields are 0, as in Gran Turismo 7).
-  The modules in sce_module (libc.prx, libSceFios2.prx) declare SDK 1.00 in their module parameter.
-  The package gets copies with it set to the first version from 10.00 (tools/set_module_sdk.py, both
-  stored copies of the field; nothing else changes), packed under the same paths (tools/make_gp4.py
-  takes source=target); every version below 10.00 is measured already.
+  The PS4 kernel and libkernel pick some behaviour by the process SDK version, so which checks exist
+  is only known by running them on the console. The package holds this program at every SDK version
+  of src/sdk_chain.h: SDK 1.00, every released version at which a rule changes on FW 12.02 (1.70,
+  2.00, 2.50, 3.00, 3.50, 5.00; found by running every released version from 1.00 to 9.50), and the
+  SDK versions 10.00 to 12.00. eboot.bin is create-fself's default (SDK 1.00); the Makefile builds the
+  others as sdk/eboot_<version>.bin with create-fself -sdkver. It links with --apply-dynamic-relocs:
+  lld otherwise leaves 0 in every field a relocation writes (the value is only in the relocation's
+  addend), and FW 12.02 refuses such an executable from SDK 10.00 on as corrupted.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
-  sceSystemServiceLoadExec. The next is the newest version in the list whose results have no DONE
-  line; dmem_chain.state counts the attempts per version (counted before the hand-over), and a version
-  is passed over after two attempts without DONE. When all have run, a launch only says so; delete
-  the results (or one of them) to run again.
-  From SDK 10.00 the system refuses every executable as corrupted through LoadExec, which ends the
-  app without a reason. Every executable writes how far it got to dmem_exec.txt (next to the results,
-  appended, never emptied): "early" during the C runtime's start (a constructor, before main) and
-  "main" as main starts. (execve from the app soft-locked the PS4 and is not used. The kernel's message
-  buffer is closed to a homebrew: sysctl kern.msgbuf EPERM, /dev/klog ENOENT.)
+  sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE
+  line, so versions already run are not run again, also after the list changes. dmem_chain.state
+  counts the attempts per version (for this list): the attempt is counted before the hand-over, and a
+  version is passed over after two attempts without DONE (an executable the system refuses ends the
+  app). When all have run, a launch only says so; delete the results (or one of them) to run again.
   From SDK 2.50, a fixed direct mapping over pool memory (T19) did not return on the PS4 and the
   console soft-locked (at 2.00 it is ENOMEM). Every probe that maps direct memory over pool memory
   (T19, U11 rsv, W4, X1-X7, J5) prints SKIP with that reason from SDK 2.50 on.

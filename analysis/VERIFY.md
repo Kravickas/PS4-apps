@@ -63,8 +63,8 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 
 ## Measured SDK differences
 
-Every released firmware version from 1.00 to 9.50 run on FW 12.02 (SDK chain): rules change at
-exactly these versions and at no other.
+Every released firmware version from 1.00 to 9.50, and 10.00, run on FW 12.02 (SDK chain): rules
+change at exactly these versions and at no other.
 
 | from SDK | what changes | probes |
 |---|---|---|
@@ -75,35 +75,17 @@ exactly these versions and at no other.
 | 3.00 | a mapping at or reaching past 0xFC00000000: fixed EINVAL, search ENOMEM (was mapped); protection bits 0x100+ EINVAL again | FW4, VQ10, BT6 |
 | 3.50 | flexible budget exceeded: EINVAL -> ENOMEM | FW5 |
 | 5.00 | pool reservations of 16 GiB and more allowed (largest 0x3FFE00000 -> 0x5ED400000); the pool counters after it follow from that | U10; Y4, Z1, M1, NU5 |
+| 10.00 | sceKernelQueryMemoryProtection on pool memory reports the block itself: its range (0x10000-0x20000 instead of the reservation 0-0x200000) and its own protection (1 / 3 / 1 / 13 / 30 instead of 0x33 for every page; uncommitted 0); fpPS4 kern's only 10.00 rule | PG1, PG4, CV40-CV94, PB2, PB3, EX5 |
 
-The chain now runs SDK 1.00, these versions, and 10.00, written as real SDK version numbers:
-major.minor.patch with three-digit minor and patch, digit for digit, the released SDK x.y0 being
-x.y08.001 (0x01008001 ... 0x05008001, 0x10008001; Gran Turismo 7's executable carries 0x11008001,
-Unreal Engine's PS4 notes list 9.508.001, 10.008.011, 12.508.001). These are the values the runs used,
-except 1.00, which was create-fself's default 0x01000051 (the same band). param.sfo declares the
-highest (PUBTOOLINFO sdk_ver=10008001, SYSTEM_VER 0x10008000).
+The chain runs SDK 1.00, these versions, and 10.00 to 12.00.
 
-10.00 is refused by FW 12.02 as corrupted: started from an older SDK by LoadExec and as eboot.bin from
-the menu; with the firmware version field unset and set; with the SDK written 0x10008001 and
-0x10000001. Not the cause either: HEN's generic authentication info, which Gran Turismo 7's
-fake-signed executable (SDK 11.00, no embedded authentication info) also runs with. Open: Gran
-Turismo 7's process parameter has 5 entries with _sceLibcParam, _sceKernelMemParam and
-_sceKernelFsParam (0x60 bytes); OpenOrbis' crt1.o writes 0x50 bytes with 3 entries, its pointers to
-the same three parameters filled in by relocations at load (they read 0 in the file). The 10.00
-executable is now linked with a 0x60, 5-entry process parameter (README).
-Refused with that too. param.sfo next (red_prig: "perhaps more data is needed in param.sfo"): Gran
-Turismo 7's has SYSTEM_VER 0x11008000 (our derivation), no PUBTOOLINFO, and FORMAT "obs" and
-PUBTOOLMINVER 0x02990000, which ours lacked; ours now has those two and no PUBTOOLINFO.
-Refused with that too (SDK 10.00, 10.50, 11.00, 11.50, 12.00). Next: the bundled OpenOrbis modules
-(libc.prx, libSceFios2.prx), module parameter SDK 1.00, now packaged with it set to 10.00.
-Refused with that too. Now the app finds the reason itself: execve from SDK 10.00 (the kernel's
-answer, without the system launcher) and the kernel's message buffer at every launch, in
-dmem_exec.txt (README).
-Kernel log from the app: sysctl kern.msgbuf EPERM, /dev/klog ENOENT (not readable for a homebrew).
-execve of the SDK 12.00 executable (from the SDK 1.00 one) did not return, so the kernel did not
-refuse the call, and the 12.00 image never wrote its first line: it ends while starting, before our
-code. With an execve control (5.00 -> target) and "early"/"main" markers, the app soft-locked the
-PS4 (could not be closed until the console turned off): execve is no longer used.
+Executables from SDK 10.00: FW 12.02 refuses them as corrupted, before any of their code runs, when
+the fields their R_X86_64_RELATIVE relocations write hold 0 in the file. lld (OpenOrbis' linker; its
+samples link without the option, and create-fself copies only offset and addend) leaves 0 there;
+Sony's linker writes the value (Gran Turismo 7: 472171 of 472171). Linking with --apply-dynamic-relocs
+writes it. Found by shrinking Gran Turismo 7's fake-signed executable toward ours and swapping parts
+between the two (our program with Gran Turismo 7's linking data loads; with only its relocations
+switched off it loads).
 
 ## GPU protection on file mappings
 

@@ -39,13 +39,7 @@ def main():
     ap.add_argument("--content-id", required=True)
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
-    # an entry "source=target" packs the file at source under target (otherwise both are the path)
-    pairs = []
-    for f in a.files:
-        f = f.replace("\\", "/")
-        orig, _, targ = f.partition("=")
-        pairs.append((orig, targ or orig))
-    files = [targ for _, targ in pairs]
+    files = [f.replace("\\", "/") for f in a.files]
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     x = ['<?xml version="1.0"?>',
          '<psproject xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
@@ -66,8 +60,8 @@ def main():
          "\t\t</chunk_info>",
          "\t</volume>",
          '\t<files img_no="0">']
-    for orig, targ in pairs:
-        x.append("\t\t<file targ_path=%s orig_path=%s />" % (quoteattr(targ), quoteattr(orig)))
+    for f in files:
+        x.append("\t\t<file targ_path=%s orig_path=%s />" % (quoteattr(f), quoteattr(f)))
     x.append("\t</files>")
     x.append("\t<rootdir>")
     emit(tree(files), 2, x)

@@ -10401,59 +10401,13 @@ static void run_c() {
     release_all(hi, 1);
 }
 
-// ---- diagnostics for executables the system refuses --------------------------------------------
-// dmem_exec.txt (in /data, or /temp0) is appended to and never emptied. Through LoadExec the system
-// refused every executable from SDK 10.00 as corrupted, which ends the app without a reason. Every
-// executable writes where it got to: "early" during the C runtime's start (a constructor, before
-// main) and "main" as main starts. (execve from the app soft-locked the PS4: not used. The kernel's
-// message buffer is closed to a homebrew: sysctl kern.msgbuf EPERM, /dev/klog ENOENT.)
-static const char* const g_diag_paths[] = {"/data/dmem_exec.txt", "/temp0/dmem_exec.txt"};
-
-static void diag_write(const char* data, long len);
-
-static void diag_marker(const char* where, const char* extra) {
-    uint32_t sdk = 0;
-    sceKernelGetCompiledSdkVersion(&sdk);
-    char line[200];
-    int n = put_str(line, 0, where);
-    n = put_str(line, n, ": process SDK ");
-    n = put_hex8(line, n, sdk);
-    if (extra) {
-        n = put_str(line, n, " ");
-        int k = 0;
-        while (extra[k] && n < 190)
-            line[n++] = extra[k++];
-    }
-    n = put_str(line, n, "\n");
-    diag_write(line, n);
-}
-
-// runs during the C runtime's start, before main
-__attribute__((constructor)) static void diag_early_marker() {
-    diag_marker("early", nullptr);
-}
-
-static void diag_write(const char* data, long len) {
-    for (const char* path : g_diag_paths) {
-        const int fd = sceKernelOpen(path, 0x0209, 0777);
-        if (fd < 0)
-            continue;
-        sceKernelWrite(fd, data, (unsigned long)len);
-        sceKernelFsync(fd);
-        sceKernelClose(fd);
-        return;
-    }
-}
-
-
 // ---- SDK chain --------------------------------------------------------------------------------
 // The package holds this program at every SDK version of sdk_chain.h. The next version to run is the
-// newest in the list whose results (dmem_results_<SDK>.txt) have no DONE line, so versions already
-// run are not run again, also when the list changes, and eboot.bin's own version (the first entry)
-// runs last. dmem_chain.state (next to the results) counts the attempts per version, for this list
-// only (its signature): the attempt is counted before the hand-over, and a version is passed over
-// after two attempts without DONE (an executable the system refuses ends the app, so does a run that
-// hangs the app).
+// first in the list whose results (dmem_results_<SDK>.txt) have no DONE line, so versions already
+// run are not run again, also when the list changes. dmem_chain.state (next to the results) counts
+// the attempts per version, for this list only (its signature): the attempt is counted before the
+// hand-over, and a version is passed over after two attempts without DONE (an executable the system
+// refuses ends the app, so does a run that hangs the app).
 
 static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
                                                   "/temp0/dmem_chain.state"};
@@ -10464,13 +10418,8 @@ struct ChainState {
     unsigned char attempts[128];
 };
 
-// Bumped whenever how the chain hands over changes: a package with a new revision starts with fresh
-// attempt counts (revision 2: execve first from SDK 10.00; 3: execve control and markers; 4: no
-// execve, which soft-locked the PS4).
-static const uint32_t g_chain_revision = 4;
-
 static uint32_t chain_signature() {
-    uint32_t h = 2166136261u ^ g_chain_revision;
+    uint32_t h = 2166136261u;
     for (int i = 0; i < g_chain_n; i++) {
         h = (h ^ g_chain_sdks[i]) * 16777619u;
     }
@@ -10547,9 +10496,7 @@ static bool chain_run_done(int idx) {
 
 // The next chain entry to run, or -1 when every one is finished or has had its attempts.
 static int chain_pick(const ChainState* st) {
-    // newest version first: a launch goes straight to the last entry not yet run (eboot.bin's own
-    // version, the first entry, runs last)
-    for (int k = g_chain_n - 1; k >= 0; k--)
+    for (int k = 0; k < g_chain_n; k++)
         if (!chain_run_done(k) && st->attempts[k] < g_chain_max_attempts)
             return k;
     return -1;
@@ -10588,9 +10535,7 @@ static void idle_forever() {
         sceKernelUsleep(1000000);
 }
 
-
-int main(int argc, char** argv) {
-    diag_marker("main", argc >= 2 && argv && argv[1] ? argv[1] : "(no argument)");
+int main(void) {
     g_screen.init();
     // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
     // progress goes on with the next SDK version, and a finished chain is not run over again.
@@ -10601,16 +10546,14 @@ int main(int argc, char** argv) {
     ChainState chain;
     chain_state_read(&chain);
     if (own == 0) {
-        // chain_exec returns only when the executable was refused: then the next one is tried
-        int pick = chain_pick(&chain);
-        while (pick > 0) {
-            chain_exec(pick);
-            chain_state_read(&chain);
-            pick = chain_pick(&chain);
-        }
+        const int pick = chain_pick(&chain);
         if (pick < 0) {
             say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
             say("next to them to run the chain again.");
+            idle_forever();
+        }
+        if (pick > 0) {
+            chain_exec(pick);
             idle_forever();
         }
     }
@@ -10795,16 +10738,15 @@ int main(int argc, char** argv) {
     say("===== DONE =====");
     if (own >= 0) {
         chain_state_read(&chain);
-        int pick = chain_pick(&chain);
-        while (pick >= 0) {
+        const int pick = chain_pick(&chain);
+        if (pick >= 0) {
             Line l;
             l.s("SDK chain: run ").dec(own + 1).s(" of ").dec(g_chain_n).s(" done, next SDK version ").hex(g_chain_sdks[pick]);
             l.end();
             chain_exec(pick);
-            chain_state_read(&chain);
-            pick = chain_pick(&chain);
+        } else {
+            say("SDK chain: all runs are done");
         }
-        say("SDK chain: all runs are done");
     }
     idle_forever();
     return 0;
