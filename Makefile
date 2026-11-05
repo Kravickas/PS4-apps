@@ -90,10 +90,10 @@ sce_sys/param.sfo: Makefile
 
 # ---- No assets: the test draws its own text. ----
 # The modules (libc.prx, libSceFios2.prx) go into the package with their module parameter set to the
-# highest SDK version of the package (tools/set_module_sdk.py; OpenOrbis' declare 0x1000051): FW
-# 12.02 refuses an executable from SDK 10.00 on whose modules declare the old version (measured: with
-# both relocation values written and the modules at 10.00 it runs, with either missing it is refused).
-MODULE_SDK  := $(lastword $(SDK_CHAIN))
+# lowest SDK version from 10.00 in the package (tools/set_module_sdk.py; OpenOrbis' declare 0x1000051).
+# Measured on FW 12.02 with an SDK 10.00 executable and its relocation values written: modules at
+# 10.00 run; at OpenOrbis' 0x1000051 and at 12.00 it is refused as corrupted.
+MODULE_SDK  := $(firstword $(filter 0x1%,$(SDK_CHAIN)))
 PKG_MODULES := $(addprefix $(INTDIR)/,$(LIBMODULES))
 
 $(INTDIR)/sce_module/%: sce_module/% tools/set_module_sdk.py

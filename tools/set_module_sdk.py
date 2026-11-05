@@ -6,7 +6,7 @@ libc.prx and libSceFios2.prx it is SDK 1.00 (0x1000051), stored twice: two LOAD 
 address (0xc000) hold it, which the SCE_MODULE_PARAM segment points at. Every copy must hold the same
 value and every copy is changed; nothing else changes. HEN does not check a fake SELF's digest.
 
-usage: set_module_sdk.py in.prx out.prx 0x12008001
+usage: set_module_sdk.py in.prx out.prx 0x10008001
 """
 import struct
 import sys

@@ -216,8 +216,9 @@ SDK VERSION (CHAIN)
   lld otherwise leaves 0 in every field a relocation writes (the value is only in the relocation's
   addend), and FW 12.02 refuses such an executable from SDK 10.00 on as corrupted. It also refuses
   an executable from 10.00 on whose modules (sce_module: libc.prx, libSceFios2.prx) declare the old
-  SDK version OpenOrbis' have (0x1000051): the package gets copies with their module parameter set to
-  the highest SDK version in the package (tools/set_module_sdk.py, packed under the same paths with
+  SDK version OpenOrbis' have (0x1000051), and also when they declare a newer one than the executable
+  (12.00 modules with a 10.00 executable): the package gets copies with their module parameter set to
+  the lowest SDK version from 10.00 in the package (tools/set_module_sdk.py, packed under the same paths with
   tools/make_gp4.py source=target).
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with

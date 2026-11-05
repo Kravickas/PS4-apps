@@ -91,7 +91,8 @@ The same applies to the bundled modules: an executable from SDK 10.00 whose libc
 declare OpenOrbis' SDK 0x1000051 in their module parameter is refused too. Isolated with five packages,
 each SDK 10.00 with the relocation fix and one more change: only the modules' SDK field set to 10.00
 runs; launched directly, the 0x60 process parameter, param.sfo SYSTEM_VER / FORMAT / PUBTOOLMINVER and
-no libSceLibcInternal are each refused. The package sets the modules to its highest SDK version.
+no libSceLibcInternal are each refused. With the modules at 12.00 the SDK 10.00 executable is refused
+again, so the package sets them to its lowest SDK version from 10.00 (10.00).
 
 ## GPU protection on file mappings
 
