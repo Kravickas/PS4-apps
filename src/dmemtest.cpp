@@ -8,7 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef DMEM_SDK10
+// the SDK 10+ package (make SDK10=1): its own versions and chain state
+#include "sdk_chain10.h"
+#define DMEM_CHAIN_STATE "dmem_chain10.state"
+#else
 #include "sdk_chain.h"
+#define DMEM_CHAIN_STATE "dmem_chain.state"
+#endif
 
 extern "C" {
 // the process SDK version (from the executable's process parameter): the kernel picks some
@@ -10409,8 +10416,8 @@ static void run_c() {
 // hand-over, and a version is passed over after two attempts without DONE (an executable the system
 // refuses ends the app, so does a run that hangs the app).
 
-static const char* const g_chain_state_paths[] = {"/data/dmem_chain.state",
-                                                  "/temp0/dmem_chain.state"};
+static const char* const g_chain_state_paths[] = {"/data/" DMEM_CHAIN_STATE,
+                                                  "/temp0/" DMEM_CHAIN_STATE};
 static const int g_chain_max_attempts = 2;
 
 struct ChainState {
@@ -10548,7 +10555,7 @@ int main(void) {
     if (own == 0) {
         const int pick = chain_pick(&chain);
         if (pick < 0) {
-            say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete dmem_chain.state");
+            say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete " DMEM_CHAIN_STATE);
             say("next to them to run the chain again.");
             idle_forever();
         }

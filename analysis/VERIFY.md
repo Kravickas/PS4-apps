@@ -92,7 +92,10 @@ declare OpenOrbis' SDK 0x1000051 in their module parameter is refused too. Isola
 each SDK 10.00 with the relocation fix and one more change: only the modules' SDK field set to 10.00
 runs; launched directly, the 0x60 process parameter, param.sfo SYSTEM_VER / FORMAT / PUBTOOLMINVER and
 no libSceLibcInternal are each refused. With the modules at 12.00 the SDK 10.00 executable is refused
-again, so the package sets them to its lowest SDK version from 10.00 (10.00).
+again; and the SDK 1.00 eboot.bin of the same package was refused with the modules at 10.00 or 12.00
+(the chain state did not change after launching). So an executable is refused when its modules declare
+a newer SDK than it, and from 10.00 also when they declare an older one than 10.00: SDK 10.00 and above
+are a package of their own (make SDK10=1), with the modules at 10.00.
 
 ## GPU protection on file mappings
 
