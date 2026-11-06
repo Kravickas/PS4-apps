@@ -215,14 +215,15 @@ SDK VERSION (CHAIN)
   others as sdk/eboot_<version>.bin with create-fself -sdkver. It links with --apply-dynamic-relocs:
   lld otherwise leaves 0 in every field a relocation writes (the value is only in the relocation's
   addend), and FW 12.02 refuses such an executable from SDK 10.00 on as corrupted FW 12.02 also refuses
-  an executable whose modules (sce_module: libc.prx, libSceFios2.prx) declare a newer SDK than the
-  executable (1.00 with 10.00 or 12.00 modules, 10.00 with 12.00 modules), and one from 10.00 whose
-  modules declare an older SDK than 10.00 (OpenOrbis' declare 0x1000051). All executables of a package
-  share the modules, so SDK 10.00 and above are a package of their own: make SDK10=1 builds "DmemTest
-  SDK 10+" (SHAD00095, versions in src/sdk_chain10.h, eboot.bin at 10.00, its own chain state
-  dmem_chain10.state) with copies of the modules set to 10.00 (tools/set_module_sdk.py, packed under the
-  same paths with tools/make_gp4.py source=target). The main package keeps OpenOrbis' modules. CI builds
-  both.
+  an executable from SDK 10.00 whose modules (sce_module: libc.prx, libSceFios2.prx) declare another
+  SDK than the executable, older or newer, or that has none (OpenOrbis' declare 0x1000051; real games
+  carry their executable's: Gran Turismo Sport 6.50, Gran Turismo 7 11.00), and one below 10.00 whose
+  modules declare a newer SDK. All executables of a package share the modules, so every SDK version
+  from 10.00 is a package of its own: make SDK10=1 SDK=<version> builds "DmemTest SDK <version>"
+  (title SHAD<version digits>, eboot.bin and copies of the modules at that version, no chain;
+  tools/set_module_sdk.py, packed under the same paths with tools/make_gp4.py source=target). The
+  versions are listed in src/sdk_chain10.h. The main package (1.00-5.00) keeps OpenOrbis' modules.
+  CI builds the main package and one per version.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE

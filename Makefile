@@ -9,21 +9,22 @@ VERSION     := 01.00
 TITLE_ID    := SHAD00090
 CONTENT_ID  := IV0000-SHAD00090_00-SHADDMEMTEST0000
 
-# make SDK10=1: the SDK 10+ package (its own title, versions from src/sdk_chain10.h, eboot.bin at the
-# first of them, modules at that version). FW 12.02 refuses an executable whose modules declare an
-# older SDK than 10.00 or a newer one than the executable, so 1.00-5.00 and 10.00+ need separate
-# packages (their modules differ).
-CHAIN_H     := sdk_chain.h
+# make SDK10=1 SDK=0x...: a package for one SDK version from 10.00 (the versions are listed in
+# src/sdk_chain10.h; SDK defaults to the first). eboot.bin and the modules are at that version and
+# there is no chain: FW 12.02 refuses an executable from SDK 10.00 whose modules (libc.prx,
+# libSceFios2.prx) declare another SDK than it (older or newer; with none it is refused too), and all
+# executables of a package share the modules. Title and content ID come from the version
+# (0x11508001: SHAD11500, "DmemTest SDK 11.50"), so the packages install side by side.
 ifeq ($(SDK10),1)
-TITLE       := DmemTest SDK 10+
-TITLE_ID    := SHAD00095
-CONTENT_ID  := IV0000-SHAD00095_00-SHADDMEMSDK10000
-CHAIN_H     := sdk_chain10.h
 SDK         ?= $(firstword $(shell grep -oE '0x[0-9A-F]{8}' src/sdk_chain10.h))
+SDK_DIGITS  := $(shell echo $(SDK) | cut -c3-6)
+TITLE       := DmemTest SDK $(shell echo $(SDK_DIGITS) | cut -c1-2).$(shell echo $(SDK_DIGITS) | cut -c3-4)
+TITLE_ID    := SHAD$(SDK_DIGITS)0
+CONTENT_ID  := IV0000-$(TITLE_ID)_00-SHADDMEMSDK$(SDK_DIGITS)0
 endif
 
 
-EXTRAFLAGS  := $(if $(filter 1,$(SDK10)),-DDMEM_SDK10)
+EXTRAFLAGS  := $(if $(filter 1,$(SDK10)),-DDMEM_SDK10=$(SDK))
 
 # ---- Toolchain / paths (don't usually need to touch) ----
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
@@ -81,7 +82,7 @@ eboot.bin: $(OBJS)
 
 # The same program at every other SDK version of src/sdk_chain.h (the first is eboot.bin's default):
 # each run hands over to the next with sceSystemServiceLoadExec.
-SDK_CHAIN   := $(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/$(CHAIN_H)))
+SDK_CHAIN   := $(if $(filter 1,$(SDK10)),,$(wordlist 2,999,$(shell grep -oE '0x[0-9A-F]{8}' $(SRCDIR)/sdk_chain.h)))
 SDK_EBOOTS  := $(foreach v,$(SDK_CHAIN),sdk/eboot_$(v).bin)
 
 sdk/eboot_%.bin: eboot.bin
@@ -102,10 +103,11 @@ sce_sys/param.sfo: Makefile
 	$(PKG)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
 # ---- No assets: the test draws its own text. ----
-# In the SDK 10+ package the modules (libc.prx, libSceFios2.prx) go in with their module parameter set
-# to its first version, eboot.bin's (tools/set_module_sdk.py; OpenOrbis' declare 0x1000051). Measured
-# on FW 12.02: an SDK 10.00 executable runs with them at 10.00 and is refused with them at 0x1000051
-# or at 12.00; an SDK 1.00 executable is refused with them at 10.00 or 12.00. The main package keeps
+# In a package from SDK 10.00 the modules (libc.prx, libSceFios2.prx) go in with their module
+# parameter set to its version, eboot.bin's (tools/set_module_sdk.py; OpenOrbis' declare 0x1000051).
+# Measured on FW 12.02: SDK 10.00 runs with them at 10.00 and is refused with them at 0x1000051 or
+# 12.00; SDK 10.50 runs with them at 10.50 and is refused with them at 10.00; SDK 1.00 is refused with
+# them at 10.00 or 12.00; without modules SDK 1.00 and 11.00 are refused. The main package keeps
 # OpenOrbis' modules.
 MODULE_SDK  := $(if $(filter 1,$(SDK10)),$(SDK))
 PKG_MODULES := $(if $(MODULE_SDK),$(addprefix $(INTDIR)/,$(LIBMODULES)),$(LIBMODULES))

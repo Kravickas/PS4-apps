@@ -9,8 +9,9 @@
 #include <stdint.h>
 
 #ifdef DMEM_SDK10
-// the SDK 10+ package (make SDK10=1): its own versions and chain state
-#include "sdk_chain10.h"
+// a package for one SDK version from 10.00 (make SDK10=1 SDK=0x...): that version only, no chain
+static const uint32_t g_chain_sdks[] = {DMEM_SDK10};
+static const int g_chain_n = 1;
 #define DMEM_CHAIN_STATE "dmem_chain10.state"
 #else
 #include "sdk_chain.h"

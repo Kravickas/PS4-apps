@@ -96,6 +96,14 @@ again; and the SDK 1.00 eboot.bin of the same package was refused with the modul
 (the chain state did not change after launching). So an executable is refused when its modules declare
 a newer SDK than it, and from 10.00 also when they declare an older one than 10.00: SDK 10.00 and above
 are a package of their own (make SDK10=1), with the modules at 10.00.
+SDK 10.50: refused with the modules at 10.00 (also launched directly), runs with them at 10.50.
+Without modules SDK 1.00 and 11.00 are refused. So from SDK 10.00 the modules must declare exactly
+the executable's SDK: one package per version (make SDK10=1 SDK=<version>). Real games carry exactly
+that: Gran Turismo Sport 1.69 (eboot.bin, libc.prx, libSceFios2.prx all 0x06508001, all 156317
+relocated values written) and Gran Turismo 7 (all 0x11008001; its modules use the newer module
+parameter, 0x20 bytes, magic 0x23C13F4BF, which ours do not need).
+
+SDK 10.50 (measured): identical to 10.00 (all 974 result lines).
 
 ## GPU protection on file mappings
 
