@@ -50,18 +50,33 @@ jobs:
           CLANG="$(find "$OO_PS4_TOOLCHAIN" -type f -name clang | head -1)"
           CLANGXX="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'clang++' | head -1)"
           LLD="$(find "$OO_PS4_TOOLCHAIN" -type f -name 'ld.lld' | head -1)"
-          make \
-            CC="${CLANG:-clang}" \
-            CXX="${CLANGXX:-clang++}" \
-            LD="${LLD:-ld.lld}"
+          TOOLS="CC=${CLANG:-clang} CXX=${CLANGXX:-clang++} LD=${LLD:-ld.lld}"
+          # the main package (SDK 1.00-5.00), then the SDK 10+ package (make SDK10=1); their modules
+          # differ. make clean removes *.pkg, so the first one is kept aside
+          make $TOOLS
+          mkdir -p out && mv *.pkg out/
+          make clean
+          make $TOOLS SDK10=1
+          mv *.pkg out/
 
-      - name: Find package
-        run: echo "PKG=$(ls *.pkg)" >> "$GITHUB_ENV"
+      - name: Find packages
+        run: |
+          ls out
+          echo "PKG_MAIN=$(ls out/*SHADDMEMTEST0000*.pkg)" >> "$GITHUB_ENV"
+          echo "PKG_SDK10=$(ls out/*SHADDMEMSDK10000*.pkg)" >> "$GITHUB_ENV"
 
-      - name: Upload package
+      - name: Upload main package
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.PKG }}
+          path: ${{ env.PKG_MAIN }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload SDK 10+ package
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.PKG_SDK10 }}
           archive: false
           if-no-files-found: error
           retention-days: 30
