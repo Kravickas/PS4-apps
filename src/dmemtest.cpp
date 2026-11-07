@@ -11596,8 +11596,7 @@ static void idle_forever() {
 #else
 #define DMEM_NULL_STATE "dmem_null.state"
 #endif
-static void null_state_path(char* path) {
-    const char* dir = g_log_path[1] == 'd' ? "/data/" : "/temp0/";
+static void null_state_path(char* path, const char* dir) {
     int n = 0;
     for (const char* c = dir; *c; c++)
         path[n++] = *c;
@@ -11605,20 +11604,25 @@ static void null_state_path(char* path) {
         path[n++] = *c;
     path[n] = 0;
 }
+// read before the results file is known (at start): /data/ first, then /temp0/, as the results
 static int null_state_read() {
-    char path[64];
-    null_state_path(path);
-    const int fd = sceKernelOpen(path, 0x0000, 0);
-    if (fd < 0)
-        return 0;
-    unsigned char b = 0;
-    const long r = sceKernelRead(fd, &b, 1);
-    sceKernelClose(fd);
-    return r == 1 ? b : 0;
+    static const char* const dirs[] = {"/data/", "/temp0/"};
+    for (const char* dir : dirs) {
+        char path[64];
+        null_state_path(path, dir);
+        const int fd = sceKernelOpen(path, 0x0000, 0);
+        if (fd < 0)
+            continue;
+        unsigned char b = 0;
+        const long r = sceKernelRead(fd, &b, 1);
+        sceKernelClose(fd);
+        return r == 1 ? b : 0;
+    }
+    return 0;
 }
 static void null_state_write(int next) {
     char path[64];
-    null_state_path(path);
+    null_state_path(path, g_log_path[1] == 't' ? "/temp0/" : "/data/");
     const int fd = sceKernelOpen(path, 0x0601, 0777);
     if (fd < 0)
         return;
@@ -11697,10 +11701,14 @@ static void nx_cf2() {
         return l.s("SKIP dlsym").end();
     l.c(code(((int32_t(*)(uint64_t*))fn)(nullptr))).end();
 }
+static const int g_null_cases = 8;
+static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB4",
+                                                     "PB7", "BM1", "QP2", "CF2"};
 static void run_null_last() {
-    static void (*const cases[])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4, nx_pb7, nx_bm1, nx_qp2, nx_cf2};
-    static const char* const ids[] = {"E18", "RV8", "PE2", "PB4", "PB7", "BM1", "QP2", "CF2"};
-    const int n = (int)(sizeof(cases) / sizeof(cases[0]));
+    static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4,
+                                                   nx_pb7, nx_bm1, nx_qp2, nx_cf2};
+    const char* const* ids = g_null_ids;
+    const int n = g_null_cases;
     int next = null_state_read();
     if (next >= n) {
         say("null-pointer cases: all run (delete " DMEM_NULL_STATE " to run them again)");
@@ -11715,6 +11723,41 @@ static void run_null_last() {
     say("null-pointer cases: all run");
 }
 
+// The results file of this executable's SDK, opened for appending (log_init empties it).
+static bool log_init_append() {
+    uint32_t sdk = 0;
+    sceKernelGetCompiledSdkVersion(&sdk);
+    static const char* const dirs[] = {"/data/", "/temp0/"};
+    for (const char* dir : dirs) {
+        int n = put_str(g_log_buf, 0, dir);
+        n = put_str(g_log_buf, n, "dmem_results_");
+        n = put_hex8(g_log_buf, n, sdk);
+        put_str(g_log_buf, n, ".txt");
+        const int fd = sceKernelOpen(g_log_path, 0x0000, 0);
+        if (fd >= 0) {
+            sceKernelClose(fd);
+            return true;
+        }
+    }
+    g_log_buf[0] = 0;
+    return false;
+}
+
+// Started again after a null-pointer case ended the app: the run of this SDK is done, so only the
+// remaining cases run, written after the ones before in the same results file.
+static void null_resume() {
+    log_init_append();
+    g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
+    const int ended = null_state_read() - 1;
+    if (ended >= 0 && ended < g_null_cases) {
+        Line l;
+        l.s(g_null_ids[ended]).s(": the app ended during this case (no result line)").end();
+    }
+    say("null-pointer cases: continuing after the app ended");
+    run_null_last();
+    idle_forever();
+}
+
 int main(void) {
     g_screen.init();
     // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
@@ -11727,6 +11770,13 @@ int main(void) {
     chain_state_read(&chain);
     if (own == 0) {
         const int pick = chain_pick(&chain);
+        if (pick < 0 && null_state_read() < g_null_cases) {
+            // null-pointer cases left (one ended the app): they run in the last SDK's executable
+            if (g_chain_n == 1)
+                null_resume();
+            chain_exec(g_chain_n - 1);
+            idle_forever();
+        }
         if (pick < 0) {
             say("SDK chain: all runs are done (dmem_results_<SDK>.txt). Delete " DMEM_CHAIN_STATE);
             say("next to them to run the chain again.");
@@ -11737,6 +11787,8 @@ int main(void) {
             idle_forever();
         }
     }
+    if (own > 0 && own == g_chain_n - 1 && chain_run_done(own) && null_state_read() < g_null_cases)
+        null_resume();
     if (own == 0) {
         // eboot.bin (entry 0) is started from the menu, not by chain_exec: it counts its own attempt
         if (chain.attempts[0] < 255)
