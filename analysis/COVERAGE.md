@@ -34,7 +34,7 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | kernel/memory.cpp:54 | EINVAL | `if (len <= 0 \|\| !Common::Is16KBAligned(len))` | COVERED: E1 (len 0), E2 (len 0x1000), AL1 (len 0), PS4 EINVAL |
 | kernel/memory.cpp:59 | EINVAL | `if (alignment != 0 && (!std::has_single_bit(alignment) \|\| !Common::Is16KBAligned(alignment)))` | COVERED: E3 (0x3000), E4 (0x1000), AL1 (0xC000; 0x2000 with len 0x2000), PS4 EINVAL; E5 (0) ok |
 | kernel/memory.cpp:63 | EINVAL | `if (memoryType < 0 \|\| memoryType > 10)` | COVERED: H3 (-2, -1, 11, 12 EINVAL; 0-10 ok), E6, E7, AL1 |
-| kernel/memory.cpp:67 | EINVAL | `if (physAddrOut == nullptr)` | UNTESTED until E18 runs (null phys out) |
+| kernel/memory.cpp:67 | EINVAL | `if (physAddrOut == nullptr)` | PS4 (round 116): the app ended at E18 at SDK 1.00 and 12.00 (no line after E10, E18 next). From round 117 E18 runs after DONE with a "starting" line, which confirms whether the call itself ends it. shadPS4 returns EINVAL; no game can pass null here, as the PS4 ends it |
 | kernel/memory.cpp:76 | EAGAIN | `if (searchEnd <= searchStart \|\| searchEnd < len \|\| !is_in_range)` | COVERED: AL2 (end<=start, end<len, end-len<start), E8, E10, PS4 EAGAIN |
 | kernel/memory.cpp:82 | EAGAIN | `if (phys_addr == -1)` | UNTESTED until E19 runs (valid range, nothing free in it) |
 
@@ -435,6 +435,13 @@ Phase 1 first matched only `return ORBIS_KERNEL_ERROR_...` and `return -1`; thes
 | kernel/memory.cpp:1185 | result | `result != ORBIS_OK` (PosixMmapImpl) | passes on the MapMemory / MapFile result: see those |
 | kernel/memory.cpp:1202 | result | (KernelMmapImpl) | passes on the PosixMmapImpl result |
 | kernel/memory.cpp:597, 1240, 1248, 1254, 1264, 1283, 1289, 1295, 1298, 1349 | errno | posix_mprotect, posix_munmap, posix_mlock, posix_munlock, posix_msync | the same conditions as their phase 1 entries (the errno line, one line above the return) |
+
+## Null-pointer cases
+
+From round 117 every case that passes a null pointer the function writes through (or reads) runs after
+DONE, at the last SDK of the chain, one at a time (dmem_null.state keeps the next one, saved before the
+call): E18, RV8, PE2, PB4, PB7, BM1, QP2, CF2. Reason: E18 ended the app on the PS4 (round 116). If
+one ends the app, starting the app again continues with the next. Their "starting" lines show which.
 
 ## Exported functions never called before
 
@@ -1265,7 +1272,7 @@ Total: 600 probes, including those made by helper functions (q_raw, e_alloc, bt_
 | E15 | map len 0 | earlier check | CLEAR: one argument changed from a valid baseline |
 | E16 | map prot 0 | effect checked? | CLEAR: the result reports the effect (state, counters, contents or areas), not only the code |
 | E17 | map prot 1 (read only) | effect checked? | CLEAR: the result reports the effect (state, counters, contents or areas), not only the code |
-| E18 | alloc, null phys out | earlier check | CLEAR: designed in this review, one argument per call |
+| E18 | alloc, null phys out | earlier check | CLEAR: one argument; ended the app on the PS4 (round 116), runs after DONE from round 117 |
 | E19 | alloc in the range of an allocated page | surroundings: query | CLEAR: designed in this review (rounds 102-112) for one rule |
 | EB1 | A 8 pages, alias of 4-5: mtype A 2-4 / A 0-3 / alias gone: A 2-4 | surroundings: query, earlier check | CLEAR: fields of its own mapping or reservation |
 | EX1 | dmem 0x33 then mprotect 0x37 | effect checked? | CLEAR: the result reports the effect (state, counters, contents or areas), not only the code |

@@ -1574,11 +1574,6 @@ static void run_e() {
     e_alloc("E9", "alloc search start +1000", 0x1000, (long)g_dmem, PG, PG, 3);
     e_alloc("E10", "alloc end before start", (long)g_dmem, 0, PG, PG, 3);
     {
-        // E18: no output pointer for the physical address
-        Line l = head("E18", "alloc, null phys out");
-        l.ret("ret", sceKernelAllocateDirectMemory(0, (long)g_dmem, PG, PG, 3, nullptr)).end();
-    }
-    {
         // E19: a valid range with nothing free in it: the range of a page already allocated
         long x = -1;
         Line l = head("E19", "alloc in the range of an allocated page");
@@ -1948,9 +1943,8 @@ static void cov_unmap(int32_t r, void* m, size_t len) {
 static void run_cov2() {
     say("== coverage batch 2: ReserveVirtualRange, MapNamedDirectMemory, MapDirectMemory2");
     {
-        // RV7: no output pointer | a fixed reservation over a direct mapping, 10 and 90
-        Line l = head("RV7", "reserve null out | fixed rsv over a direct map: 10 | 90");
-        l.c(code(sceKernelReserveVirtualRange(nullptr, PG, 0, 0))).s(" | ");
+        // RV7: a fixed reservation over a direct mapping, 10 and 90 (the null output: RV8, after DONE)
+        Line l = head("RV7", "fixed rsv over a direct map: 10 | 90");
         int32_t rr = 0;
         const long pa = alloc(1, 3, &rr);
         static const int32_t fl[] = {0x10, 0x90};
@@ -2166,13 +2160,12 @@ static void run_cov5() {
     {
         // CF1: sceKernelConfiguredFlexibleMemorySize (not in OpenOrbis' libkernel stub: looked up in
         // libkernel by name): null out | the size
-        Line l = head("CF1", "ConfiguredFlexibleMemorySize: dlsym | null | size");
+        Line l = head("CF1", "ConfiguredFlexibleMemorySize: dlsym | size");
         void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize");
         const int32_t rd = fn ? 0 : -1;
         l.c(code(rd)).s(" | ");
         if (rd == 0 && fn) {
             auto cfg = (int32_t(*)(uint64_t*))fn;
-            l.c(code(cfg(nullptr))).s(" | ");
             uint64_t sz = 0;
             l.c(code(cfg(&sz))).c(' ').hex(sz);
         }
@@ -5422,25 +5415,6 @@ static void run_cov6() {
         }
     }
     {
-        // QP2: QueryMemoryProtection with null start | end | prot; IsStack with null start | end
-        Line l = head("QP2", "qprot null start|end|prot | IsStack null start|end");
-        void* f = 0;
-        if (sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) != 0) {
-            l.s("SKIP").end();
-        } else {
-            void *s0 = 0, *e0 = 0;
-            int p = 0;
-            l.c(code(sceKernelQueryMemoryProtection(f, nullptr, &e0, &p)));
-            l.c(code(sceKernelQueryMemoryProtection(f, &s0, nullptr, &p)));
-            l.c(code(sceKernelQueryMemoryProtection(f, &s0, &e0, nullptr)));
-            int local = 0;
-            l.s(" | ").c(code(sceKernelIsStack(&local, nullptr, &e0)));
-            l.c(code(sceKernelIsStack(&local, &s0, nullptr)));
-            l.end();
-            sceKernelMunmap(f, PG);
-        }
-    }
-    {
         // MFT1: the bytes kept past the end of a file (MF24), after the file was closed and opened
         // again | after a write made the file grow over them: byte at 3000, file size
         Line l = head("MFT1", "10K file, 66 at 3000 past EOF: reopened: byte size | grown to 4000: byte");
@@ -6710,8 +6684,8 @@ static void run_cov4() {
     say("== coverage batch 4: MemoryPoolExpand/Reserve/Decommit/Batch arguments, moves");
     const uint64_t blk = 0x10000;
     {
-        // PE1: expand with start -10000 | end <= start | len 0 | len 4000 | align 4000 | null out
-        Line l = head("PE1", "expand: start<0 | end<=start | len0 | len4000 | al4000 | null out");
+        // PE1: expand with start -10000 | end <= start | len 0 | len 4000 | align 4000 (null out: PE2)
+        Line l = head("PE1", "expand: start<0 | end<=start | len0 | len4000 | al4000");
         uint64_t p = 0;
         auto ex = [&](uint64_t s0, uint64_t e0, uint64_t len, uint64_t al, uint64_t* out) {
             const int32_t r = sceKernelMemoryPoolExpand(s0, e0, len, al, out);
@@ -6722,7 +6696,6 @@ static void run_cov4() {
         ex(0, g_dmem, 0, blk, &p);
         ex(0, g_dmem, 0x4000, blk, &p);
         ex(0, g_dmem, blk, 0x4000, &p);
-        ex(0, g_dmem, blk, blk, nullptr);
         l.end();
     }
     {
@@ -6760,32 +6733,6 @@ static void run_cov4() {
         l.end();
     }
     {
-        // BM1: BatchMap2 with null entries | one protect entry with a null count output
-        Line l = head("BM1", "BatchMap2: null entries | protect entry, null count out");
-        int32_t n = -1;
-        l.c(code(sceKernelBatchMap2(nullptr, 1, &n, 0))).c(' ').dec(n).s(" | ");
-        void* fm = 0;
-        if (sceKernelMapFlexibleMemory(&fm, PG, 0x3, 0) == 0) {
-            BmEntry e;
-            my_memset(&e, 0, sizeof(e));
-            e.start = fm;
-            e.length = PG;
-            e.protection = 0x1;
-            e.operation = 2;
-            l.c(code(sceKernelBatchMap2(&e, 1, nullptr, 0)));
-            sceKernelMunmap(fm, PG);
-        } else {
-            l.c('-');
-        }
-        l.end();
-    }
-    {
-        // PB4: entries null
-        Line l = head("PB4", "batch: null entries");
-        int32_t n = -1;
-        l.c(code(sceKernelMemoryPoolBatch(nullptr, 1, &n, 0))).c(' ').dec(n).end();
-    }
-    {
         // PB5: moves that cannot be done, one entry each. Block 0 committed (source), block 1
         // reserved (destination), block 2 committed; src / dest: unmapped VA, flexible memory,
         // reserved pool memory, committed pool memory.
@@ -6819,9 +6766,8 @@ static void run_cov4() {
         l.end();
     }
     {
-        // PB6: move to a destination 4000 into a reserved block | a commit entry with a null
-        // processed-count output
-        Line l = head("PB6", "batch: move to dest +4000 | commit entry, null processed");
+        // PB6: move to a destination 4000 into a reserved block (null processed count: PB7)
+        Line l = head("PB6", "batch: move to dest +4000");
         PbEntry e;
         my_memset(&e, 0, sizeof(e));
         e.opcode = 5;
@@ -6829,9 +6775,7 @@ static void run_cov4() {
         e.len = (uint64_t)R;
         e.rest = blk;
         int32_t n = -1;
-        l.c(code(sceKernelMemoryPoolBatch(&e, 1, &n, 0))).dec(n).s(" | ");
-        PbEntry c = pb(1, R + 5 * blk, blk, 0x3, 0);
-        l.c(code(sceKernelMemoryPoolBatch(&c, 1, nullptr, 0)));
+        l.c(code(sceKernelMemoryPoolBatch(&e, 1, &n, 0))).dec(n);
         l.end();
     }
     sceKernelMunmap(R, 0x200000);
@@ -11642,6 +11586,135 @@ static void idle_forever() {
         sceKernelUsleep(1000000);
 }
 
+// ---- null-pointer cases, after DONE ------------------------------------------------------------
+// A null pointer where a function writes its result (or reads its input) can end the app on the
+// PS4: E18 did at SDK 1.00 and 12.00 (round 116, no line after E10). These cases run after DONE, at
+// the last SDK of the chain only, one at a time: the index of the next case is saved before the
+// call, so if a case ends the app, starting the app again continues with the one after it.
+#ifdef DMEM_SDK10
+#define DMEM_NULL_STATE "dmem_null10.state"
+#else
+#define DMEM_NULL_STATE "dmem_null.state"
+#endif
+static void null_state_path(char* path) {
+    const char* dir = g_log_path[1] == 'd' ? "/data/" : "/temp0/";
+    int n = 0;
+    for (const char* c = dir; *c; c++)
+        path[n++] = *c;
+    for (const char* c = DMEM_NULL_STATE; *c; c++)
+        path[n++] = *c;
+    path[n] = 0;
+}
+static int null_state_read() {
+    char path[64];
+    null_state_path(path);
+    const int fd = sceKernelOpen(path, 0x0000, 0);
+    if (fd < 0)
+        return 0;
+    unsigned char b = 0;
+    const long r = sceKernelRead(fd, &b, 1);
+    sceKernelClose(fd);
+    return r == 1 ? b : 0;
+}
+static void null_state_write(int next) {
+    char path[64];
+    null_state_path(path);
+    const int fd = sceKernelOpen(path, 0x0601, 0777);
+    if (fd < 0)
+        return;
+    const unsigned char b = (unsigned char)next;
+    sceKernelWrite(fd, &b, 1);
+    sceKernelFsync(fd);
+    sceKernelClose(fd);
+}
+static void nx_e18() {
+    Line l = head("E18", "alloc, null phys out");
+    l.ret("ret", sceKernelAllocateDirectMemory(0, (long)g_dmem, PG, PG, 3, nullptr)).end();
+}
+static void nx_rv8() {
+    Line l = head("RV8", "reserve, null out");
+    l.c(code(sceKernelReserveVirtualRange(nullptr, PG, 0, 0))).end();
+}
+static void nx_pe2() {
+    Line l = head("PE2", "pool expand, null phys out");
+    l.c(code(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, nullptr))).end();
+}
+static void nx_pb4() {
+    Line l = head("PB4", "pool batch: null entries");
+    int32_t n = -1;
+    l.c(code(sceKernelMemoryPoolBatch(nullptr, 1, &n, 0))).c(' ').dec(n).end();
+}
+static void nx_pb7() {
+    Line l = head("PB7", "pool batch: commit entry, null processed count");
+    void* rv = 0;
+    uint64_t px = 0;
+    sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px);
+    if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
+        return l.s("SKIP reserve").end();
+    PbEntry c = pb(1, rv, 0x10000, 0x3, 0);
+    l.c(code(sceKernelMemoryPoolBatch(&c, 1, nullptr, 0))).end();
+    sceKernelMunmap(rv, 0x200000);
+}
+static void nx_bm1() {
+    Line l = head("BM1", "BatchMap2: null entries | protect entry, null count out");
+    int32_t n = -1;
+    l.c(code(sceKernelBatchMap2(nullptr, 1, &n, 0))).c(' ').dec(n).s(" | ");
+    void* fm = 0;
+    if (sceKernelMapFlexibleMemory(&fm, PG, 0x3, 0) == 0) {
+        BmEntry e;
+        my_memset(&e, 0, sizeof(e));
+        e.start = fm;
+        e.length = PG;
+        e.protection = 0x1;
+        e.operation = 2;
+        l.c(code(sceKernelBatchMap2(&e, 1, nullptr, 0)));
+        sceKernelMunmap(fm, PG);
+    } else {
+        l.c('-');
+    }
+    l.end();
+}
+static void nx_qp2() {
+    Line l = head("QP2", "qprot null start|end|prot | IsStack null start|end");
+    void* f = 0;
+    if (sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) != 0)
+        return l.s("SKIP").end();
+    void *s0 = 0, *e0 = 0;
+    int p = 0;
+    l.c(code(sceKernelQueryMemoryProtection(f, nullptr, &e0, &p)));
+    l.c(code(sceKernelQueryMemoryProtection(f, &s0, nullptr, &p)));
+    l.c(code(sceKernelQueryMemoryProtection(f, &s0, &e0, nullptr)));
+    int local = 0;
+    l.s(" | ").c(code(sceKernelIsStack(&local, nullptr, &e0)));
+    l.c(code(sceKernelIsStack(&local, &s0, nullptr)));
+    l.end();
+    sceKernelMunmap(f, PG);
+}
+static void nx_cf2() {
+    Line l = head("CF2", "ConfiguredFlexibleMemorySize: null out");
+    void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize");
+    if (!fn)
+        return l.s("SKIP dlsym").end();
+    l.c(code(((int32_t(*)(uint64_t*))fn)(nullptr))).end();
+}
+static void run_null_last() {
+    static void (*const cases[])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4, nx_pb7, nx_bm1, nx_qp2, nx_cf2};
+    static const char* const ids[] = {"E18", "RV8", "PE2", "PB4", "PB7", "BM1", "QP2", "CF2"};
+    const int n = (int)(sizeof(cases) / sizeof(cases[0]));
+    int next = null_state_read();
+    if (next >= n) {
+        say("null-pointer cases: all run (delete " DMEM_NULL_STATE " to run them again)");
+        return;
+    }
+    for (; next < n; next++) {
+        null_state_write(next + 1);
+        Line l;
+        l.s(ids[next]).s(" starting (null-pointer case; the app may end here)").end();
+        cases[next]();
+    }
+    say("null-pointer cases: all run");
+}
+
 int main(void) {
     g_screen.init();
     // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
@@ -11858,6 +11931,7 @@ int main(void) {
             chain_exec(pick);
         } else {
             say("SDK chain: all runs are done");
+            run_null_last();
         }
     }
     idle_forever();
