@@ -224,6 +224,8 @@ SDK VERSION (CHAIN)
   tools/set_module_sdk.py, packed under the same paths with tools/make_gp4.py source=target). The
   versions are listed in src/sdk_chain10.h. The main package (1.00-5.00) keeps OpenOrbis' modules.
   CI builds the main package and one per version.
+  The main package also runs SDK 5.01, 5.03, 5.05 and 5.50: fpPS4 has merging stop comparing the
+  caller from 5.50 (FW7-FW9), not measured yet.
   One launch runs them all: each run prints its SDK version below the title, writes
   dmem_results_<SDK version>.txt (in /data, or /temp0) and, at DONE, hands over to the next with
   sceSystemServiceLoadExec. The next is the first version in the list whose results have no DONE

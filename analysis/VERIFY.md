@@ -63,8 +63,9 @@ decides), **from kern, probe** (rule taken from fpPS4, a DmemTest probe checks i
 
 ## Measured SDK differences
 
-Every released firmware version from 1.00 to 9.50, and 10.00, run on FW 12.02 (SDK chain): rules
-change at exactly these versions and at no other.
+Every released firmware version from 1.00 to 9.50 (SDK chain), and the SDK versions 10.00, 10.50,
+11.00, 11.50 and 12.00 (one package each), run on FW 12.02: rules change at exactly these versions and
+at no other. From 10.00 to 12.00 all 974 result lines are identical (12.50 is newer than FW 12.02).
 
 | from SDK | what changes | probes |
 |---|---|---|
@@ -103,7 +104,25 @@ that: Gran Turismo Sport 1.69 (eboot.bin, libc.prx, libSceFios2.prx all 0x065080
 relocated values written) and Gran Turismo 7 (all 0x11008001; its modules use the newer module
 parameter, 0x20 bytes, magic 0x23C13F4BF, which ours do not need).
 
-SDK 10.50 (measured): identical to 10.00 (all 974 result lines).
+SDK 10.50, 11.00, 11.50, 12.00 (measured): identical to 10.00 (all 974 result lines).
+
+### Merging and the caller (FW7-FW9, SDK 5.50 in the main chain)
+
+fpPS4 kern vm_map_simplify_entry compares an entry's caller (anon_addr) below SDK 5.50 only, and its
+name at every SDK. FW6 (test_550:82, five writable anonymous maps) never merges at any SDK because such
+maps count against the budget, so it cannot show this. FW7 (two direct maps from two call sites), FW8
+(the same from one call site) and FW9 (two inaccessible anonymous maps from two call sites) each scan
+the areas, rename both pages to one name and scan again. The 5.50 threshold is fpPS4's reconstruction
+(and OpenOrbis' test name), not measured: the main chain runs FW7-FW9 at every version, including the
+released versions 5.01, 5.03, 5.05 and 5.50, and the SDK 10+ packages above.
+
+### Probes added from the shadPS4 comparison
+
+M5: a fixed pool reservation over a direct mapping at a 2 MiB aligned address. M4's "dmem" (and
+"part") case reserves at an address that is not 2 MiB aligned on the PS4, so it measured the alignment
+check (EINVAL), not the overlap; in shadPS4 that address happened to be aligned.
+N6: the lowest mappable address (fixed 16 KiB reservations from 0x4000 to 0x400000, no-overwrite). N3
+maps a pool reservation at 0x200000 on the PS4; fpPS4 and shadPS4 start the user space at 0x400000.
 
 ## GPU protection on file mappings
 

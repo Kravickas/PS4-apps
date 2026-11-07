@@ -3570,6 +3570,36 @@ static void run_m() {
         l.end();
     }
     {
+        // M5: M4's direct case at a 2 MiB aligned address. M4's direct mapping lands where the search
+        // puts it, on the PS4 not 2 MiB aligned, so the fixed reservation there was EINVAL for its
+        // address alone (as M4's "part" is): here a direct mapping at the start of a 2 MiB aligned
+        // reserved range, then a fixed pool reservation over it. map code and '=' (2 MiB aligned).
+        Line l = head("M5", "fixed rsv 10|90 over a direct map at a 2M aligned address");
+        static const int32_t fixed_flags[] = {0x10, 0x90};
+        for (int32_t f : fixed_flags) {
+            l.hex((uint64_t)f).c(':');
+            void* base = 0;
+            int32_t rr5 = 0;
+            const long pa = alloc(1, 3, &rr5);
+            if (pa < 0 || sceKernelReserveVirtualRange(&base, rsv, 0, rsv) != 0) {
+                release_all(pa, 1);
+                l.s("SKIP ");
+                continue;
+            }
+            void* d = base;
+            const int32_t rm = sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
+            l.c(code(rm)).c((uint64_t)base % rsv == 0 ? '=' : '!');
+            PS a = ps();
+            void* y = base;
+            const int32_t r = sceKernelMemoryPoolReserve(base, rsv, 0, f, &y);
+            pdelta_run(l, " rsv=", r, a);
+            sceKernelMunmap(base, rsv);
+            release_all(pa, 1);
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
         static const uint64_t al[] = {0x80000000ull, 0x100000000ull, 0x300000};
         const long pa = alloc(1, 3, &rr);
         Line l = head("M5", "dmem map align 2G, 4G, 3M");
@@ -3633,6 +3663,25 @@ static void run_n() {
             if (r == 0) {
                 l.c(v == (void*)at ? '=' : '!');
                 sceKernelMunmap(v, rsv);
+            }
+            l.c(' ');
+        }
+        l.end();
+    }
+    {
+        // N6: the lowest address that can be mapped. N3's 2 MiB pool reservation at 200000 maps on
+        // the PS4 (fpPS4 and shadPS4 start the user space at 400000); a fixed 16 KiB reservation at
+        // each address below 400000, then at 400000. '=' when it lands at the address.
+        static const uint64_t lows[] = {0x4000ull,   0x10000ull,  0x100000ull,
+                                        0x1FC000ull, 0x200000ull, 0x3FC000ull, 0x400000ull};
+        Line l = head("N6", "fixed 16K rsv at 4000 10000 100000 1FC000 200000 3FC000 400000");
+        for (uint64_t at : lows) {
+            void* v = (void*)at;
+            const int32_t r = sceKernelReserveVirtualRange(&v, PG, 0x90, 0);
+            l.c(code(r));
+            if (r == 0) {
+                l.c(v == (void*)at ? '=' : '!');
+                sceKernelMunmap(v, PG);
             }
             l.c(' ');
         }
@@ -8291,6 +8340,32 @@ __attribute__((noinline)) static int32_t fw6_e(void* at) {
 }
 #pragma pop_macro("sceKernelMmap")
 
+// FW7-FW9: the same creators as FW6 do (the real functions, not through SB), for mappings that do
+// not count against the budget: a direct mapping and an inaccessible anonymous one, each from two
+// call sites (fw7_a / fw7_b, fw9_a / fw9_b), so the two pages get different callers
+#pragma push_macro("sceKernelMapDirectMemory")
+#pragma push_macro("sceKernelMmap")
+#undef sceKernelMapDirectMemory
+#undef sceKernelMmap
+__attribute__((noinline)) static int32_t fw7_a(void* at, long pa) {
+    void* o = at;
+    return sceKernelMapDirectMemory(&o, PG, 0x3, 0x10, pa, PG);
+}
+__attribute__((noinline)) static int32_t fw7_b(void* at, long pa) {
+    void* o = at;
+    return sceKernelMapDirectMemory(&o, PG, 0x3, 0x10, pa, PG);
+}
+__attribute__((noinline)) static int32_t fw9_a(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x0, 0x1012, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fw9_b(void* at) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, 0x0, 0x1012, -1, 0, &o);
+}
+#pragma pop_macro("sceKernelMmap")
+#pragma pop_macro("sceKernelMapDirectMemory")
+
 // the whole flexible budget used up: 16 MiB pieces, then 16 KiB pieces; returns the count
 static int fw_use_budget(void** maps, uint64_t* lens, int cap) {
     int n = 0;
@@ -8471,6 +8546,57 @@ static void run_fw_tl_tf() {
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 5 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 5 * PG);
             sceKernelMunmap(b, 5 * PG);
+        }
+        unk(l).end();
+    }
+    // FW7-FW9: two mappings at two call sites, renamed to one name. fpPS4 kern vm_map_simplify_entry
+    // compares the caller (anon_addr) below SDK 5.50 only and the name always: FW6's mappings never
+    // merge (they count against the budget), these do not.
+    {
+        say("FW7 starting");
+        Line l = head("FW7", "two direct maps, two call sites: areas | renamed: areas");
+        int32_t rr = 0;
+        const long pa = alloc(2, 3, &rr);
+        void* a = 0;
+        if (pa >= 0 && sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fw7_a(b, pa))).c(ncode(fw7_b(b + PG, pa + PG))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            sceKernelMunmap(b, 2 * PG);
+        }
+        release_all(pa, 2);
+        unk(l).end();
+    }
+    {
+        say("FW8 starting");
+        Line l = head("FW8", "two direct maps, one call site: areas | renamed: areas");
+        int32_t rr = 0;
+        const long pa = alloc(2, 3, &rr);
+        void* a = 0;
+        if (pa >= 0 && sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fw7_a(b, pa))).c(ncode(fw7_a(b + PG, pa + PG))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            sceKernelMunmap(b, 2 * PG);
+        }
+        release_all(pa, 2);
+        unk(l).end();
+    }
+    {
+        say("FW9 starting");
+        Line l = head("FW9", "two no-access anon maps, two call sites: areas | renamed: areas");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fw9_a(b))).c(ncode(fw9_b(b + PG))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            sceKernelMunmap(b, 2 * PG);
         }
         unk(l).end();
     }
