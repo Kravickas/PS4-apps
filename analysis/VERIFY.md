@@ -123,6 +123,11 @@ M5: a fixed pool reservation over a direct mapping at a 2 MiB aligned address. M
 check (EINVAL), not the overlap; in shadPS4 that address happened to be aligned.
 N6: the lowest mappable address (fixed 16 KiB reservations from 0x4000 to 0x400000, no-overwrite). N3
 maps a pool reservation at 0x200000 on the PS4; fpPS4 and shadPS4 start the user space at 0x400000.
+DT9: type 10 (WB garlic) through MapDirectMemory, MapNamedDirectMemory and MapDirectMemory2 with CPU
+write, GPU write, GPU read/write and read, each with flags 0 and 0x800000. Through /dev/dmem1 the PS4
+allows GPU write of type 10 with MAP_WRITABLE_WB_GARLIC (0x800000, DF2); libkernel's functions map
+through that device, so DT9 shows whether they pass the flag on: the behaviour shadPS4's HLE has to
+match (DF itself is the device, which shadPS4 never reaches: libkernel and the GNM driver are HLE).
 
 ## GPU protection on file mappings
 

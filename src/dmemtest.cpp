@@ -7904,6 +7904,51 @@ static void run_dt() {
         unk(l).end();
     }
     {
+        // DT9: DT6's type 10 with MAP_WRITABLE_WB_GARLIC (0x800000), the flag that lets the dmem
+        // device map WB garlic memory with GPU write (fpPS4 kern dmem_map_set_mtype; DmemTest DF2
+        // through /dev/dmem1): whether libkernel's functions pass it on. MapDirectMemory,
+        // MapNamedDirectMemory and MapDirectMemory2 (type 10), prot 2 (CPU write), 20 (GPU write),
+        // 30 (GPU read/write), 1 (read), each with flags 0 and 800000.
+        say("DT9 starting");
+        Line l = head("DT9", "type 10, prot 2 20 30 1, flags 0/800000: map | named | map2");
+        static const int32_t prots[] = {0x2, 0x20, 0x30, 0x1};
+        static const int32_t flagset[] = {0, 0x800000};
+        long p = dt_alloc_at(R, 10);
+        for (int api = 0; api < 3; api++) {
+            if (api)
+                l.s(" | ");
+            if (api == 2 && p >= 0) {
+                // MapDirectMemory2 sets the type itself: the same page again, allocated as type 0
+                sceKernelReleaseDirectMemory(p, PG);
+                p = -1;
+            }
+            const long q = api == 2 ? dt_alloc_at(R, 0) : p;
+            for (int32_t fl : flagset) {
+                for (int32_t pr : prots) {
+                    void* m = 0;
+                    int32_t r = -1;
+                    if (q >= 0) {
+                        if (api == 0)
+                            r = sceKernelMapDirectMemory(&m, PG, pr, fl, q, PG);
+                        else if (api == 1)
+                            r = sceKernelMapNamedDirectMemory(&m, PG, pr, fl, q, PG, "dt9");
+                        else
+                            r = sceKernelMapDirectMemory2(&m, PG, 10, pr, fl, q, PG);
+                    }
+                    l.c(ncode(r));
+                    if (r == 0)
+                        sceKernelMunmap(m, PG);
+                }
+                l.c(' ');
+            }
+            if (api == 2 && q >= 0)
+                sceKernelReleaseDirectMemory(q, PG);
+        }
+        if (p >= 0)
+            sceKernelReleaseDirectMemory(p, PG);
+        unk(l).end();
+    }
+    {
         // :2492 a t0 page whose type map2 makes 3, a t3 page, a gap, a t3 page; then a t3 allocation in
         // the gap: which areas merge
         say("DT7 starting");
