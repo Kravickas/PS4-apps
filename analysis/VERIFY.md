@@ -128,6 +128,9 @@ write, GPU write, GPU read/write and read, each with flags 0 and 0x800000. Throu
 allows GPU write of type 10 with MAP_WRITABLE_WB_GARLIC (0x800000, DF2); libkernel's functions map
 through that device, so DT9 shows whether they pass the flag on: the behaviour shadPS4's HLE has to
 match (DF itself is the device, which shadPS4 never reaches: libkernel and the GNM driver are HLE).
+BQ1: find-next from pool memory with direct memory allocated right after it. BP13 and CV98 (EACCES)
+cannot show whether pool memory ends a find-next search or is skipped like free memory, since nothing
+allocated has to follow it there; PR #5495 skips it, shadPS4's memory-tests ends the search.
 
 ## GPU protection on file mappings
 
