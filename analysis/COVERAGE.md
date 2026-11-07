@@ -15,11 +15,11 @@ on the PS4 the named function is a separate libkernel function, so it gets its o
 Batch 3 (flexible mapping, system flexible mapping, mprotect, mtypeprotect, DirectMemoryQuery,
 BatchMap2, SetVirtualRangeName) mapped: 26 returns, new probes NM6, SY1, PX5, NM7.
 Batch 4 (pool expand, reserve, commit, decommit, batch, moves) mapped: 36 returns, new probes PE1, PR1,
-PD1, PB4, PB5. NU5 and NU10 also show two things the PS4 accepts: commit and decommit of length 0.
+PD1, PB8, PB9. NU5 and NU10 also show two things the PS4 accepts: commit and decommit of length 0.
 Batch 5 (munmap, mlock, munlock, msync, ReleaseFlexibleMemory, ConfiguredFlexibleMemorySize, PRT)
-mapped: 19 returns, new probes CF1, ML1, RF1, PRT1. Three returns are host failure paths, not PS4 rules.
+mapped: 19 returns, new probes CF1, ML3, RF1, PRT1. Three returns are host failure paths, not PS4 rules.
 Batch 6 (MemoryManager: map, file map, unmap, queries, search) mapped: 37 returns, new probes MP1,
-MP2, QP1, DQ2, FM3. Two DIFFER for a known reason (N6 host address space, DF devices).
+MP2, QP1, DQ2, FM9. Two DIFFER for a known reason (N6 host address space, DF devices).
 
 Note: probes made by helper functions (a_case, a_raw, q_raw, e_alloc, ...) were first missed by the
 search for probes; checking them turned three UNTESTED entries into COVERED (A12-A14, C5, C7, D1).
@@ -36,7 +36,7 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | kernel/memory.cpp:63 | EINVAL | `if (memoryType < 0 \|\| memoryType > 10)` | COVERED: H3 (-2, -1, 11, 12 EINVAL; 0-10 ok), E6, E7, AL1 |
 | kernel/memory.cpp:67 | EINVAL | `if (physAddrOut == nullptr)` | PS4 (round 116): the app ended at E18 at SDK 1.00 and 12.00 (no line after E10, E18 next). From round 117 E18 runs after DONE with a "starting" line, which confirms whether the call itself ends it. shadPS4 returns EINVAL; no game can pass null here, as the PS4 ends it |
 | kernel/memory.cpp:76 | EAGAIN | `if (searchEnd <= searchStart \|\| searchEnd < len \|\| !is_in_range)` | COVERED: AL2 (end<=start, end<len, end-len<start), E8, E10, PS4 EAGAIN |
-| kernel/memory.cpp:82 | EAGAIN | `if (phys_addr == -1)` | UNTESTED until E19 runs (valid range, nothing free in it) |
+| kernel/memory.cpp:82 | EAGAIN | `if (phys_addr == -1)` | COVERED: E19 (EAGAIN) |
 
 ## sceKernelCheckedReleaseDirectMemory
 
@@ -70,11 +70,11 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:209 | EINVAL | `if (addr == nullptr)` | UNTESTED until RV7 runs (null output pointer) |
+| kernel/memory.cpp:209 | EINVAL | `if (addr == nullptr)` | PS4: RV8 (null output) ends the app (round 118); shadPS4 EINVAL, which no game can see |
 | kernel/memory.cpp:213 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | COVERED: RV2 (len 0, len 0x1000), PS4 EINVAL |
 | kernel/memory.cpp:219 | EINVAL | `if (!std::has_single_bit(alignment) \|\| !Common::Is16KBAligned(alignment) \|\| alignment >= 0x8000'0000ULL)` | COVERED: RV2 (0x6000 EINVAL, 0x8000 ok), BT2 (1<<k: below 16K and from 2G EINVAL), N1 (2G EINVAL) |
 | kernel/memory.cpp:232 | EINVAL | `if (True(static_cast<Core::MemoryMapFlags>(flags) & ~ValidReserveFlags))` | COVERED: BT1 (every flag bit), RV2 (flag 1), PS4 EINVAL |
-| kernel/memory.cpp:239 | EINVAL | `if ((flags & static_cast<s32>(Core::MemoryMapFlags::Fixed)) != 0 && memory->ContainsVmaType(in_addr, len, Core::VMAType::Direct))` | UNTESTED until RV7 runs (fixed reservation over a direct mapping) |
+| kernel/memory.cpp:239 | EINVAL | `if ((flags & static_cast<s32>(Core::MemoryMapFlags::Fixed)) != 0 && memory->ContainsVmaType(in_addr, len, Core::VMAType::Direct))` | DIFFERS: RV7, M5: on the PS4 a fixed reservation (flags 0x10) over a direct mapping succeeds and replaces it; with 0x90 ENOMEM. shadPS4 EINVAL |
 | kernel/memory.cpp:245 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | COVERED: FW1 (null address with Fixed, SDK 1.70+), PS4 EINVAL |
 
 ## sceKernelMapNamedDirectMemory
@@ -82,16 +82,16 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | line | error | condition | status |
 |---|---|---|---|
 | kernel/memory.cpp:267 | EFAULT | `if (name == nullptr)` | COVERED: NM1 (null name), PS4 EFAULT |
-| kernel/memory.cpp:276 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | unnamed: E13 (len 0x5000), E15 (len 0) EINVAL; named: until NM5 runs |
-| kernel/memory.cpp:281 | EINVAL | `if (!Common::Is16KBAligned(phys_addr))` | unnamed: E12 (phys +0x1000) EINVAL; named: until NM5 runs |
-| kernel/memory.cpp:289 | EINVAL | `if (alignment != 0 && (!std::has_single_bit(alignment) \|\| !Common::Is16KBAligned(alignment) \|\| alignment >= 2_GB))` | unnamed: BT7 (1<<k), N2; named: until NM5 runs |
+| kernel/memory.cpp:276 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | unnamed: E13 (len 0x5000), E15 (len 0) EINVAL; named: NM5, the same codes as unnamed |
+| kernel/memory.cpp:281 | EINVAL | `if (!Common::Is16KBAligned(phys_addr))` | unnamed: E12 (phys +0x1000) EINVAL; named: NM5, the same codes as unnamed |
+| kernel/memory.cpp:289 | EINVAL | `if (alignment != 0 && (!std::has_single_bit(alignment) \|\| !Common::Is16KBAligned(alignment) \|\| alignment >= 2_GB))` | unnamed: BT7 (1<<k), N2; named: NM5, the same codes as unnamed |
 | kernel/memory.cpp:294 | ENAMETOOLONG | `if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH)` | COVERED: NM1 (32 characters), PS4 ENAMETOOLONG |
-| kernel/memory.cpp:309 | EINVAL | `if (True(mem_prot & Core::MemoryProt::CpuExec))` | unnamed: BT6 (prot bit 2), EX2 (0x37) EINVAL; named: until NM5 runs |
-| kernel/memory.cpp:321 | EINVAL | `if (True(mem_prot & ~ValidProt))` | unnamed: BT6 (prot bits from 0x40, SDK rules); named: until NM5 runs |
+| kernel/memory.cpp:309 | EINVAL | `if (True(mem_prot & Core::MemoryProt::CpuExec))` | unnamed: BT6 (prot bit 2), EX2 (0x37) EINVAL; named: NM5, the same codes as unnamed |
+| kernel/memory.cpp:321 | EINVAL | `if (True(mem_prot & ~ValidProt))` | unnamed: BT6 (prot bits from 0x40, SDK rules); named: NM5, the same codes as unnamed |
 | kernel/memory.cpp:330 | EINVAL | `if (True(static_cast<Core::MemoryMapFlags>(flags) & ~ValidDirectFlags))` | unnamed: BT5 (every flag bit); named: DT9 (0x800000), NM5 for more |
 | kernel/memory.cpp:342 | EACCES | `if (True(mem_prot & (Core::MemoryProt::CpuWrite \| Core::MemoryProt::GpuWrite)) && Core::Memory::Instance()->GetDirectMemoryType(phys_addr, &phys_type, &type_start, &type_` | COVERED: DT6 (type 10 rw, unnamed), DT9 (named and unnamed, CPU/GPU write) EACCES |
-| kernel/memory.cpp:362 | EINVAL | `if (True(map_flags & Core::MemoryMapFlags::Fixed) && in_addr < SystemAreaEnd && in_addr + len >= SystemAreaStart)` | unnamed: VQ10-VQ13, LA1, LA2 (system area, SDK 2.50+); named: until NM5 runs |
-| kernel/memory.cpp:368 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | unnamed: FW1 (null + Fixed, SDK 1.70+) EINVAL; named: until NM5 runs |
+| kernel/memory.cpp:362 | EINVAL | `if (True(map_flags & Core::MemoryMapFlags::Fixed) && in_addr < SystemAreaEnd && in_addr + len >= SystemAreaStart)` | unnamed: VQ10-VQ13, LA1, LA2 (system area, SDK 2.50+); named: NM5, the same codes as unnamed |
+| kernel/memory.cpp:368 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | unnamed: FW1 (null + Fixed, SDK 1.70+) EINVAL; named: NM5, the same codes as unnamed |
 
 ## sceKernelMapDirectMemory2
 
@@ -104,27 +104,27 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | kernel/memory.cpp:421 | EINVAL | `if (True(static_cast<Core::MemoryMapFlags>(flags) & ~ValidDirectFlags))` | PARTLY: SF6 (flag 1), PS4 EINVAL; other flag bits not probed for MapDirectMemory2 |
 | kernel/memory.cpp:425 | EINVAL | `if (type < -1 \|\| type > 10)` | COVERED: BT8 (types 11+ EINVAL, 0-9 ok), SF7 (-2 EINVAL, -1 keeps the type) |
 | kernel/memory.cpp:430 | EACCES | `if (type == 10 && True(static_cast<Core::MemoryProt>(prot) & (Core::MemoryProt::CpuWrite \| Core::MemoryProt::GpuWrite)))` | COVERED: BT8 (type 10 rw EACCES), DT6, DT9 |
-| kernel/memory.cpp:436 | EINVAL | `if (True(mem_prot & Core::MemoryProt::CpuExec))` | UNTESTED until MS6 runs (execute) |
+| kernel/memory.cpp:436 | EINVAL | `if (True(mem_prot & Core::MemoryProt::CpuExec))` | COVERED: MS6 (prot 4, 5, 7: EINVAL) |
 
 ## sceKernelMapNamedFlexibleMemory
 
 | line | error | condition | status |
 |---|---|---|---|
 | kernel/memory.cpp:464 | EFAULT | `if (name == nullptr)` | COVERED: NM2 (null name), PS4 EFAULT |
-| kernel/memory.cpp:470 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | UNTESTED until NM6 runs (len 0 / 0x1000, named and unnamed) |
+| kernel/memory.cpp:470 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | COVERED: NM6 (len 0, 0x1000: EINVAL, named and unnamed) |
 | kernel/memory.cpp:475 | ENAMETOOLONG | `if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH)` | COVERED: NM2 (32 characters), PS4 ENAMETOOLONG |
-| kernel/memory.cpp:488 | EINVAL | `if (True(mem_prot & ~ValidProt))` | unnamed: BT4 (every prot bit); named: until NM6 runs |
-| kernel/memory.cpp:495 | EINVAL | `if (True(map_flags & ~ValidFlexibleFlags))` | unnamed: BT3 (every flag bit); named: until NM6 runs |
-| kernel/memory.cpp:501 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | unnamed: FW1 (null + Fixed, SDK 1.70+) EINVAL; named: until NM6 runs |
+| kernel/memory.cpp:488 | EINVAL | `if (True(mem_prot & ~ValidProt))` | unnamed: BT4 (every prot bit); named: NM6, EINVAL as unnamed (fixed 0: ok at SDK 1.00, EINVAL from 1.70) |
+| kernel/memory.cpp:495 | EINVAL | `if (True(map_flags & ~ValidFlexibleFlags))` | unnamed: BT3 (every flag bit); named: NM6, EINVAL as unnamed (fixed 0: ok at SDK 1.00, EINVAL from 1.70) |
+| kernel/memory.cpp:501 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | unnamed: FW1 (null + Fixed, SDK 1.70+) EINVAL; named: NM6, EINVAL as unnamed (fixed 0: ok at SDK 1.00, EINVAL from 1.70) |
 
 ## sceKernelMapNamedSystemFlexibleMemory
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:522 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | UNTESTED until SY1 runs (never called before) |
-| kernel/memory.cpp:527 | EFAULT | `if (name == nullptr)` | UNTESTED until SY1 runs |
-| kernel/memory.cpp:534 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | UNTESTED until SY1 runs |
-| kernel/memory.cpp:541 | ENAMETOOLONG | `if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH)` | UNTESTED until SY1 runs |
+| kernel/memory.cpp:522 | EINVAL | `if (len == 0 \|\| !Common::Is16KBAligned(len))` | COVERED: SY1 (len 0, 0x1000: EINVAL) |
+| kernel/memory.cpp:527 | EFAULT | `if (name == nullptr)` | COVERED: SY1 (EFAULT) |
+| kernel/memory.cpp:534 | EINVAL | `if (Common::ElfInfo::FW_170 <= g_sdk_version)` | COVERED: SY1 (fixed 0: ok at SDK 1.00, EINVAL from 1.70) |
+| kernel/memory.cpp:541 | ENAMETOOLONG | `if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH)` | PARTLY: SY1 (32 characters) fails with a code the line does not show (?) |
 
 ## sceKernelMprotect
 
@@ -136,7 +136,7 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:598 | -1 | `if (result < 0)` | UNTESTED until PX5 runs (PX2 "hole" succeeds on the PS4, RG2 is not a failure) |
+| kernel/memory.cpp:598 | -1 | `if (result < 0)` | COVERED: PX5 (POSIX mprotect rw on type 10: -1/EACCES) |
 
 ## sceKernelMtypeprotect
 
@@ -169,17 +169,17 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:806 | EFAULT | `if (name == nullptr)` | UNTESTED until NM7 runs (null name) |
+| kernel/memory.cpp:806 | EFAULT | `if (name == nullptr)` | COVERED: NM7 (EFAULT) |
 | kernel/memory.cpp:811 | ENAMETOOLONG | `if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH)` | COVERED: NM3 (32 characters), PS4 ENAMETOOLONG |
 
 ## sceKernelMemoryPoolExpand
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:829 | EINVAL | `if (searchStart < 0 \|\| searchEnd <= searchStart)` | UNTESTED until PE1 runs (start -0x10000; end <= start) |
-| kernel/memory.cpp:833 | EINVAL | `if (len <= 0 \|\| !Common::Is64KBAligned(len))` | UNTESTED until PE1 runs (len 0; len 0x4000) |
-| kernel/memory.cpp:837 | EINVAL | `if (alignment != 0 && !Common::Is64KBAligned(alignment))` | UNTESTED until PE1 runs (alignment 0x4000) |
-| kernel/memory.cpp:841 | EINVAL | `if (physAddrOut == nullptr)` | UNTESTED until PE1 runs (null phys out) |
+| kernel/memory.cpp:829 | EINVAL | `if (searchStart < 0 \|\| searchEnd <= searchStart)` | DIFFERS: PE1: start -0x10000 ok on the PS4; end <= start ENOMEM (shadPS4 EINVAL for both); round 119 prints what the ok case returns |
+| kernel/memory.cpp:833 | EINVAL | `if (len <= 0 \|\| !Common::Is64KBAligned(len))` | DIFFERS: PE1: len 0 ok on the PS4 (shadPS4 EINVAL); len 0x4000 EINVAL (same) |
+| kernel/memory.cpp:837 | EINVAL | `if (alignment != 0 && !Common::Is64KBAligned(alignment))` | COVERED: PE1 (alignment 0x4000: EINVAL) |
+| kernel/memory.cpp:841 | EINVAL | `if (physAddrOut == nullptr)` | COVERED: PE2 (null phys out: ok on the PS4) |
 | kernel/memory.cpp:850 | ENOMEM | `if (searchEnd <= searchStart \|\| searchEnd < len \|\| !is_in_range)` | COVERED: P25 (window 0x4000 < len 0x10000), PS4 ENOMEM |
 | kernel/memory.cpp:856 | ENOMEM | `if (phys_addr == -1)` | COVERED: P54 (window 0x14000, no fit inside), XC1 (one page short), PS4 ENOMEM |
 
@@ -190,7 +190,7 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | kernel/memory.cpp:877 | EINVAL | `if ((flags & ~0x90) != 0)` | COVERED: M2 (flags 1,2,4,8,20,40,100,1000 EINVAL; 80 ok), BT16 |
 | kernel/memory.cpp:885 | EINVAL | `if (alignment > 1 && (!std::has_single_bit(alignment) \|\| alignment < 2_MB \|\| alignment > 1_GB))` | COVERED: M3 (0x4000, 0x10000, 1M, 3M, 2G, 4G EINVAL; 2M ok), N1, K5, BT17 |
 | kernel/memory.cpp:890 | EINVAL | `if ((flags & 0x10) != 0 && (addr_in == nullptr \|\| !Common::Is2MBAligned(reinterpret_cast<VAddr>(addr_in))))` | COVERED: M2 (0x10 with a null address), XC2 (fixed at +0x4000, +0x100000), PS4 EINVAL |
-| kernel/memory.cpp:894 | EINVAL | `if (len == 0 \|\| !Common::Is2MBAligned(len))` | PARTLY: P4 (len 0x10000) EINVAL; len 0 until PR1 runs |
+| kernel/memory.cpp:894 | EINVAL | `if (len == 0 \|\| !Common::Is2MBAligned(len))` | COVERED: P4 (len 0x10000), PR1 (len 0): EINVAL |
 
 ## sceKernelMemoryPoolCommit
 
@@ -210,20 +210,20 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 |---|---|---|---|
 | kernel/memory.cpp:977 | EINVAL | `if (addr == nullptr \|\| !Common::Is64KBAligned(reinterpret_cast<VAddr>(addr)))` | COVERED: NU10 (address +0x4000), PS4 EINVAL |
 | kernel/memory.cpp:982 | EINVAL | `if (flags != 0)` | COVERED: BT21 (every flag bit EINVAL) |
-| kernel/memory.cpp:989 | EINVAL | `if (!Common::Is64KBAligned(len))` | UNTESTED until PD1 runs (len 0x4000); len 0 is accepted on the PS4 (NU10) |
+| kernel/memory.cpp:989 | EINVAL | `if (!Common::Is64KBAligned(len))` | COVERED: PD1 (EINVAL); len 0 is accepted on the PS4 (NU10) |
 
 ## sceKernelMemoryPoolBatch
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1003 | EINVAL | `if (entries == nullptr)` | UNTESTED until PB4 runs (null entries) |
+| kernel/memory.cpp:1003 | EINVAL | `if (entries == nullptr)` | COVERED: PB8 (EFAULT, 0 processed) |
 | kernel/memory.cpp:1008 | EINVAL | `if (flags != 0)` | COVERED: BT27 (every flag bit EINVAL) |
 
 ## sceKernelConfiguredFlexibleMemorySize
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1219 | EINVAL | `if (sizeOut == nullptr)` | UNTESTED until CF1 runs (never called before: not in the OpenOrbis stub, looked up with sceKernelDlsym) |
+| kernel/memory.cpp:1219 | EINVAL | `if (sizeOut == nullptr)` | PARTLY: CF1 returns 0x1C000000 at SDK 1.00-3.50; the lookup fails from 5.00 (round 119 prints why), so the null output (CF2) is not measured yet (never called before: not in the OpenOrbis stub, looked up with sceKernelDlsym) |
 
 ## sceKernelMunmap
 
@@ -241,24 +241,24 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1249 | -1 | `if (!addr \|\| len == 0)` | UNTESTED until ML1 runs (null; len 0); PX2 covers mlock on mapped memory (0) |
-| kernel/memory.cpp:1255 | -1 | `if (raw_addr + len < raw_addr)` | UNTESTED until ML1 runs (wrap-around) |
-| kernel/memory.cpp:1265 | -1 | `if (!Core::Memory::Instance()->IsRangeMapped(raw_addr, len) \|\| Core::Memory::Instance()->ContainsNoCpuAccess(raw_addr, len))` | UNTESTED until ML1 runs (unmapped; no CPU access) |
+| kernel/memory.cpp:1249 | -1 | `if (!addr \|\| len == 0)` | DIFFERS: ML3: PS4 null -1/ENOMEM, len 0 returns 0 (shadPS4 EINVAL for both); PX2: mapped 0 |
+| kernel/memory.cpp:1255 | -1 | `if (raw_addr + len < raw_addr)` | COVERED: ML3 (wrap-around: -1/EINVAL) |
+| kernel/memory.cpp:1265 | -1 | `if (!Core::Memory::Instance()->IsRangeMapped(raw_addr, len) \|\| Core::Memory::Instance()->ContainsNoCpuAccess(raw_addr, len))` | COVERED: ML3 (unmapped, no CPU access: -1/ENOMEM) |
 
 ## posix_munlock
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1284 | -1 | `if (!addr \|\| len == 0)` | UNTESTED until ML1 runs (null; len 0) |
-| kernel/memory.cpp:1290 | -1 | `if (raw_addr + len < raw_addr)` | UNTESTED until ML1 runs (wrap-around) |
-| kernel/memory.cpp:1296 | -1 | `if (!Core::Memory::Instance()->IsRangeMapped(raw_addr, len))` | UNTESTED until ML1 runs (unmapped) |
+| kernel/memory.cpp:1284 | -1 | `if (!addr \|\| len == 0)` | DIFFERS: ML3: munlock null -1/ENOMEM, len 0 returns 0 (shadPS4 EINVAL for both) |
+| kernel/memory.cpp:1290 | -1 | `if (raw_addr + len < raw_addr)` | COVERED: ML3 (wrap-around: -1/EINVAL) |
+| kernel/memory.cpp:1296 | -1 | `if (!Core::Memory::Instance()->IsRangeMapped(raw_addr, len))` | COVERED: ML3 (munlock unmapped: -1/ENOMEM) |
 | kernel/memory.cpp:1299 | -1 | `(unconditional)` | COVERED: PX2 (munlock on mapped memory), PS4 -1/EINVAL |
 
 ## sceKernelReleaseFlexibleMemory
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1316 | EINVAL | `if (!addr \|\| ((raw_addr \| len) & 0x3fff))` | PARTLY: FL2 (address +0x1000) EINVAL; null address and len 0x1000 until RF1 runs |
+| kernel/memory.cpp:1316 | EINVAL | `if (!addr \|\| ((raw_addr \| len) & 0x3fff))` | COVERED: FL2 (address +0x1000), RF1 (null address, len 0x1000): EINVAL |
 | kernel/memory.cpp:1329 | EINVAL | `if (!VirtualAlloc(addr, len, MEM_RESET, PAGE_READWRITE))` | HOST FAILURE PATH (Windows VirtualAlloc MEM_RESET), not a PS4 rule: must not fail where the PS4 succeeds; FL2 (direct, hole, len 0) succeed on the PS4 |
 | kernel/memory.cpp:1334 | EINVAL | `if (madvise(addr, len, MADV_FREE) != 0)` | HOST FAILURE PATH (macOS madvise), not a PS4 rule: as above, FL2 |
 | kernel/memory.cpp:1339 | EINVAL | `if (madvise(addr, len, MADV_DONTNEED) != 0)` | HOST FAILURE PATH (Linux madvise), not a PS4 rule: as above, FL2 |
@@ -273,15 +273,15 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1364 | EINVAL | `if (id < 0 \|\| id >= MAX_PRT_APERTURES)` | UNTESTED until PRT1 runs (id -1; id 3) (never called before) |
-| kernel/memory.cpp:1368 | EINVAL | `if (address < PRT_AREA_START_ADDR \|\| address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE)` | UNTESTED until PRT1 runs (below the PRT area; past its end) |
-| kernel/memory.cpp:1372 | EINVAL | `if (address % 4096 != 0)` | UNTESTED until PRT1 runs (address +0x800) |
+| kernel/memory.cpp:1364 | EINVAL | `if (id < 0 \|\| id >= MAX_PRT_APERTURES)` | COVERED: PRT1 (EINVAL) |
+| kernel/memory.cpp:1368 | EINVAL | `if (address < PRT_AREA_START_ADDR \|\| address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE)` | COVERED: PRT1 (EINVAL) |
+| kernel/memory.cpp:1372 | EINVAL | `if (address % 4096 != 0)` | COVERED: PRT1 (EINVAL) |
 
 ## sceKernelGetPrtAperture
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:1388 | EINVAL | `if (id < 0 \|\| id >= MAX_PRT_APERTURES)` | UNTESTED until PRT1 runs (id -1; id 3; id 0 reads back the aperture set) |
+| kernel/memory.cpp:1388 | EINVAL | `if (id < 0 \|\| id >= MAX_PRT_APERTURES)` | COVERED: PRT1 (id 0: 0x1000000000, 0x10000; id -1, 3: EINVAL) |
 
 ## MemoryManager::PoolExpand
 
@@ -323,10 +323,10 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | line | error | condition | status |
 |---|---|---|---|
 | core/memory.cpp:773 | EINVAL | `if (type == VMAType::Flexible && flexible_usage + size > total_flexible_size)` | COVERED: FW5 (flexible budget exceeded; EINVAL below SDK 3.50, ENOMEM from 3.50) |
-| core/memory.cpp:784 | ENOMEM | `if (total_direct_size < phys_addr + size)` | UNTESTED until MP1 runs (physical address at / across the end of direct memory) |
+| core/memory.cpp:784 | ENOMEM | `if (total_direct_size < phys_addr + size)` | DIFFERS: MP1: PS4 EACCES at and across the end of direct memory (shadPS4 ENOMEM), all SDKs |
 | core/memory.cpp:795 | EACCES | `if (dmem_area->second.dma_type != PhysicalMemoryType::Allocated && dmem_area->second.dma_type != PhysicalMemoryType::Mapped)` | COVERED: E11 (free page), E14 (half free), PS4 EACCES |
 | core/memory.cpp:802 | EBUSY | `if (validate_dmem && dmem_area->second.dma_type == PhysicalMemoryType::Mapped)` | COVERED: FW3, B10 (memory already mapped, from SDK 2.50), PS4 EBUSY |
-| core/memory.cpp:820 | ENOMEM | `if (!IsValidMapping(virtual_addr, size))` | UNTESTED until MP2 runs (fixed at 0x7FFFFFFFC000, 0x800000000000) |
+| core/memory.cpp:820 | ENOMEM | `if (!IsValidMapping(virtual_addr, size))` | MP2: PS4 fixed at 0x7FFFFFFFC000 ok below SDK 3.00, EINVAL from 3.00 (area end); at 0x800000000000 EINVAL at all SDKs. shadPS4 returns ENOMEM here where this check is reached first: compare with its run |
 | core/memory.cpp:826 | ENOMEM | `if (!vma.IsFree() \|\| remaining_size < size)` | COVERED: RV2 (fixed no-overwrite over a mapping), M4, M5 (0x90), PS4 ENOMEM |
 | core/memory.cpp:836 | ENOMEM | `if (virtual_addr == -1 \|\| (default_search && virtual_addr + size > DEFAULT_MAPPING_END))` | COVERED: XC5, LA3 (no free space), MF2, PS4 ENOMEM |
 | core/memory.cpp:849 | ENOMEM | `if (True(flags & MemoryMapFlags::Fixed) && !IsInGuestAreas(virtual_addr, size))` | DIFFERS: N6, N3 (the PS4 maps from 0x4000; the shadPS4 guest space starts at 0x400000, a host limit) |
@@ -337,31 +337,31 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | line | error | condition | status |
 |---|---|---|---|
 | core/memory.cpp:1026 | EBADF | `if (file == nullptr)` | COVERED: NU6 (closed fd), PS4 EBADF |
-| core/memory.cpp:1032 | EINVAL | `if (file->type == Core::FileSys::FileType::Directory)` | COVERED: SF4 (directory: open ok, mmap EINVAL); FM3 repeats it |
+| core/memory.cpp:1032 | EINVAL | `if (file->type == Core::FileSys::FileType::Directory)` | COVERED: SF4 (directory: open ok, mmap EINVAL); FM9 repeats it |
 | core/memory.cpp:1036 | EBADF | `if (file->type != Core::FileSys::FileType::Regular)` | DIFFERS: DF1-DF4 (the PS4 maps /dev/dmem1 and /dev/gc; shadPS4 EBADF; games never reach them: libkernel and the GNM driver are HLE) |
 | core/memory.cpp:1063 | EACCES | `if (phys_addr < 0 \|\| static_cast<u64>(phys_addr) + size > Common::AlignUp(file_size, 16_KB))` | COVERED: MF11, MF12, MF13, MF15, MF16, MF18 (range past the last page of the file), PS4 EACCES |
-| core/memory.cpp:1076 | EACCES | `if (True(prot & (MemoryProt::CpuWrite \| MemoryProt::GpuWrite)))` | COVERED: TF4 (read-only file: shared rw EACCES, private rw ok), TF5; FM3 repeats it |
-| core/memory.cpp:1087 | EACCES | `if (True(prot & MemoryProt::CpuReadWrite))` | COVERED: TF3 (write-only file, shared: rw, w, r EACCES; none ok); FM3 repeats it |
-| core/memory.cpp:1111 | ENOMEM | `if (!IsValidMapping(virtual_addr, size))` | UNTESTED until FM3 runs (fixed at 0x800000000000) |
-| core/memory.cpp:1118 | ENOMEM | `if (!vma.IsFree() \|\| remaining_size < size)` | UNTESTED until FM3 runs (fixed no-overwrite over a flexible mapping) |
+| core/memory.cpp:1076 | EACCES | `if (True(prot & (MemoryProt::CpuWrite \| MemoryProt::GpuWrite)))` | COVERED: TF4 (read-only file: shared rw EACCES, private rw ok), TF5; FM9 repeats it |
+| core/memory.cpp:1087 | EACCES | `if (True(prot & MemoryProt::CpuReadWrite))` | COVERED: TF3 (write-only file, shared: rw, w, r EACCES; none ok); FM9 repeats it |
+| core/memory.cpp:1111 | ENOMEM | `if (!IsValidMapping(virtual_addr, size))` | FM9: PS4 EINVAL; shadPS4 ENOMEM here where reached first: compare with its run |
+| core/memory.cpp:1118 | ENOMEM | `if (!vma.IsFree() \|\| remaining_size < size)` | COVERED: FM9 (ENOMEM) |
 | core/memory.cpp:1126 | ENOMEM | `if (virtual_addr == -1 \|\| (default_search && virtual_addr + size > DEFAULT_MAPPING_END))` | COVERED: MF2 (default space full), PS4 ENOMEM |
 
 ## MemoryManager::PoolDecommit
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:1238 | EINVAL | `if (it->second.type != VMAType::PoolReserved && it->second.type != VMAType::Pooled)` | UNTESTED until PD1 runs (decommit of flexible and of direct memory) |
+| core/memory.cpp:1238 | EINVAL | `if (it->second.type != VMAType::PoolReserved && it->second.type != VMAType::Pooled)` | COVERED: PD1 (EINVAL) |
 
 ## MemoryManager::PoolMove
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:1336 | EINVAL | `if (it == vma_map.end())` | UNTESTED until PB5 runs (source unmapped); PB3 covers a valid move |
-| core/memory.cpp:1342 | EINVAL | `if (it->second.type != VMAType::Pooled && it->second.type != VMAType::PoolReserved)` | UNTESTED until PB5 runs (source flexible) |
-| core/memory.cpp:1349 | EINVAL | `if (it == vma_map.end())` | UNTESTED until PB5 runs (destination unmapped) |
-| core/memory.cpp:1353 | EBUSY | `if (it->second.type == VMAType::Pooled)` | UNTESTED until PB5 runs (destination committed) |
-| core/memory.cpp:1357 | EINVAL | `if (it->second.type != VMAType::PoolReserved)` | UNTESTED until PB5 runs (destination flexible) |
-| core/memory.cpp:1366 | EINVAL | `if (src_reserved)` | UNTESTED until PB5 runs (source reserved, not committed) |
+| core/memory.cpp:1336 | EINVAL | `if (it == vma_map.end())` | COVERED: PB9 (source unmapped: EINVAL, 0 processed); PB3 a valid move |
+| core/memory.cpp:1342 | EINVAL | `if (it->second.type != VMAType::Pooled && it->second.type != VMAType::PoolReserved)` | COVERED: PB9 (source flexible: EINVAL) |
+| core/memory.cpp:1349 | EINVAL | `if (it == vma_map.end())` | COVERED: PB9 (EINVAL) |
+| core/memory.cpp:1353 | EBUSY | `if (it->second.type == VMAType::Pooled)` | COVERED: PB9 (EBUSY) |
+| core/memory.cpp:1357 | EINVAL | `if (it->second.type != VMAType::PoolReserved)` | COVERED: PB9 (EINVAL) |
+| core/memory.cpp:1366 | EINVAL | `if (src_reserved)` | COVERED: PB9 (ok, 1 processed; shadPS4 the same: !src_committed returns ok) |
 
 ## MemoryManager::CheckMapAreaEnd
 
@@ -375,15 +375,15 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 | line | error | condition | status |
 |---|---|---|---|
 | core/memory.cpp:1541 | EINVAL | `if (virtual_addr + size < virtual_addr)` | COVERED: NU1 (wrap-around), PS4 EINVAL |
-| core/memory.cpp:1549 | EINVAL | `if (!IsValidMapping(virtual_addr, size))` | UNTESTED until MP2 runs (munmap at 0x7FFFFFFFC000, 0x800000000000, 0x2000) |
+| core/memory.cpp:1549 | EINVAL | `if (!IsValidMapping(virtual_addr, size))` | MP2: PS4 munmap at 0x7FFFFFFFC000 ok, at 0x800000000000 and 0x2000 EINVAL: compare with the shadPS4 run |
 | core/memory.cpp:1560 | EINVAL | `if (base < end_addr && virtual_addr < base + length && (base < virtual_addr \|\| base + length > end_addr))` | COVERED: T15, P83 (part of a pool reservation), PS4 EINVAL |
 
 ## MemoryManager::QueryProtection
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:1719 | EACCES | `if (addr < min_query_addr)` | UNTESTED until QP1 runs (at 0x4000) |
-| core/memory.cpp:1726 | EACCES | `if (vma.IsFree())` | UNTESTED until QP1 runs (free memory) |
+| core/memory.cpp:1719 | EACCES | `if (addr < min_query_addr)` | COVERED: QP1 (EACCES) |
+| core/memory.cpp:1726 | EACCES | `if (vma.IsFree())` | COVERED: QP1 (EACCES) |
 
 ## MemoryManager::VirtualQuery
 
@@ -396,21 +396,21 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:2037 | EACCES | `if (addr >= total_direct_size)` | UNTESTED until DQ2 runs (at the end of direct memory) |
+| core/memory.cpp:2037 | EACCES | `if (addr >= total_direct_size)` | COVERED: DQ2 (GetDirectMemoryType ENOENT; DirectMemoryQuery EACCES) |
 | core/memory.cpp:2062 | EACCES | `if (dmem_area == dmem_map.end() \|\| !is_allocated(dmem_area->second))` | COVERED: Q1, BP12, BP13, U7, PS4 EACCES |
 
 ## MemoryManager::GetDirectMemoryType
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:2328 | ENOENT | `if (addr >= total_direct_size)` | UNTESTED until DQ2 runs (at the end of direct memory) |
+| core/memory.cpp:2328 | ENOENT | `if (addr >= total_direct_size)` | COVERED: DQ2 (GetDirectMemoryType ENOENT; DirectMemoryQuery EACCES) |
 | core/memory.cpp:2336 | ENOENT | `if (dmem_area.dma_type != PhysicalMemoryType::Allocated && dmem_area.dma_type != PhysicalMemoryType::Mapped)` | COVERED: BP14 (pool memory), P94 (free page), PS4 ENOENT |
 
 ## MemoryManager::IsStack
 
 | line | error | condition | status |
 |---|---|---|---|
-| core/memory.cpp:2369 | EACCES | `if (vma.IsFree())` | UNTESTED until QP1 runs (free memory) |
+| core/memory.cpp:2369 | EACCES | `if (vma.IsFree())` | COVERED: QP1 (EACCES) |
 
 ## MemoryManager::SearchFree
 
@@ -436,12 +436,22 @@ Phase 1 first matched only `return ORBIS_KERNEL_ERROR_...` and `return -1`; thes
 | kernel/memory.cpp:1202 | result | (KernelMmapImpl) | passes on the PosixMmapImpl result |
 | kernel/memory.cpp:597, 1240, 1248, 1254, 1264, 1283, 1289, 1295, 1298, 1349 | errno | posix_mprotect, posix_munmap, posix_mlock, posix_munlock, posix_msync | the same conditions as their phase 1 entries (the errno line, one line above the return) |
 
+## Probe IDs used twice (fixed in round 119)
+
+Round 119 found eight IDs used by two different probes; the result files hold both lines under one ID.
+Renamed (the older probe keeps its ID): the null-entries batch PB4 -> PB8, the six impossible moves
+PB5 -> PB9, BatchMap2 null cases BM1 -> BM5, file access FM3 -> FM9, mlock edges ML1 -> ML3, and two
+older ones: "dmem map align 2G, 4G, 3M" M5 -> M6, "pool expand again" P8 -> P96.
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after
 DONE, at the last SDK of the chain, one at a time (dmem_null.state keeps the next one, saved before the
-call): E18, RV8, PE2, PB4, PB7, BM1, QP2, CF2. Reason: E18 ended the app on the PS4 (round 116). If
+call): E18, RV8, PE2, PB8, PB7, BM5, QP2, CF2. Reason: E18 ended the app on the PS4 (round 116). If
 one ends the app, starting the app again continues with the next. Their "starting" lines show which.
+Round 120: the check for a finished SDK (chain_run_done) searched only the last 512 bytes for DONE, so
+the lines these cases write after DONE hid it, and the next start ran that SDK again (and emptied its
+results: the SDK 12.00 null-case lines of round 118 were lost this way). It now searches the whole file.
 
 ## Exported functions never called before
 
@@ -521,14 +531,14 @@ Total: 219 decision points in 64 functions.
 | memory.cpp:178 | `if (file == nullptr \|\| !file->is_opened \|\| !file->handle) {` |  | INTERNAL: guard (file gone); effect MF24 |
 | memory.cpp:182 | `if (host_file == nullptr) {` |  | INTERNAL: guard (no host file) |
 | memory.cpp:191 | `if (from >= to) {` |  | INTERNAL: guard (nothing past the end) |
-| memory.cpp:195 | `if (tail.file_size != file_size \|\| tail.bytes.size() != page_end - tail_start) {` |  | UNTESTED until MFT1 runs (size changed: the kept bytes after the file grew) |
+| memory.cpp:195 | `if (tail.file_size != file_size \|\| tail.bytes.size() != page_end - tail_start) {` |  | COVERED: MFT1 (file grown by a write: the bytes read 0) |
 | memory.cpp:200 | `if (False(vma.prot & MemoryProt::CpuRead)) {` |  | INTERNAL: host read access to copy |
 
 ## P2 MemoryManager::RestoreFileTail
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:217 | `if (it == file_tails.end() \|\| it->second.file_size != file_size) {` |  | UNTESTED until MFT1 runs (after close and reopen; after growth) |
+| memory.cpp:217 | `if (it == file_tails.end() \|\| it->second.file_size != file_size) {` |  | DIFFERS: MFT1: on the PS4 the bytes past the end survive close and reopen (0x66 read back, size 0x2800); a write that grows the file over them zeroes them. shadPS4 drops them in close() (DropFileTail) |
 | memory.cpp:223 | `if (from >= to) {` |  | INTERNAL: guard |
 
 ## P2 MemoryManager::GuestWritablePrefix
@@ -581,7 +591,7 @@ Total: 219 decision points in 64 functions.
 | line | condition | cited | status |
 |---|---|---|---|
 | memory.cpp:636 | `if (flushed_short) {` | yes | COVERED: M1, Z1, Y4, NU12 (flushed / cached blocks when flushed ones run out) |
-| memory.cpp:641 | `if (True(prot & MemoryProt::CpuWrite)) {` | yes | UNTESTED until PC1 runs (commit write-only: read added?) |
+| memory.cpp:641 | `if (True(prot & MemoryProt::CpuWrite)) {` | yes | COVERED: PC1 (prot 2 reads back 3 from SDK 10.00; 0x33 below, the reservation rule) |
 | memory.cpp:660 | `if (handle->second.dma_type != PhysicalMemoryType::Pooled) {` | yes | INTERNAL: search guard |
 | memory.cpp:674 | `if (mtype == 3) {` |  | COVERED: M1, Z1 (type 3 block accounting) |
 | memory.cpp:703 | `if (IsValidGpuMapping(mapped_addr, size)) {` |  | INTERNAL: GPU |
@@ -654,7 +664,7 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:1361 | `if (!src_committed) {` |  | UNTESTED until PB5 runs (source reserved, not committed) |
+| memory.cpp:1361 | `if (!src_committed) {` |  | COVERED: PB9 (ok, 1 processed; shadPS4 the same: !src_committed returns ok) |
 | memory.cpp:1368 | `if (IsValidGpuMapping(src_addr, size)) {` |  | INTERNAL: GPU |
 | memory.cpp:1427 | `if (IsValidGpuMapping(dest_addr, size)) {` |  | INTERNAL: GPU |
 
@@ -668,8 +678,8 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:1463 | `if (vma.IsFree()) {` |  | UNTESTED until ML1 runs (mlock of unmapped / no-access memory) |
-| memory.cpp:1466 | `if (vma.type == VMAType::Reserved \|\| vma.type == VMAType::PoolReserved \|\| False(vma.prot & (MemoryProt::CpuRead \| MemoryProt::CpuExec))) {` |  | UNTESTED until ML1 runs |
+| memory.cpp:1463 | `if (vma.IsFree()) {` |  | COVERED: ML3 (ENOMEM) |
+| memory.cpp:1466 | `if (vma.type == VMAType::Reserved \|\| vma.type == VMAType::PoolReserved \|\| False(vma.prot & (MemoryProt::CpuRead \| MemoryProt::CpuExec))) {` |  | COVERED: ML3 (no CPU access: ENOMEM) |
 
 ## P2 MemoryManager::IsPhysicalMemoryAliased
 
@@ -697,7 +707,7 @@ Total: 219 decision points in 64 functions.
 | memory.cpp:1597 | `if (vma_base.phys_areas.size() > 0) {` |  | INTERNAL: walk over the physical areas |
 | memory.cpp:1607 | `if (vma_type == VMAType::Direct) {` |  | COVERED: F3, CV probes (direct memory stays allocated after munmap) |
 | memory.cpp:1623 | `} else if (vma_type == VMAType::Pooled) {` |  | COVERED: P52, P53, T15 |
-| memory.cpp:1636 | `} else if (vma_type == VMAType::Flexible) {` |  | PARTLY: budget given back FL4; contents zeroed until FZ1 runs |
+| memory.cpp:1636 | `} else if (vma_type == VMAType::Flexible) {` |  | COVERED: FL4 (budget), FZ1 (contents 0) |
 | memory.cpp:1688 | `if (vma_type != VMAType::Reserved && vma_type != VMAType::PoolReserved) {` |  | INTERNAL: host unmap |
 
 ## P2 MemoryManager::QueryProtection
@@ -706,9 +716,9 @@ Total: 219 decision points in 64 functions.
 |---|---|---|---|
 | memory.cpp:1733 | `if ((vma.type == VMAType::Pooled \|\| vma.type == VMAType::PoolReserved) && static_cast<u32>(sdk_version) < 0x10000000) {` | yes | COVERED: PG4, PG1, CV40-CV94 (pool memory below SDK 10.00: reservation and 0x33) |
 | memory.cpp:1736 | `if (reservation != pool_reservations.end()) {` | yes | COVERED: PG4 |
-| memory.cpp:1741 | `if (start != nullptr) {` | yes | UNTESTED until QP2 runs (null start) |
-| memory.cpp:1744 | `if (end != nullptr) {` |  | UNTESTED until QP2 runs (null end) |
-| memory.cpp:1747 | `if (prot != nullptr) {` |  | UNTESTED until QP2 runs (null prot) |
+| memory.cpp:1741 | `if (start != nullptr) {` | yes | COVERED: QP2 (ok) |
+| memory.cpp:1744 | `if (end != nullptr) {` |  | COVERED: QP2 (ok) |
+| memory.cpp:1747 | `if (prot != nullptr) {` |  | COVERED: QP2 (ok) |
 
 ## P2 MemoryManager::ProtectBytes
 
@@ -717,7 +727,7 @@ Total: 219 decision points in 64 functions.
 | memory.cpp:1772 | `if (vma_base.type == VMAType::Pooled) {` | yes | COVERED: EX5 (pool commit 0x3, mprotect 0x7: ok, prot 0x33, does not run) |
 | memory.cpp:1777 | `if (vma_base.type == VMAType::File) {` | yes | COVERED: PT3, XR6 (file mapping given execute does not run it) |
 | memory.cpp:1783 | `if (vma_base.type == VMAType::File && vma_base.file_read_only) {` | yes | COVERED: TF4 (read-only file, shared: mprotect rw succeeds, prot stays 1) |
-| memory.cpp:1791 | `if (vma_base.type == VMAType::Free \|\| vma_base.type == VMAType::PoolReserved) {` | yes | PARTLY: free memory PX2 (hole), PT2 (gap): ok, nothing changes; reserved pool memory until MPR1 runs |
+| memory.cpp:1791 | `if (vma_base.type == VMAType::Free \|\| vma_base.type == VMAType::PoolReserved) {` | yes | PARTLY: free memory PX2 (hole), PT2 (gap): ok, nothing changes; reserved pool memory MPR1 (ok; reads back 0x33 below SDK 10.00, 0 from 10.00) |
 | memory.cpp:1796 | `if (True(prot & MemoryProt::CpuWrite)) {` | yes | COVERED: NU2 (mprotect write-only reads back 0x3) |
 | memory.cpp:1804 | `if (vma_base.type == VMAType::File && vma_base.file_write_only) {` | yes | COVERED: TF3, TF6 (write-only file: no read) |
 | memory.cpp:1811 | `if (True(prot & MemoryProt::CpuRead)) {` | yes | INTERNAL: host permission bits |
@@ -736,10 +746,10 @@ Total: 219 decision points in 64 functions.
 | line | condition | cited | status |
 |---|---|---|---|
 | memory.cpp:1868 | `if (size == 0) {` |  | COVERED: NU2 (len 0: ok) |
-| memory.cpp:1879 | `if (addr < vbase) {` |  | UNTESTED until MPR1 runs (range below 0x400000) |
-| memory.cpp:1881 | `if (skip >= size) {` |  | UNTESTED until MPR1 runs |
-| memory.cpp:1887 | `if (addr >= vend) {` |  | UNTESTED until MPR1 runs (past the address space) |
-| memory.cpp:1890 | `if (addr + size > vend) {` |  | UNTESTED until MPR1 runs (across its end) |
+| memory.cpp:1879 | `if (addr < vbase) {` |  | COVERED: MPR1 (mprotect at 0x2000: ok) |
+| memory.cpp:1881 | `if (skip >= size) {` |  | COVERED: MPR1 |
+| memory.cpp:1887 | `if (addr >= vend) {` |  | COVERED: MPR1 (at 0x800000000000: ok) |
+| memory.cpp:1890 | `if (addr + size > vend) {` |  | COVERED: MPR1 (across 0x800000000000: ok) |
 | memory.cpp:1903 | `if (it == vma_map.end()) {` |  | COVERED: PX2 (hole), PT2 (gap), NU2 (+hole) |
 | memory.cpp:1907 | `if (vma_base.base > addr + protected_bytes) {` |  | COVERED: PT2 (gap inside the range) |
 | memory.cpp:1910 | `if (protected_bytes >= size) {` |  | COVERED: PT2 |
@@ -819,8 +829,8 @@ Total: 219 decision points in 64 functions.
 | line | condition | cited | status |
 |---|---|---|---|
 | memory.cpp:2374 | `if (vma.type == VMAType::Stack) {` |  | COVERED: MS3 (stack: yes, flexible: no) |
-| memory.cpp:2379 | `if (start != nullptr) {` |  | UNTESTED until QP2 runs (null start) |
-| memory.cpp:2383 | `if (end != nullptr) {` |  | UNTESTED until QP2 runs (null end) |
+| memory.cpp:2379 | `if (start != nullptr) {` |  | COVERED: QP2 (ok) |
+| memory.cpp:2383 | `if (end != nullptr) {` |  | COVERED: QP2 (ok) |
 
 ## P2 MemoryManager::InvalidateMemory
 
@@ -832,7 +842,7 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:2410 | `if (virtual_addr < min_search_address) {` |  | UNTESTED until SH1 runs (hint below 0x400000; the PS4 maps from 0x4000, N6) |
+| memory.cpp:2410 | `if (virtual_addr < min_search_address) {` |  | DIFFERS (host limit, as N6): SH1: the PS4 places a search at the hints 0x4000 and 0x100000 exactly |
 | memory.cpp:2425 | `if (it->second.IsFree() && it->second.Contains(virtual_addr, size)) {` |  | COVERED: K1 (hints 0x10000000, 0x300000000, 0x7F0000000, 0x900000000: exactly there), MF4 (rel hint 0) |
 | memory.cpp:2434 | `if (!it->second.IsFree()) {` |  | COVERED: MF3 (hint inside a reservation: placed after it), HB2, HB4 |
 | memory.cpp:2442 | `if (virtual_addr > vma.base + vma.size) {` |  | COVERED: N2, K5, AL3 (alignment larger than a free area) |
@@ -934,7 +944,7 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:544 | `if (in_addr == 0) {` |  | UNTESTED until SY1 runs |
+| memory.cpp:544 | `if (in_addr == 0) {` |  | COVERED: SY1 (valid mapping: ok, prot 3, name sy1) |
 
 ## P2 sceKernelMprotect
 
@@ -946,7 +956,7 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:632 | `if (aligned_size == 0) {` |  | UNTESTED until MT0 runs (size 0 with valid arguments; J4 fails earlier on type and prot) |
+| memory.cpp:632 | `if (aligned_size == 0) {` |  | COVERED: MT0 (size 0: ok) |
 
 ## P2 sceKernelDirectMemoryQuery
 
@@ -958,8 +968,8 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:757 | `if (entries == nullptr \|\| entries[i].length == 0 \|\| entries[i].operation > 4) {` | yes | UNTESTED until BM1 runs (null entries) |
-| memory.cpp:797 | `if (numEntriesOut != NULL) { // can be zero. do not return an error code.` |  | UNTESTED until BM1 runs (null count out) |
+| memory.cpp:757 | `if (entries == nullptr \|\| entries[i].length == 0 \|\| entries[i].operation > 4) {` | yes | COVERED: BM5 (EFAULT, 0) |
+| memory.cpp:797 | `if (numEntriesOut != NULL) { // can be zero. do not return an error code.` |  | COVERED: BM5 (ok) |
 
 ## P2 sceKernelMemoryPoolCommit
 
@@ -977,8 +987,8 @@ Total: 219 decision points in 64 functions.
 
 | line | condition | cited | status |
 |---|---|---|---|
-| memory.cpp:1043 | `if (!Common::Is64KBAligned(dest) \|\| !Common::Is64KBAligned(src) \|\| !Common::Is64KBAligned(len)) {` |  | UNTESTED until PB6 runs (move to an unaligned destination) |
-| memory.cpp:1063 | `if (num_processed != nullptr) {` | yes | UNTESTED until PB6 runs (null processed count) |
+| memory.cpp:1043 | `if (!Common::Is64KBAligned(dest) \|\| !Common::Is64KBAligned(src) \|\| !Common::Is64KBAligned(len)) {` |  | COVERED: PB6 (EINVAL) |
+| memory.cpp:1063 | `if (num_processed != nullptr) {` | yes | COVERED: PB7 (ok) |
 
 ## P2 PosixMmapImpl
 

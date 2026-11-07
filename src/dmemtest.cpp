@@ -1794,7 +1794,7 @@ static void run_p() {
         l.end();
         q_raw("P9", "query after chk", (long)pp2, 0, sizeof(DmemInfo), (long)pp2);
     } else {
-        Line l = head("P8", "pool expand again");
+        Line l = head("P96", "pool expand again");
         l.ret("ret", re2).end();
     }
 }
@@ -2133,27 +2133,40 @@ static void cov_posix(Line& l, int r) {
     l.c(' ');
 }
 static void co_scan(Line& l, uint64_t base, uint64_t size);
-// A libkernel function OpenOrbis' stub does not have, looked up by name in libkernel (null if not).
-static void* cov_libkernel_sym(const char* name) {
+// A libkernel function OpenOrbis' stub does not have, looked up by name (null if not found). With a
+// line, every step is written to it: the module list code, each module whose name has "kernel" in
+// it (name, handle) and the sceKernelDlsym code for it. Round 118: found at SDK 1.00-3.50, not from
+// 5.00; sceKernelClearVirtualRangeName never (its NID is the hash of this name, as shadPS4's).
+static void* cov_libkernel_sym(const char* name, Line* diag = nullptr) {
     static int32_t handles[64];
     size_t n = 0;
-    if (sceKernelGetModuleList(handles, 64, &n) != 0)
+    const int32_t rl = sceKernelGetModuleList(handles, 64, &n);
+    if (diag)
+        diag->s("list=").c(code(rl)).c(' ').dec((int)n).c(' ');
+    if (rl != 0)
         return nullptr;
+    void* found = nullptr;
     for (size_t i = 0; i < n && i < 64; i++) {
         static DtModuleInfo info;
         my_memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
         if (sceKernelGetModuleInfo(handles[i], &info) != 0)
             continue;
-        static const char want[] = "libkernel.";
-        bool match = true;
-        for (int k = 0; want[k]; k++)
-            match = match && info.name[k] == want[k];
+        bool kernel = false;
+        for (int k = 0; info.name[k] && info.name[k + 5]; k++)
+            kernel = kernel || (info.name[k] == 'k' && info.name[k + 1] == 'e' &&
+                                info.name[k + 2] == 'r' && info.name[k + 3] == 'n' &&
+                                info.name[k + 4] == 'e' && info.name[k + 5] == 'l');
+        if (!kernel)
+            continue;
         void* fn = nullptr;
-        if (match && sceKernelDlsym(handles[i], name, &fn) == 0)
-            return fn;
+        const int32_t rd = sceKernelDlsym(handles[i], name, &fn);
+        if (diag)
+            diag->s(info.name).c('#').hex((uint32_t)handles[i]).c(':').hex((uint32_t)rd).c(' ');
+        if (rd == 0 && fn && !found)
+            found = fn;
     }
-    return nullptr;
+    return found;
 }
 static void run_cov5() {
     say("== coverage batch 5: ConfiguredFlexibleMemorySize, mlock, munlock, ReleaseFlexible, PRT");
@@ -2161,7 +2174,7 @@ static void run_cov5() {
         // CF1: sceKernelConfiguredFlexibleMemorySize (not in OpenOrbis' libkernel stub: looked up in
         // libkernel by name): null out | the size
         Line l = head("CF1", "ConfiguredFlexibleMemorySize: dlsym | size");
-        void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize");
+        void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize", &l);
         const int32_t rd = fn ? 0 : -1;
         l.c(code(rd)).s(" | ");
         if (rd == 0 && fn) {
@@ -2172,9 +2185,9 @@ static void run_cov5() {
         l.end();
     }
     {
-        // ML1: mlock null | len 0 | wrap | unmapped | no access; munlock null | len 0 | wrap |
+        // ML3: mlock null | len 0 | wrap | unmapped | no access; munlock null | len 0 | wrap |
         // unmapped (PX2 has both on mapped memory: mlock 0, munlock -1/EINVAL)
-        Line l = head("ML1", "mlock: null len0 wrap unmapped noaccess | munlock: null len0 wrap unmapped");
+        Line l = head("ML3", "mlock: null len0 wrap unmapped noaccess | munlock: null len0 wrap unmapped");
         void* f = 0;
         void* na = 0;
         void* hole = 0;
@@ -2207,8 +2220,10 @@ static void run_cov5() {
         // CL1: sceKernelClearVirtualRangeName (not in OpenOrbis' stub): on a mapping named "cl1":
         // code, VirtualQuery name after | free memory | len 0 | address +1000
         // CL2: two adjacent no-access pages named "x" and "y", both cleared: areas
-        Line l = head("CL1", "clear name: named map (code, name) | free | len0 | +1000");
-        auto clr = (int32_t(*)(const void*, size_t))cov_libkernel_sym("sceKernelClearVirtualRangeName");
+        Line l = head("CL1", "clear name: lookup | named map (code, name) | free | len0 | +1000");
+        auto clr = (int32_t(*)(const void*, size_t))cov_libkernel_sym("sceKernelClearVirtualRangeName",
+                                                                       &l);
+        l.s("| ");
         void* f = 0;
         void* hole = 0;
         if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
@@ -4023,7 +4038,7 @@ static void run_m() {
     {
         static const uint64_t al[] = {0x80000000ull, 0x100000000ull, 0x300000};
         const long pa = alloc(1, 3, &rr);
-        Line l = head("M5", "dmem map align 2G, 4G, 3M");
+        Line l = head("M6", "dmem map align 2G, 4G, 3M");
         for (uint64_t a : al) {
             void* d = 0;
             const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, a) : -1;
@@ -5538,9 +5553,9 @@ static void run_cov6() {
         l.end();
     }
     {
-        // FM3: file mmap: ro fd shared rw | ro fd private rw | wo fd read | a directory | fixed
+        // FM9: file mmap: ro fd shared rw | ro fd private rw | wo fd read | a directory | fixed
         // no-overwrite over a flexible mapping | fixed at 800000000000
-        Line l = head("FM3", "file: ro shared rw | ro private rw | wo read | dir | fixed noovw | 8000..");
+        Line l = head("FM9", "file: ro shared rw | ro private rw | wo read | dir | fixed noovw | 8000..");
         char path[64];
         mf_named(path, "dmem_cov6.bin");
         int fd = sceKernelOpen(path, 0x0602, 0777);
@@ -6687,9 +6702,15 @@ static void run_cov4() {
         // PE1: expand with start -10000 | end <= start | len 0 | len 4000 | align 4000 (null out: PE2)
         Line l = head("PE1", "expand: start<0 | end<=start | len0 | len4000 | al4000");
         uint64_t p = 0;
+        // the address returned when the PS4 accepts (round 118: start -10000 and len 0 are ok)
         auto ex = [&](uint64_t s0, uint64_t e0, uint64_t len, uint64_t al, uint64_t* out) {
+            if (out)
+                *out = 0xDEAD0000ull;
             const int32_t r = sceKernelMemoryPoolExpand(s0, e0, len, al, out);
             l.c(code(r));
+            if (r == 0 && out)
+                l.c(':').hex(*out);
+            l.c(' ');
         };
         ex((uint64_t)-0x10000LL, g_dmem, blk, blk, &p);
         ex(g_dmem, g_dmem, blk, blk, &p);
@@ -6733,10 +6754,10 @@ static void run_cov4() {
         l.end();
     }
     {
-        // PB5: moves that cannot be done, one entry each. Block 0 committed (source), block 1
+        // PB9: moves that cannot be done, one entry each. Block 0 committed (source), block 1
         // reserved (destination), block 2 committed; src / dest: unmapped VA, flexible memory,
         // reserved pool memory, committed pool memory.
-        Line l = head("PB5", "move src unmapped|flex|reserved, dest unmapped|committed|flex: code n");
+        Line l = head("PB9", "move src unmapped|flex|reserved, dest unmapped|committed|flex: code n");
         const bool c0 = sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0) == 0;
         const bool c2 = sceKernelMemoryPoolCommit(R + 2 * blk, blk, 0, 0x3, 0) == 0;
         void* hole = 0;
@@ -11523,24 +11544,33 @@ static bool chain_run_done(int idx) {
         const int fd = sceKernelOpen(path, 0x0000, 0);
         if (fd < 0)
             continue;
-        const long size = sceKernelLseek(fd, 0, 2);
-        char tail[513];
-        const long from = size > 512 ? size - 512 : 0;
-        sceKernelLseek(fd, from, 0);
-        const long got = sceKernelRead(fd, tail, 512);
-        sceKernelClose(fd);
-        if (got <= 0)
-            return false;
-        tail[got] = 0;
+        // The whole file: the null-pointer cases write after the DONE line (round 119: with only the
+        // last 512 bytes searched, their lines hid it and the next start ran the SDK again)
         static const char done[] = "===== DONE =====";
-        for (long k = 0; k + (long)sizeof(done) - 1 <= got; k++) {
-            bool same = true;
-            for (int c = 0; c < (int)sizeof(done) - 1 && same; c++)
-                same = tail[k + c] == done[c];
-            if (same)
-                return true;
+        const int dn = (int)sizeof(done) - 1;
+        static char buf[4096 + sizeof(done)];
+        int keep = 0;
+        bool found = false;
+        for (;;) {
+            const long got = sceKernelRead(fd, buf + keep, 4096);
+            if (got <= 0)
+                break;
+            const int have = keep + (int)got;
+            for (int k = 0; k + dn <= have && !found; k++) {
+                bool same = true;
+                for (int c = 0; c < dn && same; c++)
+                    same = buf[k + c] == done[c];
+                found = same;
+            }
+            if (found)
+                break;
+            // keep the last dn - 1 bytes: a DONE line split between two reads is still found
+            keep = have < dn - 1 ? have : dn - 1;
+            for (int c = 0; c < keep; c++)
+                buf[c] = buf[have - keep + c];
         }
-        return false;
+        sceKernelClose(fd);
+        return found;
     }
     return false;
 }
@@ -11644,7 +11674,7 @@ static void nx_pe2() {
     l.c(code(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, nullptr))).end();
 }
 static void nx_pb4() {
-    Line l = head("PB4", "pool batch: null entries");
+    Line l = head("PB8", "pool batch: null entries");
     int32_t n = -1;
     l.c(code(sceKernelMemoryPoolBatch(nullptr, 1, &n, 0))).c(' ').dec(n).end();
 }
@@ -11660,7 +11690,7 @@ static void nx_pb7() {
     sceKernelMunmap(rv, 0x200000);
 }
 static void nx_bm1() {
-    Line l = head("BM1", "BatchMap2: null entries | protect entry, null count out");
+    Line l = head("BM5", "BatchMap2: null entries | protect entry, null count out");
     int32_t n = -1;
     l.c(code(sceKernelBatchMap2(nullptr, 1, &n, 0))).c(' ').dec(n).s(" | ");
     void* fm = 0;
@@ -11696,14 +11726,14 @@ static void nx_qp2() {
 }
 static void nx_cf2() {
     Line l = head("CF2", "ConfiguredFlexibleMemorySize: null out");
-    void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize");
+    void* fn = cov_libkernel_sym("sceKernelConfiguredFlexibleMemorySize", &l);
     if (!fn)
         return l.s("SKIP dlsym").end();
     l.c(code(((int32_t(*)(uint64_t*))fn)(nullptr))).end();
 }
 static const int g_null_cases = 8;
-static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB4",
-                                                     "PB7", "BM1", "QP2", "CF2"};
+static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8",
+                                                     "PB7", "BM5", "QP2", "CF2"};
 static void run_null_last() {
     static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4,
                                                    nx_pb7, nx_bm1, nx_qp2, nx_cf2};
