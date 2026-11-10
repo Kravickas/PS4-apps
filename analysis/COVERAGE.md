@@ -176,8 +176,8 @@ Total: 158 returns in 47 functions. Line numbers: memory-tests at the time of ma
 
 | line | error | condition | status |
 |---|---|---|---|
-| kernel/memory.cpp:829 | EINVAL | `if (searchStart < 0 \|\| searchEnd <= searchStart)` | DIFFERS: PE1: start -0x10000 ok on the PS4; end <= start ENOMEM (shadPS4 EINVAL for both); round 119 prints what the ok case returns |
-| kernel/memory.cpp:833 | EINVAL | `if (len <= 0 \|\| !Common::Is64KBAligned(len))` | DIFFERS: PE1: len 0 ok on the PS4 (shadPS4 EINVAL); len 0x4000 EINVAL (same) |
+| kernel/memory.cpp:829 | EINVAL | `if (searchStart < 0 \|\| searchEnd <= searchStart)` | DIFFERS: PE1: start -0x10000 ok on the PS4 and expands normally (0x1650000 in round 120: the start acts as 0); end <= start ENOMEM; shadPS4 EINVAL for both |
+| kernel/memory.cpp:833 | EINVAL | `if (len <= 0 \|\| !Common::Is64KBAligned(len))` | DIFFERS: PE1: len 0 ok on the PS4 and writes 0 to the output (round 120); shadPS4 EINVAL; len 0x4000 EINVAL (same) |
 | kernel/memory.cpp:837 | EINVAL | `if (alignment != 0 && !Common::Is64KBAligned(alignment))` | COVERED: PE1 (alignment 0x4000: EINVAL) |
 | kernel/memory.cpp:841 | EINVAL | `if (physAddrOut == nullptr)` | COVERED: PE2 (null phys out: ok on the PS4) |
 | kernel/memory.cpp:850 | ENOMEM | `if (searchEnd <= searchStart \|\| searchEnd < len \|\| !is_in_range)` | COVERED: P25 (window 0x4000 < len 0x10000), PS4 ENOMEM |
@@ -452,6 +452,18 @@ one ends the app, starting the app again continues with the next. Their "startin
 Round 120: the check for a finished SDK (chain_run_done) searched only the last 512 bytes for DONE, so
 the lines these cases write after DONE hid it, and the next start ran that SDK again (and emptied its
 results: the SDK 12.00 null-case lines of round 118 were lost this way). It now searches the whole file.
+
+## Round 120 facts (FW 12.02)
+
+- sceKernelGetModuleList: SDK 1.00-3.50 list 30-31 modules (libkernel.sprx is handle 0x2001); from SDK
+  5.00 only 1 (the application's), at 5.00, 5.01, 5.03, 5.05, 5.50 and 12.00. shadPS4 listed 5 at 12.00.
+- sceKernelDlsym on libkernel.sprx: sceKernelConfiguredFlexibleMemorySize found (returns 0x1C000000,
+  448 MiB); sceKernelClearVirtualRangeName not found (0x80020003, ESRCH), though its NID is the hash of
+  that name (as shadPS4 registers it). Round 121 tries handle 0x2001 directly from SDK 5.00.
+- Null-pointer cases at 5.50 and 12.00 alike: E18, RV8 end the app; PE2 ok; PB8 EFAULT 0; PB7 ok;
+  BM5 EFAULT 0 | ok; QP2 ok.
+- P22 (EACCES) and Q20 (next allocation) disagree at every SDK for the hole right after a pool block;
+  Q22-Q25 (round 121) vary only what lies before the pool block.
 
 ## Exported functions never called before
 

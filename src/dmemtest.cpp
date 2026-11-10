@@ -1465,6 +1465,39 @@ static void run_q() {
             for (int i = 0; i < 4; i++)
                 release_all(blk[i], 4);
     }
+    // Q22-Q25: P22 and Q20 have the same layout after the pool block, but P22 gives EACCES at the
+    // hole start and Q20 the next allocation (round 118-120, every SDK). They differ in what lies
+    // before the pool block: [guard][X][pool][hole][A t3][wall t0] in 64K units, X = free (Q22, as
+    // Q20) | type 3 allocation (Q23) | type 0 allocation (Q24) | another pool block (Q25)
+    for (int v = 0; v < 4; v++) {
+        static const char* const ids[4] = {"Q22", "Q23", "Q24", "Q25"};
+        static const char* const names[4] = {"hole start after pool, before it: free",
+                                             "hole start after pool, before it: t3 alloc",
+                                             "hole start after pool, before it: t0 alloc",
+                                             "hole start after pool, before it: pool"};
+        const int t[5] = {v == 1 ? 3 : (v == 2 ? 0 : -1), -1, -1, 3, 0};
+        long blk[5];
+        const long c = build(5, t, blk, 0x10000);
+        bool ok = c >= 0;
+        uint64_t px = 0;
+        if (ok && v == 3)
+            ok = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + 0x10000, 0x10000, 0x10000,
+                                           &px) == 0 &&
+                 px == (uint64_t)c;
+        if (ok)
+            ok = sceKernelMemoryPoolExpand((uint64_t)c + 0x10000, (uint64_t)c + 0x20000, 0x10000,
+                                           0x10000, &px) == 0 &&
+                 px == (uint64_t)c + 0x10000;
+        if (!ok) {
+            Line l = head(ids[v], names[v]);
+            l.s("SKIP layout").end();
+        } else {
+            q_raw(ids[v], names[v], c + 0x20000, 1, sizeof(DmemInfo), c);
+        }
+        if (c >= 0)
+            for (int k = 0; k < 5; k++)
+                release_all(blk[k], 4);
+    }
     // two pages with a free page on both sides, so the region reported is the allocation alone
     int32_t r = 0;
     const long pa = alloc_guarded(2, 3, &r);
@@ -2144,7 +2177,7 @@ static void* cov_libkernel_sym(const char* name, Line* diag = nullptr) {
     if (diag)
         diag->s("list=").c(code(rl)).c(' ').dec((int)n).c(' ');
     if (rl != 0)
-        return nullptr;
+        n = 0;
     void* found = nullptr;
     for (size_t i = 0; i < n && i < 64; i++) {
         static DtModuleInfo info;
@@ -2164,6 +2197,16 @@ static void* cov_libkernel_sym(const char* name, Line* diag = nullptr) {
         if (diag)
             diag->s(info.name).c('#').hex((uint32_t)handles[i]).c(':').hex((uint32_t)rd).c(' ');
         if (rd == 0 && fn && !found)
+            found = fn;
+    }
+    // From SDK 5.00 the list holds only the application's module (round 120: list=1); below 5.00
+    // libkernel.sprx is handle 0x2001. Whether sceKernelDlsym takes that handle anyway:
+    if (!found) {
+        void* fn = nullptr;
+        const int32_t rd = sceKernelDlsym(0x2001, name, &fn);
+        if (diag)
+            diag->s("h2001:").hex((uint32_t)rd).c(' ');
+        if (rd == 0 && fn)
             found = fn;
     }
     return found;
