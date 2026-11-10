@@ -462,8 +462,13 @@ results: the SDK 12.00 null-case lines of round 118 were lost this way). It now 
   that name (as shadPS4 registers it). Round 121 tries handle 0x2001 directly from SDK 5.00.
 - Null-pointer cases at 5.50 and 12.00 alike: E18, RV8 end the app; PE2 ok; PB8 EFAULT 0; PB7 ok;
   BM5 EFAULT 0 | ok; QP2 ok.
-- P22 (EACCES) and Q20 (next allocation) disagree at every SDK for the hole right after a pool block;
-  Q22-Q25 (round 121) vary only what lies before the pool block.
+- P22 (EACCES) and Q20 (next allocation) disagree at every SDK for the hole right after a pool block.
+  Round 121: Q22-Q25 (before the pool block free, t3, t0 or pool) all give the next allocation, so that
+  is not it. Left: P22 expands the pool block before allocating after it, build() allocates first; Q26
+  (round 122) uses P22's order.
+- Round 121: sceKernelDlsym with handle 0x2001 works from SDK 5.00 (the module list does not show
+  libkernel): sceKernelConfiguredFlexibleMemorySize returns 0x1C000000 at 5.50 and 12.00 too;
+  sceKernelClearVirtualRangeName is ESRCH that way as well (not exported by libkernel on FW 12.02).
 
 ## Exported functions never called before
 

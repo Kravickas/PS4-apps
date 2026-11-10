@@ -1498,6 +1498,38 @@ static void run_q() {
             for (int k = 0; k < 5; k++)
                 release_all(blk[k], 4);
     }
+    {
+        // Q26: Q22-Q25 all give the next allocation (round 121, every SDK), P22 still EACCES. Left as
+        // the difference: P22 expands the pool block first and allocates after it; build() allocates
+        // first. [guard][free][pool][hole][A t3][wall t0], 64K units, in P22's order: pool block
+        // first, then A and the wall
+        const int t[5] = {-1, -1, -1, -1, -1};
+        long blk[5];
+        const long c = build(5, t, blk, 0x10000);
+        uint64_t px = 0;
+        int32_t r = 0;
+        long a = -1, w = -1;
+        bool ok = c >= 0 &&
+                  sceKernelMemoryPoolExpand((uint64_t)c + 0x10000, (uint64_t)c + 0x20000, 0x10000,
+                                            0x10000, &px) == 0 &&
+                  px == (uint64_t)c + 0x10000;
+        if (ok) {
+            a = alloc_in(c + 0x30000, c + 0x40000, 4, 3, &r);
+            w = alloc_in(c + 0x40000, c + 0x50000, 4, 0, &r);
+            ok = a == c + 0x30000 && w == c + 0x40000;
+        }
+        if (!ok) {
+            Line l = head("Q26", "hole start after pool, pool expanded before A was allocated");
+            l.s("SKIP layout").end();
+        } else {
+            q_raw("Q26", "hole start after pool, pool expanded before A was allocated", c + 0x20000,
+                  1, sizeof(DmemInfo), c);
+        }
+        if (a >= 0)
+            release_all(a, 4);
+        if (w >= 0)
+            release_all(w, 4);
+    }
     // two pages with a free page on both sides, so the region reported is the allocation alone
     int32_t r = 0;
     const long pa = alloc_guarded(2, 3, &r);
