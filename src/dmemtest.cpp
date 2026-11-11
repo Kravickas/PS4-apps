@@ -1570,6 +1570,38 @@ static void run_q() {
             for (int k = 0; k < 5; k++)
                 release_all(blk[k], 4);
     }
+    // Q33, Q34 (round 124): Q27-Q32 show EACCES only at the pool block's end address, and only when
+    // the pool block was expanded before the allocation after it. Q33: pool block, nothing after it
+    // in the layout. Q34: A allocated first, then the pool block, then A released and allocated
+    // again (now made after the pool block)
+    for (int v = 0; v < 2; v++) {
+        const char* id = v == 0 ? "Q33" : "Q34";
+        const char* name = v == 0 ? "hole start after pool, nothing allocated after it"
+                                   : "hole start after pool, A released and allocated again after";
+        const int t[5] = {-1, -1, -1, v == 0 ? -1 : 3, v == 0 ? -1 : 0};
+        long blk[5];
+        const long c = build(5, t, blk, 0x10000);
+        uint64_t px = 0;
+        int32_t r = 0;
+        bool ok = c >= 0 &&
+                  sceKernelMemoryPoolExpand((uint64_t)c + 0x10000, (uint64_t)c + 0x20000, 0x10000,
+                                            0x10000, &px) == 0 &&
+                  px == (uint64_t)c + 0x10000;
+        if (ok && v == 1) {
+            release_all(blk[3], 4);
+            blk[3] = alloc_in(c + 0x30000, c + 0x40000, 4, 3, &r);
+            ok = blk[3] == c + 0x30000;
+        }
+        if (!ok) {
+            Line l = head(id, name);
+            l.s("SKIP layout").end();
+        } else {
+            q_raw(id, name, c + 0x20000, 1, sizeof(DmemInfo), c);
+        }
+        if (c >= 0)
+            for (int k = 0; k < 5; k++)
+                release_all(blk[k], 4);
+    }
     // two pages with a free page on both sides, so the region reported is the allocation alone
     int32_t r = 0;
     const long pa = alloc_guarded(2, 3, &r);

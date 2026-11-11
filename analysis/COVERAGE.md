@@ -467,7 +467,11 @@ results: the SDK 12.00 null-case lines of round 118 were lost this way). It now 
   is not it. Round 122: Q26 (P22's order: pool block expanded first, the allocation after it made
   later) is EACCES at every SDK, like P22. So the order decides: allocation first, then pool block:
   find-next at the hole gives the next allocation; pool block first: EACCES. The mechanism is not
-  measured; Q27-Q32 (round 123) query start, +4000 and last page of the hole in both orders.
+  measured. Round 123 (Q27-Q32, every SDK): only the pool block's exact end address is EACCES, and
+  only when the pool block was expanded first; from +4000 on, and at every point when the allocation
+  came first, the next allocation. shadPS4 (memory-tests) returns EACCES at that address in both
+  orders: DIFFERS for Q20, Q22-Q25, Q30. Q33 (nothing after the pool block) and Q34 (the allocation
+  made again after the pool block) in round 124 test a relative-age model before shadPS4 is changed.
 - Round 121: sceKernelDlsym with handle 0x2001 works from SDK 5.00 (the module list does not show
   libkernel): sceKernelConfiguredFlexibleMemorySize returns 0x1C000000 at 5.50 and 12.00 too;
   sceKernelClearVirtualRangeName is ESRCH that way as well (not exported by libkernel on FW 12.02).
