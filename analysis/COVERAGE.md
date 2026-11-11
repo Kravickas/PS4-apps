@@ -464,8 +464,10 @@ results: the SDK 12.00 null-case lines of round 118 were lost this way). It now 
   BM5 EFAULT 0 | ok; QP2 ok.
 - P22 (EACCES) and Q20 (next allocation) disagree at every SDK for the hole right after a pool block.
   Round 121: Q22-Q25 (before the pool block free, t3, t0 or pool) all give the next allocation, so that
-  is not it. Left: P22 expands the pool block before allocating after it, build() allocates first; Q26
-  (round 122) uses P22's order.
+  is not it. Round 122: Q26 (P22's order: pool block expanded first, the allocation after it made
+  later) is EACCES at every SDK, like P22. So the order decides: allocation first, then pool block:
+  find-next at the hole gives the next allocation; pool block first: EACCES. The mechanism is not
+  measured; Q27-Q32 (round 123) query start, +4000 and last page of the hole in both orders.
 - Round 121: sceKernelDlsym with handle 0x2001 works from SDK 5.00 (the module list does not show
   libkernel): sceKernelConfiguredFlexibleMemorySize returns 0x1C000000 at 5.50 and 12.00 too;
   sceKernelClearVirtualRangeName is ESRCH that way as well (not exported by libkernel on FW 12.02).

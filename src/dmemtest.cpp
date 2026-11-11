@@ -1530,6 +1530,46 @@ static void run_q() {
         if (w >= 0)
             release_all(w, 4);
     }
+    // Q27-Q32: Q26 (pool block first, then A) is EACCES like P22, Q22 (A first) the next allocation
+    // (round 122, every SDK). How far that reaches in the 64K hole: start | +4000 | last page, in
+    // P22's order (Q27-Q29) and in build()'s (Q30-Q32)
+    for (int order = 0; order < 2; order++) {
+        static const char* const ids[2][3] = {{"Q27", "Q28", "Q29"}, {"Q30", "Q31", "Q32"}};
+        static const char* const names[2][3] = {
+            {"pool first: hole start", "pool first: hole +4000", "pool first: hole last page"},
+            {"alloc first: hole start", "alloc first: hole +4000", "alloc first: hole last page"}};
+        const int t[5] = {-1, -1, -1, order == 0 ? -1 : 3, order == 0 ? -1 : 0};
+        long blk[5];
+        const long c = build(5, t, blk, 0x10000);
+        uint64_t px = 0;
+        int32_t r = 0;
+        long a = -1, w = -1;
+        bool ok = c >= 0 &&
+                  sceKernelMemoryPoolExpand((uint64_t)c + 0x10000, (uint64_t)c + 0x20000, 0x10000,
+                                            0x10000, &px) == 0 &&
+                  px == (uint64_t)c + 0x10000;
+        if (ok && order == 0) {
+            a = alloc_in(c + 0x30000, c + 0x40000, 4, 3, &r);
+            w = alloc_in(c + 0x40000, c + 0x50000, 4, 0, &r);
+            ok = a == c + 0x30000 && w == c + 0x40000;
+        }
+        static const long at[3] = {0x20000, 0x24000, 0x2C000};
+        for (int k = 0; k < 3; k++) {
+            if (!ok) {
+                Line l = head(ids[order][k], names[order][k]);
+                l.s("SKIP layout").end();
+            } else {
+                q_raw(ids[order][k], names[order][k], c + at[k], 1, sizeof(DmemInfo), c);
+            }
+        }
+        if (a >= 0)
+            release_all(a, 4);
+        if (w >= 0)
+            release_all(w, 4);
+        if (c >= 0 && order == 1)
+            for (int k = 0; k < 5; k++)
+                release_all(blk[k], 4);
+    }
     // two pages with a free page on both sides, so the region reported is the allocation alone
     int32_t r = 0;
     const long pa = alloc_guarded(2, 3, &r);
