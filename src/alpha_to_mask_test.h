@@ -34,7 +34,7 @@
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-24"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-25"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -305,7 +305,18 @@ static const struct {
 /* Alpha tables: the coarse table (128 specials, then 896 steps over [0, 1], one value per 2 x 2
    quad), one value everywhere, the visual ramp (quad q: q / 1023) and net, random values, or the
    16-bit sweep (pass j, quad q: raw value 1024 j + q). */
-enum { AK_COARSE, AK_UNIFORM, AK_RAMP, AK_NET, AK_RANDOM, AK_SWEEP16, AK_TEX, AK_BOUND, AK_TIES };
+enum {
+    AK_COARSE,
+    AK_UNIFORM,
+    AK_RAMP,
+    AK_NET,
+    AK_RANDOM,
+    AK_SWEEP16,
+    AK_TEX,
+    AK_BOUND,
+    AK_TIES,
+    AK_CLEAR_STATE
+};
 /* The second table B: none, a random alpha, a random sample mask, a random kill flag (bit 0). */
 enum { BM_NONE, BM_ALPHA, BM_MASK, BM_KILL, BM_ALL, BM_C };
 /* Hypotheses (h0 / h1) where the first hardware run left a question open. */
@@ -1460,6 +1471,10 @@ static const struct AlphaToMaskTest k_alpha_to_mask_tests[] = {
                        .alpha_to_mask_num_samples = 2, .kind = AK_RAMP),
     ALPHA_TO_MASK_CASE(.id = "VR05", .what = "as V09 (net 4x D1), after them",
                        .db_alpha_to_mask = ALPHA_TO_MASK_D1, .kind = AK_NET),
+    ALPHA_TO_MASK_CASE(.id = "CSD",
+                       .what = "CLEAR_STATE: every context register of AMD's clear state, read "
+                               "back before and after it (fills 0, 0xffffffff, 0x5a5a5a5a, twice)",
+                       .kind = AK_CLEAR_STATE),
 };
 #pragma clang diagnostic pop
 #define ALPHA_TO_MASK_NTESTS                                                                       \
@@ -1663,6 +1678,7 @@ struct AlphaToMaskContext {
     uint32_t* out_pre; /* readback before it */
     uint32_t* zp;      /* ZPASS_DONE blocks: 0 the test draw, 1 + s isolation of sample s */
     uint32_t* regs;    /* COPY_DATA of the test draw's registers */
+    uint32_t* csd;     /* the CLEAR_STATE dump: before / after per run */
     void* color;       /* ns-sample colour */
     void* depth;       /* ns-sample depth */
     void* scratch;     /* the readback pass's 1-sample target */
@@ -2068,6 +2084,7 @@ static void alpha_to_mask_copy_reg(struct PM4Builder* b, uint32_t reg, void* dst
     pm4_emit(b, (uint32_t)a);
     pm4_emit(b, (uint32_t)(a >> 32));
 }
+#include "clear_state_dump.h"
 
 /* The readback pass: 1 sample, the scratch RGBA16F target, no depth. */
 static void alpha_to_mask_readback(struct PM4Builder* b, struct AlphaToMaskContext* c,
@@ -2184,6 +2201,25 @@ static void alpha_to_mask_build(struct PM4Builder* b, struct AlphaToMaskContext*
     alpha_to_mask_eop(b, c->fence, c->fv);
 }
 
+/* Submits b and waits for c->fv. Returns 0 done, -1 fence timeout, -2 could not submit. */
+static int alpha_to_mask_kick(struct AlphaToMaskContext* c, struct PM4Builder* b, uint64_t* us) {
+    if (b->overflow)
+        return -2;
+    uint64_t t0 = sceKernelGetProcessTime();
+    uint32_t sz = b->off * 4;
+    void* a[1] = {c->dcb};
+    if (sceGnmSubmitCommandBuffers(1, a, &sz, 0, 0) != 0)
+        return -2;
+    sceGnmSubmitDone();
+    while (*c->fence < c->fv) {
+        if (sceKernelGetProcessTime() - t0 > ALPHA_TO_MASK_TIMEOUT_US)
+            return -1;
+        sceKernelUsleep(100);
+    }
+    *us = sceKernelGetProcessTime() - t0;
+    return 0;
+}
+
 /* Returns 0 done, -1 fence timeout, -2 could not submit. */
 static int alpha_to_mask_submit(struct AlphaToMaskContext* c, const struct AlphaToMaskTest* t,
                                 int iso, int regread, uint64_t* us) {
@@ -2196,20 +2232,54 @@ static int alpha_to_mask_submit(struct AlphaToMaskContext* c, const struct Alpha
         c->regs[i] = 0xDEADBEEFu;
     pm4_init(&b, c->dcb, ALPHA_TO_MASK_DCB_DW);
     alpha_to_mask_build(&b, c, t, iso, regread);
-    if (b.overflow)
-        return -2;
-    uint64_t t0 = sceKernelGetProcessTime();
-    uint32_t sz = b.off * 4;
-    void* a[1] = {c->dcb};
-    if (sceGnmSubmitCommandBuffers(1, a, &sz, 0, 0) != 0)
-        return -2;
-    sceGnmSubmitDone();
-    while (*c->fence < c->fv) {
-        if (sceKernelGetProcessTime() - t0 > ALPHA_TO_MASK_TIMEOUT_US)
-            return -1;
-        sceKernelUsleep(100);
+    return alpha_to_mask_kick(c, &b, us);
+}
+
+/* The CLEAR_STATE dump (clear_state_dump.h). */
+static int alpha_to_mask_clear_state_test(struct AlphaToMaskContext* c,
+                                          const struct AlphaToMaskTest* t, int regread) {
+    alpha_to_mask_s("### ");
+    alpha_to_mask_s(t->id);
+    alpha_to_mask_s(": ");
+    alpha_to_mask_s(t->what);
+    alpha_to_mask_s("\n");
+    if (!regread) {
+        alpha_to_mask_s("SKIPPED: the COPY_DATA probe hung earlier\nsummary ");
+        alpha_to_mask_s(t->id);
+        alpha_to_mask_s(": SKIPPED\n\n");
+        return 0;
     }
-    *us = sceKernelGetProcessTime() - t0;
+    for (int r = 0; r < CLEAR_STATE_RUNS; r++) {
+        uint32_t* before = c->csd + (uint32_t)r * 2 * CLEAR_STATE_NREGS;
+        uint32_t* after = before + CLEAR_STATE_NREGS;
+        for (int i = 0; i < CLEAR_STATE_NREGS; i++)
+            before[i] = after[i] = CLEAR_STATE_UNWRITTEN;
+        struct PM4Builder b;
+        pm4_init(&b, c->dcb, ALPHA_TO_MASK_DCB_DW);
+        clear_state_dump_build(&b, clear_state_fill(r), before, after);
+        c->fv++;
+        alpha_to_mask_eop(&b, c->fence + 1, c->fv);
+        alpha_to_mask_eop(&b, c->fence, c->fv);
+        uint64_t us;
+        int ret = alpha_to_mask_kick(c, &b, &us);
+        if (ret < 0)
+            return ret;
+    }
+    int shad, unreadable, other;
+    int differ = clear_state_dump_report(c->csd, &shad, &unreadable, &other);
+    alpha_to_mask_s("\n");
+    alpha_to_mask_u(CLEAR_STATE_NREGS);
+    alpha_to_mask_s(" registers: ");
+    alpha_to_mask_u((unsigned long long)differ);
+    alpha_to_mask_s(" differ from AMD's clear state, ");
+    alpha_to_mask_u((unsigned long long)shad);
+    alpha_to_mask_s(" from shadPS4's defaults, ");
+    alpha_to_mask_u((unsigned long long)unreadable);
+    alpha_to_mask_s(" do not read back, ");
+    alpha_to_mask_u((unsigned long long)other);
+    alpha_to_mask_s(" not set or differing per run\nsummary ");
+    alpha_to_mask_s(t->id);
+    alpha_to_mask_s(differ || other ? ": h0 DIFFERS\n\n" : ": h0 matches\n\n");
     return 0;
 }
 
@@ -4053,6 +4123,8 @@ static void alpha_to_mask_family_line(const struct AlphaToMaskTest* o, int k) {
 /* Runs test t; returns -1 on a GPU hang. */
 static int alpha_to_mask_run_test(struct AlphaToMaskContext* c, const struct AlphaToMaskTest* t,
                                   int regread, int k_index) {
+    if (t->kind == AK_CLEAR_STATE)
+        return alpha_to_mask_clear_state_test(c, t, regread);
     my_memset(&g_tot, 0, sizeof(g_tot));
     alpha_to_mask_report_header(t);
     int nfam = alpha_to_mask_family_size(t);
@@ -4466,6 +4538,7 @@ static int alpha_to_mask_alloc(struct AlphaToMaskContext* c) {
     c->zp = (uint32_t*)gpu_alloc_typed(ALPHA_TO_MASK_ZP_BLOCKS * ALPHA_TO_MASK_ZP_STRIDE, 0x1000,
                                        MEM_TYPE_ONION);
     c->regs = (uint32_t*)gpu_alloc_typed(0x1000, 0x1000, MEM_TYPE_ONION);
+    c->csd = (uint32_t*)gpu_alloc_typed(0x8000, 0x1000, MEM_TYPE_ONION);
     c->color = gpu_alloc_typed(ALPHA_TO_MASK_PX * 8 * 8, 0x10000, MEM_TYPE_ONION);
     c->depth = gpu_alloc_typed(ALPHA_TO_MASK_PX * 4 * 8, 0x10000, MEM_TYPE_ONION);
     c->scratch = gpu_alloc_typed(ALPHA_TO_MASK_PX * 8, 0x10000, MEM_TYPE_ONION);
@@ -4479,8 +4552,8 @@ static int alpha_to_mask_alloc(struct AlphaToMaskContext* c) {
     c->tex_lod =
         gpu_alloc_typed(ALPHA_TO_MASK_TEX_W * ALPHA_TO_MASK_TEX_W * 4 * 2, 0x10000, MEM_TYPE_ONION);
     int ok = c->dcb && c->fence && c->alpha && c->tab && c->tab_pre && c->tab_iso && c->alpha_iso &&
-             c->out && c->out_pre && c->zp && c->regs && c->color && c->depth && c->scratch &&
-             c->vs && c->vs_net && c->tex && c->verts && c->vs_screen && c->tex_lod &&
+             c->out && c->out_pre && c->zp && c->regs && c->csd && c->color && c->depth &&
+             c->scratch && c->vs && c->vs_net && c->tex && c->verts && c->vs_screen && c->tex_lod &&
              !((uint64_t)(uintptr_t)c->vs >> 40) && !((uint64_t)(uintptr_t)c->vs_net >> 40) &&
              !((uint64_t)(uintptr_t)c->vs_screen >> 40);
     if (ok) {
@@ -4524,7 +4597,7 @@ static int alpha_to_mask_run(void) {
        emulator that cannot translate it crashes; RND's variants are its own). */
     if (st.inflight >= 0) {
         const struct AlphaToMaskTest* t = &k_alpha_to_mask_tests[st.inflight & 0xFFFF];
-        if (!alpha_to_mask_streq(t->id, "RND"))
+        if (!alpha_to_mask_streq(t->id, "RND") && t->kind != AK_CLEAR_STATE)
             st.bad_variants |= alpha_to_mask_group(t->ps);
         if (st.inflight & ALPHA_TO_MASK_CAPTURE) {
             trace_msg("alpha-to-mask: the app ended during a visual capture; its variant is "
@@ -4598,7 +4671,7 @@ static int alpha_to_mask_run(void) {
                 alpha_to_mask_s(": HUNG\n\n");
                 if (k == 0)
                     st.regread_bad = 1;
-                if (!alpha_to_mask_streq(t->id, "RND"))
+                if (!alpha_to_mask_streq(t->id, "RND") && t->kind != AK_CLEAR_STATE)
                     st.bad_variants |= alpha_to_mask_group(t->ps);
                 st.inflight = -1;
                 st.next = k + 1;
