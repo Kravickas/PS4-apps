@@ -32,9 +32,10 @@
  * register readback probe) hangs, the later tests run without COPY_DATA. A new ALPHA_TO_MASK_BUILD
  * starts over (log truncated); after the last test the run is not repeated until
  * alpha_to_mask.state is deleted. The visual captures run on every launch. */
+#include "clear_state_regs.h"
 #include "ps_alpha_to_mask.h"
 
-#define ALPHA_TO_MASK_BUILD "alpha-to-mask-25"
+#define ALPHA_TO_MASK_BUILD "alpha-to-mask-26"
 #define ALPHA_TO_MASK_TIMEOUT_US 2000000u
 #define ALPHA_TO_MASK_W 64
 #define ALPHA_TO_MASK_PX (ALPHA_TO_MASK_W * ALPHA_TO_MASK_W)
@@ -1592,7 +1593,9 @@ struct AlphaToMaskState {
     char build[32];
     int32_t next, inflight, regread_bad;
     uint64_t bad_variants;
+    uint32_t csd_skip[(CLEAR_STATE_NREGS + 31) / 32]; /* CSD registers that hung the GPU */
 };
+static uint32_t g_alpha_to_mask_csd_skip[(CLEAR_STATE_NREGS + 31) / 32];
 static void alpha_to_mask_state_save(const struct AlphaToMaskState* st) {
     int fd = sceKernelOpen(g_alpha_to_mask_state_path, 0x601, 0x1FF);
     if (fd < 0)
@@ -2235,9 +2238,11 @@ static int alpha_to_mask_submit(struct AlphaToMaskContext* c, const struct Alpha
     return alpha_to_mask_kick(c, &b, us);
 }
 
-/* The CLEAR_STATE dump (clear_state_dump.h). */
+/* The CLEAR_STATE dump (clear_state_dump.h). A hung read adds its register to
+   g_alpha_to_mask_csd_skip and returns -3: the test runs again after a relaunch. */
 static int alpha_to_mask_clear_state_test(struct AlphaToMaskContext* c,
                                           const struct AlphaToMaskTest* t, int regread) {
+    const uint32_t* skip = g_alpha_to_mask_csd_skip;
     alpha_to_mask_s("### ");
     alpha_to_mask_s(t->id);
     alpha_to_mask_s(": ");
@@ -2256,17 +2261,40 @@ static int alpha_to_mask_clear_state_test(struct AlphaToMaskContext* c,
             before[i] = after[i] = CLEAR_STATE_UNWRITTEN;
         struct PM4Builder b;
         pm4_init(&b, c->dcb, ALPHA_TO_MASK_DCB_DW);
-        clear_state_dump_build(&b, clear_state_fill(r), before, after);
+        clear_state_dump_build(&b, clear_state_fill(r), before, after, skip);
         c->fv++;
         alpha_to_mask_eop(&b, c->fence + 1, c->fv);
         alpha_to_mask_eop(&b, c->fence, c->fv);
         uint64_t us;
         int ret = alpha_to_mask_kick(c, &b, &us);
+        if (ret == -1) {
+            int pos = clear_state_hang_position(before, after, skip);
+            alpha_to_mask_s("run ");
+            alpha_to_mask_u((unsigned long long)r + 1);
+            if (pos < 0) {
+                alpha_to_mask_s(": every read completed, no fence (the GPU hung after them)\n");
+            } else if (pos == 0 && r == 0) {
+                alpha_to_mask_s(": no read completed - the GPU did not respond (reboot the PS4 "
+                                "if this repeats)\n");
+            } else if (pos == CLEAR_STATE_NREGS) {
+                alpha_to_mask_s(": hung at CLEAR_STATE (every read before it completed)\n");
+            } else {
+                int i = pos % CLEAR_STATE_NREGS;
+                g_alpha_to_mask_csd_skip[i / 32] |= 1u << (i % 32);
+                alpha_to_mask_s(pos < CLEAR_STATE_NREGS ? ": hung reading "
+                                                        : ": hung reading (after CLEAR_STATE) ");
+                alpha_to_mask_x(0xA000u + k_clear_state_regs[i].idx, 4);
+                alpha_to_mask_s(" ");
+                alpha_to_mask_s(k_clear_state_regs[i].name);
+                alpha_to_mask_s("; skipped from now on - relaunch to continue\n");
+                return -3;
+            }
+        }
         if (ret < 0)
             return ret;
     }
     int shad, unreadable, other;
-    int differ = clear_state_dump_report(c->csd, &shad, &unreadable, &other);
+    int differ = clear_state_dump_report(c->csd, skip, &shad, &unreadable, &other);
     alpha_to_mask_s("\n");
     alpha_to_mask_u(CLEAR_STATE_NREGS);
     alpha_to_mask_s(" registers: ");
@@ -2275,11 +2303,13 @@ static int alpha_to_mask_clear_state_test(struct AlphaToMaskContext* c,
     alpha_to_mask_u((unsigned long long)shad);
     alpha_to_mask_s(" from shadPS4's defaults, ");
     alpha_to_mask_u((unsigned long long)unreadable);
-    alpha_to_mask_s(" do not read back, ");
+    alpha_to_mask_s(" do not read back or hung, ");
     alpha_to_mask_u((unsigned long long)other);
     alpha_to_mask_s(" not set or differing per run\nsummary ");
     alpha_to_mask_s(t->id);
-    alpha_to_mask_s(differ || other ? ": h0 DIFFERS\n\n" : ": h0 matches\n\n");
+    alpha_to_mask_s(unreadable == CLEAR_STATE_NREGS ? ": no data (no register read back)\n\n"
+                    : differ || other               ? ": h0 DIFFERS\n\n"
+                                                    : ": h0 matches\n\n");
     return 0;
 }
 
@@ -4607,6 +4637,8 @@ static int alpha_to_mask_run(void) {
         }
     }
     g_alpha_to_mask_bad = st.bad_variants;
+    for (int i = 0; i < CLEAR_STATE_SKIP_WORDS; i++)
+        g_alpha_to_mask_csd_skip[i] = st.csd_skip[i];
     if (resumed && st.next >= ALPHA_TO_MASK_NTESTS && st.inflight < 0)
         tests_done = 1;
     g_alpha_to_mask_context_ok = alpha_to_mask_alloc(&g_alpha_to_mask_context);
@@ -4663,7 +4695,16 @@ static int alpha_to_mask_run(void) {
             st.inflight = k;
             st.next = k;
             alpha_to_mask_state_save(&st);
-            if (alpha_to_mask_run_test(c, t, !st.regread_bad, k) == -1) {
+            int ret = alpha_to_mask_run_test(c, t, !st.regread_bad, k);
+            if (ret == -3) { /* CSD: a register read hung; skip it and run CSD again */
+                for (int i = 0; i < CLEAR_STATE_SKIP_WORDS; i++)
+                    st.csd_skip[i] = g_alpha_to_mask_csd_skip[i];
+                st.inflight = -1;
+                alpha_to_mask_state_save(&st);
+                alpha_to_mask_flush();
+                return -1;
+            }
+            if (ret == -1) {
                 alpha_to_mask_s(
                     "TIMEOUT: no fence after 2 s - GPU hung; close the app, relaunch to "
                     "continue\nsummary ");
