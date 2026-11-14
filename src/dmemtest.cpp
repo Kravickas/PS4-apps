@@ -6850,13 +6850,17 @@ static void run_cov4() {
         Line l = head("PE1", "expand: start<0 | end<=start | len0 | len4000 | al4000");
         uint64_t p = 0;
         // the address returned when the PS4 accepts (round 118: start -10000 and len 0 are ok)
+        // and whether the pool grew: d = change of the available blocks (round 125)
         auto ex = [&](uint64_t s0, uint64_t e0, uint64_t len, uint64_t al, uint64_t* out) {
             if (out)
                 *out = 0xDEAD0000ull;
+            const PoolStats b = tr_read();
             const int32_t r = sceKernelMemoryPoolExpand(s0, e0, len, al, out);
+            const PoolStats a = tr_read();
             l.c(code(r));
             if (r == 0 && out)
                 l.c(':').hex(*out);
+            l.s(" d=").dec((a.avail_flushed + a.avail_cached) - (b.avail_flushed + b.avail_cached));
             l.c(' ');
         };
         ex((uint64_t)-0x10000LL, g_dmem, blk, blk, &p);
@@ -9651,6 +9655,23 @@ static void run_fw_tl_tf() {
         unk(l).end();
     }
     {
+        // FW10: FW9 in the other order, the right page first, then the left one (two call sites).
+        // FW9's pages merge once renamed, CO3 and CO16's do not (round 124): whether a new anonymous
+        // mapping extends only its left neighbour (then these two stay apart), as a vm object would
+        say("FW10 starting");
+        Line l = head("FW10", "FW9 right page first: areas | renamed: areas");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) == 0) {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fw9_b(b + PG))).c(ncode(fw9_a(b))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 2 * PG);
+            sceKernelMunmap(b, 2 * PG);
+        }
+        unk(l).end();
+    }
+    {
         // test_550.cpp :148, 64 MiB and 16 pieces instead of 4 GiB and 48+10
         say("TL1 starting");
         Line l = head("TL1", "550:148 big dmem map, move 16 1M pieces | move 4 back | checked release");
@@ -11817,8 +11838,11 @@ static void nx_rv8() {
     l.c(code(sceKernelReserveVirtualRange(nullptr, PG, 0, 0))).end();
 }
 static void nx_pe2() {
-    Line l = head("PE2", "pool expand, null phys out");
-    l.c(code(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, nullptr))).end();
+    Line l = head("PE2", "pool expand, null phys out: code, d (change of available blocks)");
+    const PoolStats b = tr_read();
+    l.c(code(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, nullptr)));
+    const PoolStats a = tr_read();
+    l.s(" d=").dec((a.avail_flushed + a.avail_cached) - (b.avail_flushed + b.avail_cached)).end();
 }
 static void nx_pb4() {
     Line l = head("PB8", "pool batch: null entries");

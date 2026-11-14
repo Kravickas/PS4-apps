@@ -443,6 +443,36 @@ Renamed (the older probe keeps its ID): the null-entries batch PB4 -> PB8, the s
 PB5 -> PB9, BatchMap2 null cases BM1 -> BM5, file access FM3 -> FM9, mlock edges ML1 -> ML3, and two
 older ones: "dmem map align 2G, 4G, 3M" M5 -> M6, "pool expand again" P8 -> P96.
 
+## Round 124: first complete comparison, PS4 and shadPS4 (356fc8e + the fixed-past-user-space fix)
+
+All 12 SDKs reached DONE on both. 60 probes differ somewhere (52-56 per SDK of about 655):
+
+- Real differences, to fix in shadPS4:
+  - pool find-next at a pool block's end address (Q20, Q22-Q25, Q30). PS4 (Q20-Q34): EACCES there
+    unless the allocation after the hole is older than the pool block (then that allocation);
+    shadPS4 EACCES in every case. Q33 (none after) and Q34 (made again after) fit this.
+  - rename merges: direct mappings below SDK 2.00 merge after a rename in shadPS4, never on the PS4
+    (CO4, CO10, FW8 at 1.00 and 1.70; the FW9 change did not apply MapMemory's SDK rule). Void and
+    no-access areas kept apart by the creation rules stay apart after a rename on the PS4 (CO3, CO16);
+    FW9's, kept apart only by their names, merge. FW10 (round 125) tests the order dependence.
+  - M4: PoolReserve fixed over a direct mapping: PS4 EINVAL (0x10 and 0x90), shadPS4 replaces it (0x10)
+    or ENOMEM (0x90). For ReserveVirtualRange it is the other way round on the PS4 (RV7: replaces).
+  - SY1: the PS4 can VirtualQuery a system flexible mapping (prot 3, flags 0x11, name); shadPS4 cannot.
+  - known before: RV7, MP1, ML3, PE1/PE2, PB8, BM5, MFT1 (bytes past the end kept across close),
+    munmap at 0x7FFFFFFFC000 (only the gap above shadPS4's USER_MAX).
+- Follow from a difference above: PB4 (pool counter: PE1's extra block on the PS4); PB7 to confirm.
+- Layout, system usage or host limits, not rules: FL4 (the PS4 starts with ~9 MiB flexible in use by
+  system libraries), J6, Y1, Y2, K1, K2, K4, K6, HB1-HB5, LA3, MF1, MF3, N3, N6, SH1, U10, VQ6, VQ7, VQ9,
+  VQ14, XC5, RG1, SF5 (2 MiB alignment column), DF1-DF4 (devices).
+- Not comparable: CF1, CL1 (libkernel is not a module in shadPS4); BQ1 (its layout fails on the PS4:
+  EAGAIN for the allocation after the pool block; Q20-Q34 answer it).
+- Still to analyse: PX1, PX3 (relative value of the anon:<address> name).
+- shadPS4 batch 1 (against cfe8ef7): MP1, ML3, PE1/PE2 (measured parts), PB8, BM5, RV7/M4 (the check
+  moved from ReserveVirtualRange to PoolReserve), rename merges of direct mappings below SDK 2.00, munmap
+  in the gap above the memory map, file tails keyed by host path (kept across close, dropped on unlink),
+  the pool find-next age rule. Not yet: SY1 (address on the PS4 unknown), void/no-access rename (FW10).
+  Round 126: PE1/PE2 print the change of the pool's available blocks (len 0, null output).
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after
