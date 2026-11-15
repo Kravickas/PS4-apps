@@ -473,6 +473,31 @@ All 12 SDKs reached DONE on both. 60 probes differ somewhere (52-56 per SDK of a
   the pool find-next age rule. Not yet: SY1 (address on the PS4 unknown), void/no-access rename (FW10).
   Round 126: PE1/PE2 print the change of the pool's available blocks (len 0, null output).
 
+## Round 126: after shadPS4 batch 1 (4a63641)
+
+All 12 SDKs reached DONE on both; 39-41 probes differ per SDK (52-56 before). Compared with round 124:
+fixed Q20, Q22-Q25, Q30, RV7, M4, MP1, ML3, MFT1, RG1, BQ1, PB4, PB7, PB8, BM5, CO4/CO10/FW8 (SDK
+1.00/1.70), MP2 (munmap). Regressions: M5, N5. Batch 1 moved the check "fixed reservation over a direct
+mapping is EINVAL" into PoolReserve, citing M4; but M4's direct mapping is not 2 MiB aligned on the PS4
+(M5's own comment), so M4's EINVAL is the address check, and M5/N5 (aligned) show PoolReserve replacing
+it with 0x10 and ENOMEM with 0x90, as ReserveVirtualRange does (RV7). Batch 2 removes the check; M4's
+direct case is layout (round 127 prints '=' / '!' for its alignment).
+
+- PE2: null output: ok and the pool grows by one block (d=1), PS4 and shadPS4 alike.
+- CF2 (ConfiguredFlexibleMemorySize, null output) ends the app on the PS4 at 5.50 and 12.00 ("CF2
+  starting", no result; the state was already "all done", fixed in round 127).
+- E18, RV8: end the app on the PS4. shadPS4: E18 EINVAL, RV8 ends the app as well.
+- K1b: from SDK 2.50 a direct mapping searched from 0x900000000 is placed at 0xFF0000000 (flexible at
+  the hint). shadPS4 has the area rule for fixed mappings only. K1c (round 127) measures where the
+  search rule starts and ends before it is written.
+- Rename after creation: FW9 (left first, two call sites) merges at every SDK; FW10 (right first)
+  only at 5.50 and 12.00; CO3/CO16 (one call site, apart by the creation rules) never. shadPS4 merges
+  all. FR1-FR12 (round 127) measure type x call sites x order, for rename and mprotect separately.
+- SY1: the PS4 can query its system flexible mapping (prot 3, flags 0x11); shadPS4 cannot (it places
+  it at 0x880000000, in the hidden system area). Round 127 prints the PS4's address.
+- MP2 below SDK 3.00: fixed at 0x7FFFFFFFC000 maps on the PS4, ENOMEM in shadPS4: host limit
+  (USER_MAX), as recorded for the batch-1 fix.
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after

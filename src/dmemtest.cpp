@@ -2219,6 +2219,8 @@ static void run_cov3() {
         const int32_t r = sceKernelMapNamedSystemFlexibleMemory(&m, PG, 0x3, 0, "sy1");
         l.s(" | ").c(code(r));
         if (r == 0) {
+            // where the PS4 puts system flexible memory (absolute, >>12; round 127)
+            l.s(" at=").hex((uint64_t)m >> 12);
             unsigned char vi[0x48];
             if (sceKernelVirtualQuery(m, 0, vi, 0x48) == 0)
                 l.s(" prot=").hex((uint32_t)vi[0x18]).s(" flags=").hex((uint32_t)vi[0x20])
@@ -4142,6 +4144,9 @@ static void run_m() {
                 void* y = d;
                 const int32_t r4 = sceKernelMemoryPoolReserve(d, rsv, 0, f, &y);
                 pdelta_run(l, " dmem=", r4, a);
+                // '=' when the direct mapping is 2 MiB aligned, '!' when not (round 127: the PS4
+                // places it unaligned, so EINVAL is the address check, as in "part"; M5 aligned)
+                l.c((uint64_t)d % rsv == 0 ? '=' : '!');
                 if (r4 == 0)
                     sceKernelMunmap(y, rsv);
                 else
@@ -5037,6 +5042,52 @@ static void run_k() {
         }
         l.end();
         release_all(pa, 1);
+    }
+    {
+        // K1c (round 127): K1b shows a direct mapping searched from 900000000 placed at FF0000000 from
+        // SDK 2.50 (flexible at the hint). Where that rule starts and ends: direct, one page unless
+        // noted, hint 7EFFF8000 | 7EFFFC000 | 7EFFFC000 two pages (reaches 7F0000000) | 7F0000000 |
+        // FEFFFC000 | FF0000000; flexible at 7F0000000 | FEFFFC000; Map2 at 900000000.
+        // vq: VirtualQuery (flags 0) at the hint before the map: o mapped, A free or hidden.
+        // Printed: code:address>>12 (absolute)
+        const long pa = alloc(2, 3, &rr);
+        Line l = head("K1c", "dmem hint 7EFFF8 7EFFFC 7EFFFCx2 7F0000 FEFFFC FF0000 | flex 7F0000 "
+                             "FEFFFC | map2 900000: vq code:addr");
+        struct Case {
+            uint64_t hint;
+            int pages;
+            int kind; // 0 direct, 1 flexible, 2 Map2
+        };
+        static const Case cases[] = {{0x7EFFF8000ull, 1, 0}, {0x7EFFFC000ull, 1, 0},
+                                     {0x7EFFFC000ull, 2, 0}, {0x7F0000000ull, 1, 0},
+                                     {0xFEFFFC000ull, 1, 0}, {0xFF0000000ull, 1, 0},
+                                     {0x7F0000000ull, 1, 1}, {0xFEFFFC000ull, 1, 1},
+                                     {0x900000000ull, 1, 2}};
+        int k = 0;
+        for (const Case& c : cases) {
+            if (k == 6 || k == 8)
+                l.s("| ");
+            k++;
+            unsigned char vi[0x48];
+            l.c(code(sceKernelVirtualQuery((void*)c.hint, 0, vi, 0x48)));
+            void* m = (void*)c.hint;
+            const size_t len = (size_t)c.pages * PG;
+            int32_t r = -1;
+            if (c.kind == 1)
+                r = sceKernelMapFlexibleMemory(&m, len, 0x3, 0);
+            else if (pa >= 0 && c.kind == 0)
+                r = sceKernelMapDirectMemory(&m, len, 0x3, 0, pa, PG);
+            else if (pa >= 0)
+                r = sceKernelMapDirectMemory2(&m, len, 3, 0x3, 0, pa, PG);
+            l.c(code(r));
+            if (r == 0) {
+                l.c(':').hex((uint64_t)m >> 12);
+                sceKernelMunmap(m, len);
+            }
+            l.c(' ');
+        }
+        l.end();
+        release_all(pa, 2);
     }
     {
         // fill the space below the ceiling with reservations, then try dmem and flex mappings
@@ -9417,6 +9468,15 @@ __attribute__((noinline)) static int32_t fw9_b(void* at) {
     void* o = 0;
     return sceKernelMmap(at, PG, 0x0, 0x1012, -1, 0, &o);
 }
+// FR (round 127): two call sites with the prot and flags given, for the rename / mprotect matrix
+__attribute__((noinline)) static int32_t fr_a(void* at, int32_t prot, int32_t flags) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
+}
+__attribute__((noinline)) static int32_t fr_b(void* at, int32_t prot, int32_t flags) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
+}
 #pragma pop_macro("sceKernelMmap")
 #pragma pop_macro("sceKernelMapDirectMemory")
 
@@ -9670,6 +9730,70 @@ static void run_fw_tl_tf() {
             sceKernelMunmap(b, 2 * PG);
         }
         unk(l).end();
+    }
+    {
+        // FR1-FR12 (round 127): what decides whether two adjacent pages that stayed apart at creation
+        // merge later. FW9 (left page first, two call sites) merges after a rename at every SDK,
+        // FW10 (right first) only from 5.50, CO3 and CO16 (one call site, kept apart by the creation
+        // rules) never. Two pages in a reserved range; type: no-access anonymous (0x1012 prot 0) |
+        // anonymous rw (0x1012 prot 3) | void reservation (0x110); call sites: one (fr_a twice) | two
+        // (fr_a, fr_b); order: left page first | right page first. Each line: areas after creation |
+        // after a rename of both || a fresh pair: areas after creation | after mprotect of both to
+        // the same protection.
+        struct Kind {
+            int32_t prot, flags;
+        };
+        static const Kind kinds[3] = {{0x0, 0x1012}, {0x3, 0x1012}, {0x0, 0x110}};
+        static const char* const ids[12] = {"FR1", "FR2", "FR3", "FR4",  "FR5",  "FR6",
+                                            "FR7", "FR8", "FR9", "FR10", "FR11", "FR12"};
+        static const char* const names[12] = {
+            "noacc, 1 site, left first", "noacc, 1 site, right first",
+            "noacc, 2 sites, left first", "noacc, 2 sites, right first",
+            "anon rw, 1 site, left first", "anon rw, 1 site, right first",
+            "anon rw, 2 sites, left first", "anon rw, 2 sites, right first",
+            "void, 1 site, left first", "void, 1 site, right first",
+            "void, 2 sites, left first", "void, 2 sites, right first"};
+        for (int t = 0; t < 3; t++) {
+            for (int v = 0; v < 4; v++) {
+                const bool two_sites = v >= 2, right_first = (v & 1) != 0;
+                Line l = head(ids[t * 4 + v], names[t * 4 + v]);
+                const Kind kd = kinds[t];
+                // make one pair; returns its base or 0
+                auto pair = [&]() -> uint8_t* {
+                    void* a = 0;
+                    if (sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) != 0)
+                        return nullptr;
+                    uint8_t* b = (uint8_t*)a;
+                    uint8_t* first = right_first ? b + PG : b;
+                    uint8_t* second = right_first ? b : b + PG;
+                    const int32_t r1 = fr_a(first, kd.prot, kd.flags);
+                    const int32_t r2 = two_sites ? fr_b(second, kd.prot, kd.flags)
+                                                 : fr_a(second, kd.prot, kd.flags);
+                    l.c(ncode(r1)).c(ncode(r2)).c(' ');
+                    return b;
+                };
+                uint8_t* b = pair();
+                if (!b) {
+                    l.s("SKIP").end();
+                    continue;
+                }
+                co_scan(l, (uint64_t)b, 2 * PG);
+                l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
+                co_scan(l, (uint64_t)b, 2 * PG);
+                sceKernelMunmap(b, 2 * PG);
+                l.s(" || ");
+                b = pair();
+                if (!b) {
+                    l.s("SKIP").end();
+                    continue;
+                }
+                co_scan(l, (uint64_t)b, 2 * PG);
+                l.s(" | ").c(ncode(sceKernelMprotect(b, 2 * PG, kd.prot))).c(' ');
+                co_scan(l, (uint64_t)b, 2 * PG);
+                sceKernelMunmap(b, 2 * PG);
+                l.end();
+            }
+        }
     }
     {
         // test_550.cpp :148, 64 MiB and 16 pieces instead of 4 GiB and 48+10
@@ -11903,6 +12027,11 @@ static void nx_cf2() {
     l.c(code(((int32_t(*)(uint64_t*))fn)(nullptr))).end();
 }
 static const int g_null_cases = 8;
+// State values: k (0..g_null_cases) = case k is next, written before case k-1 is called, so a state
+// of k with k >= 1 after the app ended names case k-1; g_null_done = all ran to the end. Before
+// round 127 the state after the last case was g_null_cases either way, so a last case that ended
+// the app (CF2 on the PS4, round 126) was not recorded.
+static const int g_null_done = g_null_cases + 1;
 static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8",
                                                      "PB7", "BM5", "QP2", "CF2"};
 static void run_null_last() {
@@ -11911,7 +12040,7 @@ static void run_null_last() {
     const char* const* ids = g_null_ids;
     const int n = g_null_cases;
     int next = null_state_read();
-    if (next >= n) {
+    if (next >= g_null_done) {
         say("null-pointer cases: all run (delete " DMEM_NULL_STATE " to run them again)");
         return;
     }
@@ -11921,6 +12050,7 @@ static void run_null_last() {
         l.s(ids[next]).s(" starting (null-pointer case; the app may end here)").end();
         cases[next]();
     }
+    null_state_write(g_null_done);
     say("null-pointer cases: all run");
 }
 
@@ -11971,7 +12101,7 @@ int main(void) {
     chain_state_read(&chain);
     if (own == 0) {
         const int pick = chain_pick(&chain);
-        if (pick < 0 && null_state_read() < g_null_cases) {
+        if (pick < 0 && null_state_read() < g_null_done) {
             // null-pointer cases left (one ended the app): they run in the last SDK's executable
             if (g_chain_n == 1)
                 null_resume();
@@ -11988,7 +12118,7 @@ int main(void) {
             idle_forever();
         }
     }
-    if (own > 0 && own == g_chain_n - 1 && chain_run_done(own) && null_state_read() < g_null_cases)
+    if (own > 0 && own == g_chain_n - 1 && chain_run_done(own) && null_state_read() < g_null_done)
         null_resume();
     if (own == 0) {
         // eboot.bin (entry 0) is started from the menu, not by chain_exec: it counts its own attempt
