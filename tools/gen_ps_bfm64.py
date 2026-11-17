@@ -229,6 +229,59 @@ row("I", "vcc from v_cmp under exec lane < 12", 0, 12,
            "s_mov_b64 s[28:29], vcc", CAP, "s_mov_b64 exec, s[32:33]"],
     "exec = lane < s3 (saveexec); v_cmp_gt_u32 vcc, 64, lane  (vcc only active lanes)")
 
+# J: wave-level state seen from a lane that is off. EXEC, VCC and the scalar registers belong to
+# the wave: a branch on EXEC or VCC and every scalar instruction act for all lanes, including the
+# logging lane (s[22:23]) while its own bit is clear. ANY = every lane but the logging one.
+ANY = ALL + ["s_andn2_b64 s[38:39], s[36:37], s[22:23]"]
+END = ["s_mov_b32 s29, 0", "s_mov_b64 exec, s[32:33]"]
+for lab, body in [
+        ("execz, other lanes on: scalar", ANY + [
+            "s_mov_b32 s28, 0", "s_mov_b64 exec, s[38:39]", "s_cbranch_execz skip_{K}",
+            "s_mov_b32 s28, 0x55", "skip_{K}:"] + END),
+        ("execz, no lane on: scalar", ANY + [
+            "s_mov_b32 s28, 0", "s_mov_b64 exec, 0", "s_cbranch_execz skip_{K}",
+            "s_mov_b32 s28, 0x55", "skip_{K}:"] + END),
+        ("execnz, other lanes on: scalar", ANY + [
+            "s_mov_b32 s28, 0", "s_mov_b64 exec, s[38:39]", "s_cbranch_execnz skip_{K}",
+            "s_mov_b32 s28, 0x55", "skip_{K}:"] + END),
+        ("vccz, other lanes on: scalar", ANY + [
+            "s_mov_b32 s28, 0", "s_mov_b64 vcc, s[38:39]", "s_cbranch_vccz skip_{K}",
+            "s_mov_b32 s28, 0x55", "skip_{K}:"] + END),
+        ("vccnz, other lanes on: scalar", ANY + [
+            "s_mov_b32 s28, 0", "s_mov_b64 vcc, s[38:39]", "s_cbranch_vccnz skip_{K}",
+            "s_mov_b32 s28, 0x55", "skip_{K}:"] + END)]:
+    row("J", lab, 0, 12, body, "; ".join(i for i in body[len(ALL):] if not i.endswith(":")))
+row("J", "SCC of mask without logging lane", 0, 12,
+    ANY + ["s_and_b64 s[28:29], s[38:39], s[38:39]", CAP, "s_mov_b64 exec, s[32:33]"],
+    "s_and_b64 s[28:29], every lane but the logging one  (SCC column)")
+# A loop whose lanes leave at different iterations (lane < s3 after 1, the others after 3), with
+# the break mask in a scalar pair; s28 counts the wave's iterations, capped at 8.
+for k in (16, 0, 64):
+    row("J", "break-mask loop, lane < %d leaves first" % k, 0, k,
+        ALL + ["v_mov_b32 v35, 3", "v_mov_b32 v24, 1", "v_cndmask_b32 v35, v35, v24, vcc",
+               "s_mov_b64 s[38:39], exec", "s_mov_b32 s28, 0", "loop_{K}:",
+               "s_add_u32 s28, s28, 1", "v_add_i32 v34, vcc, 1, v34",
+               "v_cmp_ge_u32_e64 s[40:41], v34, v35", "s_mov_b64 s[42:43], exec",
+               "s_and_b64 exec, s[42:43], s[40:41]", "s_cbranch_execz cont_{K}",
+               "s_andn2_b64 s[38:39], s[38:39], exec", "s_cbranch_scc0 done_{K}", "cont_{K}:",
+               "s_and_b64 exec, s[42:43], s[38:39]", "s_cmp_lt_u32 s28, 8",
+               "s_cbranch_scc1 loop_{K}", "done_{K}:"] + END,
+        "lanes leave after 1 (lane < s3) or 3 iterations; s28 = iterations of the wave, cap 8")
+# The carry mask of a vector add: VCC is preset to all ones, the add runs under EXEC.
+for lab, k in [("carry out, exec lane < 12", 12), ("carry out, exec all", 64),
+               ("carry out, exec none", 0)]:
+    row("J", lab, 0, k,
+        ALL + ["s_mov_b64 s[38:39], vcc", "s_mov_b32 vcc_lo, -1", "s_mov_b32 vcc_hi, -1",
+               "s_mov_b64 exec, s[38:39]", "v_add_i32 v34, vcc, -1, v19",
+               "s_mov_b64 s[28:29], vcc", CAP, "s_mov_b64 exec, s[32:33]"],
+        "vcc = ~0; exec = lane < s3; v_add_i32 v34, vcc, -1, lane  (carry: lane >= 1)")
+# v_readfirstlane under EXEC = lane >= s3, reading lane + 7.
+for k in (5, 0, 64):
+    row("J", "readfirstlane, exec lane >= %d" % k, 0, k,
+        ALL + ["s_mov_b64 s[38:39], vcc", "v_add_i32 v35, vcc, 7, v19",
+               "s_andn2_b64 exec, s[36:37], s[38:39]", "v_readfirstlane_b32 s28, v35"] + END,
+        "exec = lane >= s3; v_readfirstlane_b32 s28, lane + 7")
+
 N = len(ROWS)
 MARK = 0xB6400000  # result marker base: dword 3 of row k = MARK + k
 
