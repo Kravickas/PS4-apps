@@ -498,6 +498,109 @@ direct case is layout (round 127 prints '=' / '!' for its alignment).
 - MP2 below SDK 3.00: fixed at 0x7FFFFFFFC000 maps on the PS4, ENOMEM in shadPS4: host limit
   (USER_MAX), as recorded for the batch-1 fix.
 
+## Round 127: after shadPS4 batch 2 (PS4 FW 12.02 and shadPS4, all 12 SDKs)
+
+Batch 2 worked: M5 and N5 match, nothing regressed; 40-43 probes differ per SDK. The PS4 run differs
+from its round 126 run only in code addresses (K6, VQ6, VQ7, VQ14, PX1).
+
+- K1c (MapDirectMemory, searched, one page unless noted), PS4 from SDK 2.50: hint 7EFFF8000 at the
+  hint; 7EFFFC000 (ends exactly at 7F0000000), 7EFFFC000 two pages, 7F0000000, FEFFFC000: all at
+  FF0000000; hint FF0000000 at the hint. Below 2.50 every one at its hint. Flexible is never moved.
+  MapDirectMemory2 with hint 900000000: FF0000000 at every SDK (one case; K1d in round 128).
+- FR1-FR12, PS4, every SDK unless noted:
+  - no-access, one call site: merged at creation, in either order.
+  - no-access, two call sites, left page first: apart at creation; a rename of both merges; mprotect
+    of both to the same protection does not.
+  - no-access, two call sites, right page first: apart; the rename merges only from SDK 5.50 (FR4).
+  - anonymous read-write: never merged, by creation, rename or mprotect.
+  - void, one call site: left first merged at creation; right first apart, also after the rename.
+  - void, two call sites, left first: apart at creation, merged by the rename (FR11; shadPS4 merges
+    at creation: its void mappings are all named "anon"). Right first: apart, also after the rename.
+- SY1: the PS4 places the application's system flexible mapping at 0x200374000 (SDK 1.00) and
+  0x200024000 (from 2.50): the default search. Protection 3, flags 0x11.
+- M4: the PS4's direct mapping is not 2 MiB aligned ('!'), shadPS4's is ('='): the EINVAL of M4's
+  direct case on the PS4 is the address check. Round 128 puts the mapping at an unaligned address
+  itself.
+- Null-pointer cases, PS4: E18, RV8 and CF2 end the app; PE2 ok (d=1); PB8 EFAULT; PB7 ok; BM5 EFAULT;
+  QP2 ok. shadPS4: E18 EINVAL, RV8 ends the app, CF2 not reached (the lookup fails).
+- PX1, PX3 (analysed in round 128): on the PS4 the name of a POSIX mmap mapping is the return address
+  of the function that called mmap (PX3: name = px3_mk's own return address; PX1: the name is outside
+  px_mk), not the return address of the mmap call itself. shadPS4: PX1's name is inside px_mk (the
+  mmap call's return address); PX3's is not px3_mk's return address. Round 128 prints "site=" for
+  both. sceKernelMmap (VQ7) is named after its own call on both. shadPS4's comment at
+  PosixMmapFromGuest says the opposite of the PS4 result; not changed yet.
+
+## shadPS4 batch 3 and 3b (against 4a63641 + batch 2)
+
+- Batch 3: the K1c search rule in MapNamedDirectMemory; system flexible memory mapped by the
+  application placed by the default search (SY1). The run with it: K1b matches; SY1 placement as the
+  PS4, but flags 0x31 against 0x11 (below); regressions VQ10, VQ11, VQ12, VQ15, VQ16 at every SDK from
+  2.50: the linker's own "SceGnmDriver" mapping (hint 0xFE0000000, not fixed) was moved to
+  0xFF0000000 by the new rule. The rule had been added without looking at the emulator's own callers.
+- Batch 3b: the search rule only for calls by application code (what K1c measured); calls by the
+  emulator and by code in the system library area keep their address.
+- SY1 flags 0x31: the test's buffer was not initialised; shadPS4 sets five bits of the flags byte
+  and leaves the other three, the PS4 returned 0x11. From round 128 every query buffer is filled
+  with 0xEE before the call and VQ18 shows which bytes VirtualQuery writes.
+
+## Round 128: results that cannot be read two ways
+
+What went wrong when reading earlier rounds, and what the test does about each:
+
+| Misreading | Change |
+|---|---|
+| A line differs because the address space is laid out differently (K1, Y1, HB2, VQ9 ...), not because a rule differs | Result lines hold behaviour only; addresses, sizes of what is free, module lists and code addresses go to "LY <id>" lines after the result line. In the result line an address is "=" (where asked), "F" (0xFF0000000) or its region: L below 0x200000000, D up to the system library area, S that area, H above. |
+| A probe at a fixed address fails or moves because something already was there | Every such probe prints "@f" (nothing visible there), "@u" (a mapping) or "@s" (system library area, not visible) before its code: K1, K1b, K1c, K1d, K1e, N3, N6, SH1, HB1-HB4, VQ9. Two lines whose @ letters differ are two cases, not two behaviours. |
+| A probe left to the search what case it runs (M4: aligned on shadPS4, unaligned on the PS4; SF5's alignment column) | M4 maps at an unaligned address it chooses (M5 is the aligned case). SF5 holds a page and prints "plain=" for a mapping without the flag, so its column has a reference. |
+| A field the call did not write was printed (SY1 flags 31) | Every buffer a query writes is filled with 0xEE first (zero past 0x48). VQ18 and DQ3 print which bytes VirtualQuery and DirectMemoryQuery write, and whether a failing call writes any. |
+| A code printed as "?" without its value (SY1 "F?III") | Every line that printed a "?" ends in " ?=<value>". |
+| A name with a code address in it (VQ6, VQ7) differs with every build and load address | Printed as anon:<12x> with the name in the notes; "site=" says which address it is: C the call's own return address, P the return address of the calling function (PX1, PX3). The FR probes print the name of each page as a, b, c (call site), M (renamed), 0. |
+| Two files from different rounds, or a file with lines missing, compared | "ROUND 128" at the top, "COUNT result lines=N layout lines=M" before DONE. analysis/compare_runs.py refuses to call two runs the same unless the rounds match, both have DONE, each COUNT agrees with its file and both have the same probe IDs. It prints both lines of every difference with the differing fields marked, and interprets nothing. |
+
+Second pass (every probe, the carve test included), by kind of blind spot:
+
+| Checked for every probe | How | Found | Change |
+|---|---|---|---|
+| A call whose result is thrown away (set-up, clean-up) fails without a trace | The memory functions and their wrappers are declared must-use; the compiler listed every discarded result | 550 calls (375 munmap, 69 release, 22 decommit, 18 pool expand, 9 pool commit, 8 mprotect ...) | All go through HF(): a failure writes "HF <code> <call>" before the result line. Both runs must have the same HF lines. |
+| A call's result reduced to yes/no | Every two-way character in the source read (about 100 places) | allocated() and mapped() (behind every phys=[..] and va=[..] string, main test and carve) took any failure as "free" / "unmapped"; LA1, LA2 (o/x); NU12, NU13 (o/x); FM9's directory open; counters in P85, FL6, TL1 | The predicates keep their meaning, but a code other than EACCES (what the PS4 returns for a query of free direct memory and of unmapped memory: Q2, QP1) is put on the line as ?=<code>. LA1, LA2, NU12, NU13 print the code letter. Counted calls report a failure's code. |
+| A value that is layout | Every PS4 result line of round 127 (12 SDKs, 693 IDs) scanned for address-like values | 35 IDs; beyond those of the first pass: VQ15, VQ16, VQ17 (address of the area found) | "=" when it is the probe's own page, else the region; VQ16 prints @f/@u for the space below its page. The rest are addresses the probe chose itself or sizes relative to its block. |
+| A buffer zero-filled before a query, hiding a field the call does not write | grep | 4 places refilled with zero inside loops (VQ10, VQ11, carve pool_va, carve vq_region_str) | EE fill. |
+| Pool counters are running totals: one difference shifts every later stats= line | 81 result lines carry them | - | compare_runs.py lists differences in run order and marks a line where only counters differ. |
+
+The carve test (CV0-CV103, read in full): it already printed the code of every step and both
+query views of each page. Changed: its own allocated() / mapped() / vq_page as above; CV70-CV88
+printed "op=0" when the commit had failed and nothing was decommitted (now "op=none"); vq_region_str
+used the low byte of the memory type (now all 32 bits). Added, because the table had no release
+with the alias still mapped and no Map2 alias removed again: CV63 (alias kept, release 0-7), CV64
+(checked release), CV65 (release 2-4), CV66 (Map2 alias of type 0 unmapped: does the type stay).
+
+Not done in this pass: reading the logic of each remaining probe for a case it does not control
+(as M4's alignment was). Phase 3 reviewed every probe for "is the cause of this code unambiguous"
+and still missed M4, so that review is not proof. HF, @, ?= and the EE fill make such a miss show
+in the output when it happens; they do not prove there is none.
+
+New probes:
+
+- VQ18, DQ3: bytes written by VirtualQuery and DirectMemoryQuery (FF buffer against 00 buffer).
+- K1d: MapDirectMemory2 and the system library area at every SDK: searched (7 hints, as K1c) and
+  fixed with no-overwrite (7 addresses); MapDirectMemory with MAP_STACK, searched and fixed.
+- K1e: a search from 7EFFF0000 with that address taken by the test's own three-page reservation, so
+  the next free page is the one ending at 7F0000000: MapDirectMemory, Map2, flexible, a reservation.
+- FR13-FR18: three no-access pages from three call sites in all six creation orders, then one
+  rename: tests "below SDK 5.50 two neighbours merge on rename only when the younger is the right
+  one". FR19, FR20: two pages renamed one at a time, in both orders.
+- SY1: change of the available flexible size by a written system flexible page and by its release.
+
+Changed lines (compare round 128 only with round 128): LA1, LA2, NU12, NU13, VQ15, VQ16, VQ17,
+CV70-CV88 (second line), Y1, Y2, U10, J6, LA3, HB1-HB5, XC5, MF1-MF4,
+K1, K1b, K1c, K2, K4, K5, K6, SH1, N3, N6, M4, VQ6, VQ7, VQ8, VQ9, VQ14, PX1, PX3, FL4, SF5, SY1, CF1,
+CL1, FR1-FR12.
+
+Not verified: nothing of round 128 has run on a PS4 or in shadPS4 yet; it compiles for the chain and
+for the SDK 12.00 package. Whether the "@f/@u" check sees everything that can make a fixed mapping
+fail is open: it uses VirtualQuery, which does not report system library area mappings (those print
+"@s").
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after

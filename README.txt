@@ -13,6 +13,24 @@ OUTPUT
           n mapped, no CPU read; r mapped, backing released (never read); . unmapped
     ret   the call's return code in hex (0 = OK)
 
+LINES (round 128)
+  <ID> ...   a result line: behaviour only. On the PS4 and on an emulator that follows its rules
+             the line is the same, character for character.
+               @f @u @s  what was at the probe's address before it ran: nothing visible, a mapping,
+                         the system library area (not visible). Lines whose @ letters differ ran
+                         different cases.
+               = F L D S H  where a mapping went: at the address asked for, at FF0000000, or the
+                         region (below 200000000, default search area, system library area, above)
+               ?=<value>  the codes printed as '?' on this line
+  LY <ID> ...  layout notes of the result line before it: addresses, sizes, names with code
+             addresses, module lists. They differ between systems and are not part of a comparison.
+  HF <code> <call>  a call whose result the probe does not print (set-up, clean-up) failed.
+             Written before the probe's result line. Both runs must have the same HF lines.
+  SB TR PS   read-back, pool trace and pool state lines
+  ROUND n    the round of the test; only results of the same round compare
+  COUNT ...  how many result and layout lines the run wrote, just before DONE
+  Compare two runs with analysis/compare_runs.py <PS4 folder> <other folder> [--layout].
+
 SECTIONS
   S  the probes themselves (query of an allocated / mapped page); nothing else runs if they fail
   A  return codes on unmapped memory: alignment, length 0, double release, partly free, out of range

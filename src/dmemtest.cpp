@@ -24,37 +24,37 @@ extern "C" {
 int32_t sceKernelGetCompiledSdkVersion(uint32_t* version);
 // replaces this process with another executable of the package (the next SDK version)
 int32_t sceSystemServiceLoadExec(const char* path, const char* args[]);
-int32_t sceKernelAllocateDirectMemory(long search_start, long search_end, size_t len,
+[[nodiscard]] int32_t sceKernelAllocateDirectMemory(long search_start, long search_end, size_t len,
                                       size_t alignment, int memory_type, long* phys_out);
-int32_t sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, long phys,
+[[nodiscard]] int32_t sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, long phys,
                                  size_t alignment);
-int32_t sceKernelMunmap(void* addr, size_t len);
-int32_t sceKernelReleaseDirectMemory(long start, size_t len);
+[[nodiscard]] int32_t sceKernelMunmap(void* addr, size_t len);
+[[nodiscard]] int32_t sceKernelReleaseDirectMemory(long start, size_t len);
 // OpenOrbis declares this void; libkernel returns the ioctl result (0x17904: mov eax, ebx).
-int32_t sceKernelCheckedReleaseDirectMemory(long start, size_t len);
-int32_t sceKernelDirectMemoryQuery(long offset, int32_t flags, void* info, size_t info_size);
-int32_t sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int32_t* prot);
-int32_t sceKernelEnableDmemAliasing(void);
-int32_t sceKernelMtypeprotect(const void* addr, size_t len, int32_t mtype, int32_t prot);
-int32_t sceKernelMprotect(const void* addr, size_t len, int32_t prot);
+[[nodiscard]] int32_t sceKernelCheckedReleaseDirectMemory(long start, size_t len);
+[[nodiscard]] int32_t sceKernelDirectMemoryQuery(long offset, int32_t flags, void* info, size_t info_size);
+[[nodiscard]] int32_t sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int32_t* prot);
+[[nodiscard]] int32_t sceKernelEnableDmemAliasing(void);
+[[nodiscard]] int32_t sceKernelMtypeprotect(const void* addr, size_t len, int32_t mtype, int32_t prot);
+[[nodiscard]] int32_t sceKernelMprotect(const void* addr, size_t len, int32_t prot);
 // OpenOrbis declares the last two by value; libkernel stores through them (0x19019, 0x19027).
-int32_t sceKernelAvailableDirectMemorySize(long search_start, long search_end, size_t alignment,
+[[nodiscard]] int32_t sceKernelAvailableDirectMemorySize(long search_start, long search_end, size_t alignment,
                                            long* phys_out, size_t* size_out);
 // Not in the OpenOrbis headers; argument registers from libkernel 0x19d80 / 0x19f30.
-int32_t sceKernelMemoryPoolExpand(uint64_t search_start, uint64_t search_end, uint64_t len,
+[[nodiscard]] int32_t sceKernelMemoryPoolExpand(uint64_t search_start, uint64_t search_end, uint64_t len,
                                   uint64_t alignment, uint64_t* phys_out);
-int32_t sceKernelMemoryPoolReserve(void* addr_in, uint64_t len, uint64_t alignment, int32_t flags,
+[[nodiscard]] int32_t sceKernelMemoryPoolReserve(void* addr_in, uint64_t len, uint64_t alignment, int32_t flags,
                                    void** addr_out);
-int32_t sceKernelMemoryPoolCommit(void* addr, uint64_t len, int32_t type, int32_t prot,
+[[nodiscard]] int32_t sceKernelMemoryPoolCommit(void* addr, uint64_t len, int32_t type, int32_t prot,
                                   int32_t flags);
-int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
+[[nodiscard]] int32_t sceKernelMemoryPoolDecommit(void* addr, uint64_t len, int32_t flags);
 // libkernel 0x19e80: ioctl 0x4010a802 into 16 bytes, copies min(size, 0x10); no null check.
-int32_t sceKernelMemoryPoolGetBlockStats(void* stats, size_t size);
-int32_t sceKernelGetDirectMemoryType(long start, int32_t* type, long* region_start,
+[[nodiscard]] int32_t sceKernelMemoryPoolGetBlockStats(void* stats, size_t size);
+[[nodiscard]] int32_t sceKernelGetDirectMemoryType(long start, int32_t* type, long* region_start,
                                      long* region_end);
-int32_t sceKernelVirtualQuery(const void* addr, int32_t flags, void* info, size_t info_size);
-int32_t sceKernelMapFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags);
-int32_t sceKernelMmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+[[nodiscard]] int32_t sceKernelVirtualQuery(const void* addr, int32_t flags, void* info, size_t info_size);
+[[nodiscard]] int32_t sceKernelMapFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags);
+[[nodiscard]] int32_t sceKernelMmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                       void** res);
 int32_t sceKernelUnlink(const char* path);
 long sceKernelLseek(int32_t fd, long offset, int whence);
@@ -72,24 +72,24 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void* const* a
 int32_t sceVideoOutSubmitFlip(int32_t handle, int32_t buf, uint32_t mode, int64_t arg);
 int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t rate);
 int32_t sceVideoOutGetFlipStatus(int32_t handle, void* status);
-int32_t sceKernelReserveVirtualRange(void** addr, size_t len, int32_t flags, size_t alignment);
-int32_t sceKernelMapNamedDirectMemory(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+[[nodiscard]] int32_t sceKernelReserveVirtualRange(void** addr, size_t len, int32_t flags, size_t alignment);
+[[nodiscard]] int32_t sceKernelMapNamedDirectMemory(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
                                       size_t alignment, const char* name);
-int32_t sceKernelMapNamedFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags,
+[[nodiscard]] int32_t sceKernelMapNamedFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags,
                                         const char* name);
-int32_t sceKernelSetVirtualRangeName(const void* addr, size_t len, const char* name);
+[[nodiscard]] int32_t sceKernelSetVirtualRangeName(const void* addr, size_t len, const char* name);
 // orbis/libkernel.h declares it without parameters; the signature as libkernel exports it
-int32_t sceKernelMapNamedSystemFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags,
+[[nodiscard]] int32_t sceKernelMapNamedSystemFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags,
                                               const char* name);
-int32_t sceKernelReleaseFlexibleMemory(void* addr, size_t len);
-int32_t sceKernelAvailableFlexibleMemorySize(size_t* size);
-int32_t sceKernelBatchMap(void* entries, int32_t count, int32_t* processed);
-int32_t sceKernelBatchMap2(void* entries, int32_t count, int32_t* processed, int32_t flags);
-int32_t sceKernelMemoryPoolBatch(const void* entries, int32_t count, int32_t* processed,
+[[nodiscard]] int32_t sceKernelReleaseFlexibleMemory(void* addr, size_t len);
+[[nodiscard]] int32_t sceKernelAvailableFlexibleMemorySize(size_t* size);
+[[nodiscard]] int32_t sceKernelBatchMap(void* entries, int32_t count, int32_t* processed);
+[[nodiscard]] int32_t sceKernelBatchMap2(void* entries, int32_t count, int32_t* processed, int32_t flags);
+[[nodiscard]] int32_t sceKernelMemoryPoolBatch(const void* entries, int32_t count, int32_t* processed,
                                  int32_t flags);
-int32_t sceKernelMapDirectMemory2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
+[[nodiscard]] int32_t sceKernelMapDirectMemory2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
                                   long phys, size_t alignment);
-int32_t sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int32_t type, long* phys);
+[[nodiscard]] int32_t sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int32_t type, long* phys);
 const char* sceKernelGetFsSandboxRandomWord(void);
 long sceKernelRead(int fd, void* buf, unsigned long nbytes);
 // module list (OpenOrbis orbis/libkernel.h; same layout as shadPS4's core/module.h)
@@ -127,19 +127,19 @@ int* __error(void);
 // ---- SB: silent-behaviour checker. Every successful call below reads back what it set (protection,
 //      memory type, name) and prints an SB line when that differs from what was asked for. The bodies
 //      are defined after head(); these names route every call in the file through them. ---------------
-static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot);
-static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+[[nodiscard]] static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot);
+[[nodiscard]] static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
                              size_t alignment);
-static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
+[[nodiscard]] static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
                               long phys, size_t alignment);
-static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags);
-static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+[[nodiscard]] static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags);
+[[nodiscard]] static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
                                    size_t alignment, const char* name);
-static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
+[[nodiscard]] static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
                                  const char* name);
-static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+[[nodiscard]] static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                        void** res);
-static int32_t sb_set_name(const void* addr, size_t len, const char* name);
+[[nodiscard]] static int32_t sb_set_name(const void* addr, size_t len, const char* name);
 #define sceKernelMprotect sb_mprotect
 #define sceKernelMapDirectMemory sb_map_direct
 #define sceKernelMapDirectMemory2 sb_map_direct2
@@ -155,6 +155,15 @@ static void* my_memset(void* d, int v, unsigned long n) {
     while (n--)
         *p++ = (unsigned char)v;
     return d;
+}
+
+// Every buffer a query writes its result to is filled with this before the call (round 128): the
+// first 0x48 bytes (the size of the largest result) with 0xEE, the rest with zero. A field the call
+// does not write then reads as EE, the same on every run, not as whatever the stack held (round
+// 127, SY1: flags 31 on shadPS4, which sets five bits of that byte and leaves the other three).
+static void out_prefill(void* b, unsigned long n) {
+    my_memset(b, 0, n);
+    my_memset(b, 0xEE, n < 0x48 ? n : 0x48);
 }
 
 // ---- screen ----------------------------------------------------------------------------------
@@ -477,18 +486,57 @@ static void emit(const char* s, int n) {
     }
 }
 
+// Result codes printed as '?' (not one of the letters), with their values: every line that printed
+// one ends in " ?=<value>,..." (round 128: for every line; until round 127 only where the probe
+// asked for it, so a '?' elsewhere did not say which code it was).
+static uint32_t g_unk[16];
+static int g_nunk = 0;
+// Every memory call whose result a probe does not print goes through HF() (round 128): when such a
+// call fails, a line "HF <code> <the call as written>" is written at once, before the probe's
+// result line. Until round 127 a set-up or clean-up step that failed left no trace, and the result
+// line read as a measurement of the intended case. The comparison treats HF lines like SB lines:
+// both runs must have the same ones.
+static int32_t hf_check(const char* text, int32_t r);
+#define HF(call) hf_check(#call, (call))
+
+// How many result lines and layout (LY) lines were written; printed as the COUNT line before DONE,
+// so that a results file with lines missing, or two runs that did not run the same probes, show.
+static int g_n_result = 0, g_n_layout = 0;
+
 // One result line. A line that does not fit ends in "[TRUNCATED]" rather than losing its tail silently.
 struct Line {
     static constexpr int kCap = 4000;
     char b[kCap + 32];
     int p = 0;
     bool cut = false;
+    // Layout notes (round 128). A result line holds behaviour only: what must be the same on the
+    // PS4 and on an emulator that follows its rules. What depends on where things happen to be
+    // (absolute addresses, sizes of what is free, module lists) is written between lay() and beh()
+    // and comes out as a separate line "LY <id> ..." after the result line; a comparison of two
+    // runs leaves the LY lines out.
+    static constexpr int kLay = 900;
+    char ly[kLay + 8];
+    int lp = 0;
+    bool in_lay = false;
+    Line& lay() {
+        in_lay = true;
+        return *this;
+    }
+    Line& beh() {
+        in_lay = false;
+        return *this;
+    }
     Line& s(const char* t) {
         while (*t)
             c(*t++);
         return *this;
     }
     Line& c(char ch) {
+        if (in_lay) {
+            if (lp < kLay)
+                ly[lp++] = ch;
+            return *this;
+        }
         if (p < kCap)
             b[p++] = ch;
         else
@@ -541,6 +589,13 @@ struct Line {
         return to(start + 9);
     }
     void end() {
+        in_lay = false;
+        if (g_nunk) {
+            s(" ?=");
+            for (int k = 0; k < g_nunk; k++)
+                hex(g_unk[k]).c(k + 1 < g_nunk ? ',' : ' ');
+            g_nunk = 0;
+        }
         while (p > 0 && b[p - 1] == ' ')
             p--;
         if (cut) {
@@ -548,9 +603,60 @@ struct Line {
                 b[p++] = *t;
         }
         b[p++] = '\n';
+        // a result line starts with a probe ID: an upper-case letter, and not one of the prefixes
+        // of the other kinds of line (SB, TR, PS, LY and a blank after it)
+        const bool other = p > 3 && b[2] == ' ' &&
+                           ((b[0] == 'S' && b[1] == 'B') || (b[0] == 'T' && b[1] == 'R') ||
+                            (b[0] == 'H' && b[1] == 'F') ||
+                            (b[0] == 'P' && b[1] == 'S') || (b[0] == 'L' && b[1] == 'Y'));
+        if (b[0] == 'L' && b[1] == 'Y' && b[2] == ' ')
+            g_n_layout++;
+        else if (!other && b[0] >= 'A' && b[0] <= 'Z')
+            g_n_result++;
         emit(b, p);
+        if (lp > 0) {
+            g_n_layout++;
+            // "LY <id>" and the notes
+            char o[kLay + 48];
+            int n = 0;
+            o[n++] = 'L';
+            o[n++] = 'Y';
+            o[n++] = ' ';
+            for (int i = 0; i < p && i < 12 && b[i] != ' ' && b[i] != '\n'; i++)
+                o[n++] = b[i];
+            if (ly[0] != ' ')
+                o[n++] = ' ';
+            for (int i = 0; i < lp; i++)
+                o[n++] = ly[i];
+            while (n > 0 && o[n - 1] == ' ')
+                n--;
+            o[n++] = '\n';
+            emit(o, n);
+        }
     }
 };
+
+// 1 when r is success. For calls a probe only counts: a failure's code goes to the line's ?= list.
+static int okc(int32_t r) {
+    if (r != 0 && g_nunk < 16)
+        g_unk[g_nunk++] = (uint32_t)r;
+    return r == 0;
+}
+
+static int32_t hf_check(const char* text, int32_t r) {
+    if (r != 0) {
+        // the '?' codes waiting for the probe's own line stay with that line
+        const int waiting = g_nunk;
+        g_nunk = 0;
+        Line l;
+        l.s("HF ").hex((uint32_t)r).c(' ');
+        for (int k = 0; k < 90 && text[k]; k++)
+            l.c(text[k]);
+        l.end();
+        g_nunk = waiting;
+    }
+    return r;
+}
 
 // From SDK 2.50, a fixed direct mapping over pool memory (T19: a reservation holding a committed
 // block) did not return on the PS4 (FW 12.02): the console soft-locked (SDK chain, run 0x02508001;
@@ -600,8 +706,8 @@ static long alloc_guarded(int pages, int type, int32_t* r) {
     *r = sceKernelAllocateDirectMemory(0, (long)g_dmem, (uint64_t)(pages + 2) * PG, PG, type, &g);
     if (*r != 0)
         return -1;
-    sceKernelReleaseDirectMemory(g, PG);
-    sceKernelReleaseDirectMemory(g + (long)(pages + 1) * (long)PG, PG);
+    HF(sceKernelReleaseDirectMemory(g, PG));
+    HF(sceKernelReleaseDirectMemory(g + (long)(pages + 1) * (long)PG, PG));
     return g + (long)PG;
 }
 static long alloc_al(uint64_t lo, uint64_t hi, int pages, uint64_t align, int type,
@@ -617,8 +723,14 @@ static long alloc_al(uint64_t lo, uint64_t hi, int pages, uint64_t align, int ty
 static bool allocated(uint64_t pa) {
     DmemInfo q;
     my_memset(&q, 0, sizeof(q));
-    if (sceKernelDirectMemoryQuery((long)pa, 0, &q, sizeof(q)) != 0)
+    // Free memory is EACCES on the PS4 (Q2); any other failure is not "free": its code is
+    // put on the line as ?=<code> (round 128)
+    const int32_t r = sceKernelDirectMemoryQuery((long)pa, 0, &q, sizeof(q));
+    if (r != 0) {
+        if ((uint32_t)r != 0x8002000D && g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return false;
+    }
     return q.start <= pa && pa < q.end;
 }
 
@@ -626,8 +738,14 @@ static bool mapped(void* va, int32_t* prot) {
     void* s = 0;
     void* e = 0;
     int32_t p = 0;
-    if (sceKernelQueryMemoryProtection(va, &s, &e, &p) != 0)
+    // Unmapped memory is EACCES on the PS4 (QP1); any other failure is not "unmapped": its code
+    // is put on the line as ?=<code> (round 128)
+    const int32_t r = sceKernelQueryMemoryProtection(va, &s, &e, &p);
+    if (r != 0) {
+        if ((uint32_t)r != 0x8002000D && g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return false;
+    }
     if (prot)
         *prot = p;
     return true;
@@ -679,7 +797,7 @@ static void unmap_all(uint8_t* va, int pages) {
         return;
     for (int i = 0; i < pages; i++)
         if (mapped(va + i * PG, nullptr))
-            sceKernelMunmap(va + i * PG, PG);
+            HF(sceKernelMunmap(va + i * PG, PG));
 }
 
 static void release_all(long pa, int pages) {
@@ -687,13 +805,53 @@ static void release_all(long pa, int pages) {
         return;
     for (int i = 0; i < pages; i++)
         if (allocated(pa + i * PG))
-            sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG);
+            HF(sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG));
 }
 
 static Line head(const char* id, const char* name) {
     Line l;
     l.s(id).to(5).s(name).c(' ').to(36);
     return l;
+}
+
+// ---- behaviour and layout (round 128) ----------------------------------------------------------
+// Which part of the address space an address is in: L below 200000000, D from there to the system
+// library area (where the default search places mappings), S the system library area
+// 7F0000000-FF0000000, H above it.
+static char region(uint64_t a) {
+    return a < 0x200000000ull ? 'L' : a < 0x7F0000000ull ? 'D' : a < 0xFF0000000ull ? 'S' : 'H';
+}
+
+// Where a mapping went, as behaviour: "=" at the address asked for, "F" exactly at FF0000000 (the
+// first address above the system library area), otherwise the region letter. The address itself
+// goes to the layout notes as tag=address.
+static void where(Line& l, const char* tag, uint64_t got, uint64_t asked) {
+    if (asked != 0 && got == asked)
+        l.c('=');
+    else if (got == 0xFF0000000ull)
+        l.c('F');
+    else
+        l.c(region(got));
+    l.lay().c(' ').s(tag).c('=').hex(got).beh();
+}
+
+// What the application can see in [at, at+len) before a probe uses it: 'f' nothing mapped, 'u' a
+// mapping, 's' the range touches the system library area, whose mappings VirtualQuery does not
+// report to the application. A probe at a chosen address prints this, so that a result caused by
+// what already was at that address reads differently from one caused by a rule. It is always
+// printed as '@' and the letter (@f, @u, @s): the comparison script takes two lines whose @ letters
+// differ as two different cases, not as two behaviours.
+static char occ(uint64_t at, uint64_t len) {
+    if (at < 0xFF0000000ull && at + len > 0x7F0000000ull)
+        return 's';
+    struct {
+        uint64_t start, end;
+        unsigned char rest[0x50];
+    } qi;
+    out_prefill(&qi, sizeof(qi));
+    if (sceKernelVirtualQuery((void*)at, 1, &qi, 0x48) != 0)
+        return 'f';
+    return qi.start < at + len ? 'u' : 'f';
 }
 
 // ---- SB bodies: they call the real functions, then read back -----------------------------------
@@ -714,25 +872,25 @@ static Line head(const char* id, const char* name) {
 #undef sceKernelMmap
 #undef sceKernelSetVirtualRangeName
 
-static int32_t sb_read_prot(const void* at) {
+[[nodiscard]] static int32_t sb_read_prot(const void* at) {
     void* s = 0;
     void* e = 0;
     int32_t p = 0;
     return sceKernelQueryMemoryProtection((void*)at, &s, &e, &p) == 0 ? p : -1;
 }
 
-static int32_t sb_read_type(const void* at) {
+[[nodiscard]] static int32_t sb_read_type(const void* at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
         return -1;
     return (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) | ((uint32_t)vi[0x1E] << 16) |
                      ((uint32_t)vi[0x1F] << 24));
 }
 
-static int32_t sb_read_vprot(const void* at) {
+[[nodiscard]] static int32_t sb_read_vprot(const void* at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
         return -1;
     return (int32_t)((uint32_t)vi[0x18] | ((uint32_t)vi[0x19] << 8) | ((uint32_t)vi[0x1A] << 16) |
@@ -741,7 +899,7 @@ static int32_t sb_read_vprot(const void* at) {
 
 static bool sb_read_name(const void* at, char* out) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
         return false;
     for (int k = 0; k < 32; k++)
@@ -852,7 +1010,7 @@ static void xc_check_unchanged(const char* op, uint64_t len, const void* at, con
 // direct memory: VirtualQuery's type must match GetDirectMemoryType for the same physical address
 static void xc_check_type_sources(const char* op, uint64_t len, const void* at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0 || (vi[0x20] & 0x2) == 0)
         return;
     uint64_t st = 0, off = 0;
@@ -904,7 +1062,7 @@ static void sb_check_name(const char* op, const void* at, uint64_t len, const ch
     }
 }
 
-static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot) {
+[[nodiscard]] static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot) {
     const XcSnap before = xc_snap(addr);
     const int32_t r = sceKernelMprotect(addr, len, prot);
     if (r == 0 && len)
@@ -913,14 +1071,14 @@ static int32_t sb_mprotect(const void* addr, size_t len, int32_t prot) {
         xc_check_unchanged("mprotect", len, addr, before);
     return r;
 }
-static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+[[nodiscard]] static int32_t sb_map_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
                              size_t alignment) {
     const int32_t r = sceKernelMapDirectMemory(addr, len, prot, flags, phys, alignment);
     if (r == 0)
         sb_check_prot("map_direct", *addr, len, prot);
     return r;
 }
-static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
+[[nodiscard]] static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t prot, int32_t flags,
                               long phys, size_t alignment) {
     const int32_t r = sceKernelMapDirectMemory2(addr, len, type, prot, flags, phys, alignment);
     if (r == 0) {
@@ -932,13 +1090,13 @@ static int32_t sb_map_direct2(void** addr, size_t len, int32_t type, int32_t pro
     }
     return r;
 }
-static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags) {
+[[nodiscard]] static int32_t sb_map_flex(void** addr, size_t len, int32_t prot, int32_t flags) {
     const int32_t r = sceKernelMapFlexibleMemory(addr, len, prot, flags);
     if (r == 0)
         sb_check_prot("map_flex", *addr, len, prot);
     return r;
 }
-static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
+[[nodiscard]] static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_t flags, long phys,
                                    size_t alignment, const char* name) {
     const int32_t r =
         sceKernelMapNamedDirectMemory(addr, len, prot, flags, phys, alignment, name);
@@ -948,7 +1106,7 @@ static int32_t sb_map_named_direct(void** addr, size_t len, int32_t prot, int32_
     }
     return r;
 }
-static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
+[[nodiscard]] static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t flags,
                                  const char* name) {
     const int32_t r = sceKernelMapNamedFlexibleMemory(addr, len, prot, flags, name);
     if (r == 0) {
@@ -957,7 +1115,7 @@ static int32_t sb_map_named_flex(void** addr, size_t len, int32_t prot, int32_t 
     }
     return r;
 }
-static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
+[[nodiscard]] static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int32_t fd, long offset,
                        void** res) {
     const bool fixed = (flags & 0x10) != 0 && addr;
     const XcSnap before = fixed ? xc_snap(addr) : XcSnap{};
@@ -970,7 +1128,7 @@ static int32_t sb_mmap(void* addr, size_t len, int32_t prot, int32_t flags, int3
         xc_check_unchanged("mmap fixed", len, addr, before);
     return r;
 }
-static int32_t sb_set_name(const void* addr, size_t len, const char* name) {
+[[nodiscard]] static int32_t sb_set_name(const void* addr, size_t len, const char* name) {
     const XcSnap before = xc_snap(addr);
     const int32_t r = sceKernelSetVirtualRangeName(addr, len, name);
     if (r == 0 && len)
@@ -1017,7 +1175,7 @@ static void neighbours() {
     const long c = alloc(20, 3, &r);
     if (c < 0)
         return setup_failed("S3", "neighbour layout", "alloc scratch", r);
-    sceKernelReleaseDirectMemory(c, 20 * PG);
+    HF(sceKernelReleaseDirectMemory(c, 20 * PG));
     const int types[5] = {0, 3, 3, 3, 0};
     long blk[5];
     bool ok = true;
@@ -1103,7 +1261,7 @@ static void a_case(const char* id, const char* name, Op op, uint64_t off, uint64
         return setup_failed(id, name, "alloc", r);
     for (int i = 0; i < 4; i++)
         if (prefree_mask & (1u << i))
-            sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG);
+            HF(sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG));
     const int32_t r1 = release(op, pa + (long)off, len);
     Line l = head(id, name);
     l.ret("ret", r1);
@@ -1119,7 +1277,7 @@ static void a_free(const char* id, const char* name, Op op) {
     const long pa = alloc(1, 3, &r);
     if (pa < 0)
         return setup_failed(id, name, "alloc", r);
-    sceKernelReleaseDirectMemory(pa, PG);
+    HF(sceKernelReleaseDirectMemory(pa, PG));
     Line l = head(id, name);
     l.ret("ret", release(op, pa, PG));
     phys_str(l, pa, 1).end();
@@ -1183,7 +1341,7 @@ static void b_split(const char* id, const char* name, int type_a, int type_b, ui
     const long scratch = alloc(8, 3, &r);
     if (scratch < 0)
         return setup_failed(id, name, "alloc scratch", r);
-    sceKernelReleaseDirectMemory(scratch, 8 * PG);
+    HF(sceKernelReleaseDirectMemory(scratch, 8 * PG));
     const uint64_t c = (uint64_t)scratch;
     int32_t ra = 0, rb = 0;
     const long a = alloc_in(c, c + 4 * PG, 4, type_a, &ra);
@@ -1270,7 +1428,7 @@ static void d_block(const char* id, const char* name, Op op, int pages, uint32_t
         return setup_failed(id, name, "alloc", r);
     for (int i = 0; i < pages; i++)
         if (prefree & (1u << i))
-            sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG);
+            HF(sceKernelReleaseDirectMemory(pa + (long)(i * PG), PG));
     Line l = head(id, name);
     l.ret("ret", release(op, pa + (long)off, len));
     phys_str(l, pa, pages).end();
@@ -1289,7 +1447,7 @@ static void d_outside_mapped(const char* id, const char* name) {
         return release_all(pa, 6);
     }
     stamp(va, 2, 0x5A0D0000);
-    sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG);
+    HF(sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG));
     Line l = head(id, name);
     l.ret("ret", sceKernelReleaseDirectMemory(pa, 4 * PG));
     va_str(l, "va45", va, pa + 4 * PG, 2, 0x5A0D0000).c(' ');
@@ -1358,7 +1516,7 @@ static long build(int n, const int* types, long* blk, uint64_t align) {
     const long g = alloc_al(0, g_dmem, n * 4 + (int)(2 * guard / PG), align, 3, &r);
     if (g < 0)
         return -1;
-    sceKernelReleaseDirectMemory(g, n * 4 * PG + 2 * guard);
+    HF(sceKernelReleaseDirectMemory(g, n * 4 * PG + 2 * guard));
     const long c = g + (long)guard;
     bool ok = true;
     for (int i = 0; i < n; i++) {
@@ -1623,6 +1781,7 @@ static void run_q() {
         Line l = head("QS", "info size: bytes written");
         for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
             unsigned char buf[0x48];
+            out_prefill(buf, sizeof(buf));
             my_memset(buf, 0xCC, sizeof(buf));
             const int32_t rq = sceKernelDirectMemoryQuery(pa, 0, buf, sizes[i]);
             int last = 0;
@@ -1678,7 +1837,7 @@ static void e_alloc(const char* id, const char* name, long lo, long hi, size_t l
     l.ret("ret", r);
     if (r == 0) {
         l.s("phys%4000=").hex((uint64_t)pa % PG);
-        sceKernelReleaseDirectMemory(pa - (pa % (long)PG), len ? (len + PG - 1) / PG * PG : PG);
+        HF(sceKernelReleaseDirectMemory(pa - (pa % (long)PG), len ? (len + PG - 1) / PG * PG : PG));
     }
     l.end();
 }
@@ -1692,7 +1851,7 @@ static void e_map(const char* id, const char* name, long phys, size_t len, int p
         int32_t pr = -1;
         l.s("prot=").c(mapped(va, &pr) ? (char)('0' + (pr & 7)) : '.');
         if (len)
-            sceKernelMunmap(va, len);
+            HF(sceKernelMunmap(va, len));
     }
     l.end();
 }
@@ -1721,16 +1880,16 @@ static void run_e() {
             const int32_t r = sceKernelAllocateDirectMemory(x, x + (long)PG, PG, PG, 3, &y);
             l.ret("ret", r);
             if (r == 0)
-                sceKernelReleaseDirectMemory(y, PG);
+                HF(sceKernelReleaseDirectMemory(y, PG));
             l.end();
-            sceKernelReleaseDirectMemory(x, PG);
+            HF(sceKernelReleaseDirectMemory(x, PG));
         }
     }
     int32_t r = 0;
     const long pa = alloc(4, 3, &r);
     if (pa < 0)
         return setup_failed("E11", "map validation", "alloc", r);
-    sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG);
+    HF(sceKernelReleaseDirectMemory(pa + (long)(2 * PG), 2 * PG));
     e_map("E11", "map free page", pa + (long)(2 * PG), PG, 0x3);
     e_map("E12", "map phys +1000", pa + 0x1000, PG, 0x3);
     e_map("E13", "map len 5000", pa, PG + 0x1000, 0x3);
@@ -1776,7 +1935,7 @@ static void run_f() {
         const int32_t rm = sceKernelMtypeprotect(va + 2 * PG, 2 * PG, 0, 0x3);
         DmemInfo q;
         my_memset(&q, 0, sizeof(q));
-        sceKernelDirectMemoryQuery(pa + (long)(2 * PG), 0, &q, sizeof(q));
+        HF(sceKernelDirectMemoryQuery(pa + (long)(2 * PG), 0, &q, sizeof(q)));
         Line l = head("F1", "mtype 2-3 -> 0, rel 1-2");
         l.ret("mt", rm).s("q2mtype=").dec(q.mtype).c(' ');
         l.ret("ret", sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
@@ -1844,7 +2003,7 @@ static void run_f() {
         release_all(pa, 4);
     }
     if (uint8_t* va = f_setup("F6", "rel all, re-alloc same phys", &pa, 4, 0x5A0F6000)) {
-        sceKernelReleaseDirectMemory(pa, 4 * PG);
+        HF(sceKernelReleaseDirectMemory(pa, 4 * PG));
         int32_t r = 0;
         const long again = alloc_in(pa, pa + 4 * PG, 4, 3, &r);
         Line l = head("F6", "rel all, re-alloc same phys");
@@ -1854,7 +2013,7 @@ static void run_f() {
         release_all(pa, 4);
     }
     if (uint8_t* va = f_setup("F7", "rel 1-2, munmap whole range", &pa, 4, 0x5A0F7000)) {
-        sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG);
+        HF(sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
         Line l = head("F7", "rel 1-2, munmap whole range");
         l.ret("unmap", sceKernelMunmap(va, 4 * PG));
         va_str(l, "va", va, pa, 4, 0x5A0F7000).c(' ');
@@ -1863,7 +2022,7 @@ static void run_f() {
         release_all(pa, 4);
     }
     if (uint8_t* va = f_setup("F8", "rel 1-2, mprotect released 1", &pa, 4, 0x5A0F8000)) {
-        sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG);
+        HF(sceKernelReleaseDirectMemory(pa + (long)PG, 2 * PG));
         Line l = head("F8", "rel 1-2, mprotect released 1");
         l.ret("mp", sceKernelMprotect(va + PG, PG, 0x1));
         prot_str(l, va, 4).end();
@@ -1871,7 +2030,7 @@ static void run_f() {
         release_all(pa, 4);
     }
     if (uint8_t* va = f_setup("F9", "mtype released page 1", &pa, 4, 0x5A0F9000)) {
-        sceKernelReleaseDirectMemory(pa + (long)PG, PG);
+        HF(sceKernelReleaseDirectMemory(pa + (long)PG, PG));
         Line l = head("F9", "mtype released page 1");
         l.ret("mt", sceKernelMtypeprotect(va + PG, PG, 0, 0x3));
         va_str(l, "va", va, pa, 4, 0x5A0F9000).end();
@@ -1991,6 +2150,8 @@ static char code(int32_t r) {
     case 0x8002000E:
         return 'F';
     default:
+        if (g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return '?';
     }
 }
@@ -2026,7 +2187,7 @@ static void run_h() {
             const int32_t ra = sceKernelAllocateDirectMemory(0, (long)g_dmem, PG, PG, t, &ph);
             l.c(code(ra));
             if (ra == 0)
-                sceKernelReleaseDirectMemory(ph, PG);
+                HF(sceKernelReleaseDirectMemory(ph, PG));
         }
         l.end();
     }
@@ -2050,6 +2211,7 @@ static void run_h() {
     {
         // bytes written by a failing query, and by find-next past the end
         unsigned char buf[0x48];
+        out_prefill(buf, sizeof(buf));
         Line l = head("H6", "bytes written by failing query");
         for (int pass = 0; pass < 2; pass++) {
             my_memset(buf, 0xCC, sizeof(buf));
@@ -2075,7 +2237,7 @@ static int32_t chk(uint64_t start, uint64_t len) {
 // ---- coverage batch 2 (analysis/COVERAGE.md): reservation, named direct mapping, MapDirectMemory2 -
 static void cov_unmap(int32_t r, void* m, size_t len) {
     if (r == 0 && m != nullptr)
-        sceKernelMunmap(m, len);
+        HF(sceKernelMunmap(m, len));
 }
 static void run_cov2() {
     say("== coverage batch 2: ReserveVirtualRange, MapNamedDirectMemory, MapDirectMemory2");
@@ -2096,7 +2258,7 @@ static void run_cov2() {
             void* v = base;
             const int32_t r = rm == 0 ? sceKernelReserveVirtualRange(&v, PG, f, 0) : -1;
             l.c(code(rm)).c(code(r)).c(r == 0 ? (v == base ? '=' : '!') : ' ');
-            sceKernelMunmap(base, 0x200000);
+            HF(sceKernelMunmap(base, 0x200000));
         }
         release_all(pa, 1);
         l.end();
@@ -2199,7 +2361,11 @@ static void run_cov3() {
     {
         // SY1: MapNamedSystemFlexibleMemory, never probed before: null name | 32 characters | len 0 |
         // len 1000 | fixed 0 | a valid mapping (code, VirtualQuery prot, flags, name)
-        Line l = head("SY1", "system flex: null | 32 | len0 | 1000 | fixed 0 | valid: code prot flags");
+        // valid: code, where it went (region; the address is in the notes), protection, flags and
+        // name from VirtualQuery (the buffer is filled with EE before, round 128), and the change
+        // of the available flexible size by the mapping, written to, and by its release
+        Line l = head("SY1", "system flex: null | 32 | len0 | 1000 | fixed 0 | valid: code where prot "
+                             "flags name avail");
         char n32[33];
         for (int i = 0; i < 32; i++)
             n32[i] = 'a';
@@ -2216,16 +2382,26 @@ static void run_cov3() {
         sy(0x1000, 0, "sy1");
         sy(PG, 0x10, "sy1");
         void* m = 0;
+        size_t av0 = 0, av1 = 0, av2 = 0;
+        HF(sceKernelAvailableFlexibleMemorySize(&av0));
         const int32_t r = sceKernelMapNamedSystemFlexibleMemory(&m, PG, 0x3, 0, "sy1");
         l.s(" | ").c(code(r));
         if (r == 0) {
-            // where the PS4 puts system flexible memory (absolute, >>12; round 127)
-            l.s(" at=").hex((uint64_t)m >> 12);
-            unsigned char vi[0x48];
+            l.c(' ');
+            where(l, "at", (uint64_t)m, 0);
+            unsigned char vi[0x60];
+            out_prefill(vi, sizeof(vi));
             if (sceKernelVirtualQuery(m, 0, vi, 0x48) == 0)
                 l.s(" prot=").hex((uint32_t)vi[0x18]).s(" flags=").hex((uint32_t)vi[0x20])
                     .s(" name=").s((const char*)vi + 0x21);
-            sceKernelMunmap(m, PG);
+            else
+                l.s(" vq fails");
+            *(volatile uint32_t*)m = 1;
+            HF(sceKernelAvailableFlexibleMemorySize(&av1));
+            HF(sceKernelMunmap(m, PG));
+            HF(sceKernelAvailableFlexibleMemorySize(&av2));
+            l.s(" avail ").shex((long long)av1 - (long long)av0).c(' ');
+            l.shex((long long)av2 - (long long)av1);
         }
         l.end();
     }
@@ -2245,7 +2421,7 @@ static void run_cov3() {
             else
                 l.hex((uint64_t)r);
             l.end();
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
     }
@@ -2257,7 +2433,7 @@ static void run_cov3() {
             l.s("SKIP").end();
         } else {
             l.c(code(sceKernelSetVirtualRangeName(f, PG, nullptr))).end();
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         }
     }
 }
@@ -2280,11 +2456,14 @@ static void* cov_libkernel_sym(const char* name, Line* diag = nullptr) {
     static int32_t handles[64];
     size_t n = 0;
     const int32_t rl = sceKernelGetModuleList(handles, 64, &n);
-    if (diag)
-        diag->s("list=").c(code(rl)).c(' ').dec((int)n).c(' ');
+    if (diag) {
+        diag->s("list=").c(code(rl)).c(' ');
+        diag->lay().s("modules=").dec((int)n).c(' ').beh();
+    }
     if (rl != 0)
         n = 0;
     void* found = nullptr;
+    bool kernel_listed = false;
     for (size_t i = 0; i < n && i < 64; i++) {
         static DtModuleInfo info;
         my_memset(&info, 0, sizeof(info));
@@ -2298,15 +2477,21 @@ static void* cov_libkernel_sym(const char* name, Line* diag = nullptr) {
                                 info.name[k + 4] == 'e' && info.name[k + 5] == 'l');
         if (!kernel)
             continue;
+        kernel_listed = true;
         void* fn = nullptr;
         const int32_t rd = sceKernelDlsym(handles[i], name, &fn);
-        if (diag)
-            diag->s(info.name).c('#').hex((uint32_t)handles[i]).c(':').hex((uint32_t)rd).c(' ');
+        // which modules have "kernel" in the name is the module list (layout): in the notes
+        if (diag) {
+            diag->lay().s(info.name).c('#').hex((uint32_t)handles[i]).c(':').hex((uint32_t)rd);
+            diag->c(' ').beh();
+        }
         if (rd == 0 && fn && !found)
             found = fn;
     }
     // From SDK 5.00 the list holds only the application's module (round 120: list=1); below 5.00
     // libkernel.sprx is handle 0x2001. Whether sceKernelDlsym takes that handle anyway:
+    if (diag)
+        diag->s("kernel in list=").c(kernel_listed ? '1' : '0').c(' ');
     if (!found) {
         void* fn = nullptr;
         const int32_t rd = sceKernelDlsym(0x2001, name, &fn);
@@ -2340,10 +2525,10 @@ static void run_cov5() {
         void* f = 0;
         void* na = 0;
         void* hole = 0;
-        sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
-        sceKernelMapFlexibleMemory(&na, PG, 0x0, 0);
+        HF(sceKernelMapFlexibleMemory(&f, PG, 0x3, 0));
+        HF(sceKernelMapFlexibleMemory(&na, PG, 0x0, 0));
         if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
-            sceKernelMunmap(hole, PG);
+            HF(sceKernelMunmap(hole, PG));
         if (!f || !na || !hole) {
             l.s("SKIP setup");
         } else {
@@ -2361,9 +2546,9 @@ static void run_cov5() {
         }
         l.end();
         if (f)
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         if (na)
-            sceKernelMunmap(na, PG);
+            HF(sceKernelMunmap(na, PG));
     }
     {
         // CL1: sceKernelClearVirtualRangeName (not in OpenOrbis' stub): on a mapping named "cl1":
@@ -2376,20 +2561,20 @@ static void run_cov5() {
         void* f = 0;
         void* hole = 0;
         if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
-            sceKernelMunmap(hole, PG);
+            HF(sceKernelMunmap(hole, PG));
         if (!clr || sceKernelMapNamedFlexibleMemory(&f, 2 * PG, 0x3, 0, "cl1") != 0) {
             l.s(clr ? "SKIP map" : "SKIP dlsym").end();
         } else {
             l.c(code(clr(f, PG)));
             unsigned char vi[0x48];
-            my_memset(vi, 0, sizeof(vi));
+            out_prefill(vi, sizeof(vi));
             if (sceKernelVirtualQuery(f, 0, vi, 0x48) == 0)
                 l.c(' ').s("\"").s((const char*)vi + 0x21).c('"');
             l.s(" | ").c(hole ? code(clr(hole, PG)) : '-');
             l.s(" | ").c(code(clr((uint8_t*)f + PG, 0)));
             l.s(" | ").c(code(clr((uint8_t*)f + 0x1000, PG)));
             l.end();
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         }
         Line l2 = head("CL2", "two no-access pages named x, y: areas | both cleared: areas");
         void* a = 0;
@@ -2398,15 +2583,15 @@ static void run_cov5() {
         } else {
             uint8_t* b = (uint8_t*)a;
             void* o = 0;
-            sceKernelMmap(b, PG, 0x0, 0x1012, -1, 0, &o);
-            sceKernelMmap(b + PG, PG, 0x0, 0x1012, -1, 0, &o);
-            sceKernelSetVirtualRangeName(b, PG, "x");
-            sceKernelSetVirtualRangeName(b + PG, PG, "y");
+            HF(sceKernelMmap(b, PG, 0x0, 0x1012, -1, 0, &o));
+            HF(sceKernelMmap(b + PG, PG, 0x0, 0x1012, -1, 0, &o));
+            HF(sceKernelSetVirtualRangeName(b, PG, "x"));
+            HF(sceKernelSetVirtualRangeName(b + PG, PG, "y"));
             co_scan(l2, (uint64_t)b, 2 * PG);
             l2.s(" | ").c(code(clr(b, 2 * PG))).c(' ');
             co_scan(l2, (uint64_t)b, 2 * PG);
             l2.end();
-            sceKernelMunmap(b, 2 * PG);
+            HF(sceKernelMunmap(b, 2 * PG));
         }
     }
     {
@@ -2416,7 +2601,7 @@ static void run_cov5() {
         l.c(code(sceKernelReleaseFlexibleMemory(nullptr, PG))).s(" | ");
         if (sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) == 0) {
             l.c(code(sceKernelReleaseFlexibleMemory(f, 0x1000)));
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         } else {
             l.c('-');
         }
@@ -2504,7 +2689,7 @@ static const char* g_trace = nullptr;
 static PoolStats tr_read() {
     PoolStats st;
     my_memset(&st, 0, sizeof(st));
-    sceKernelMemoryPoolGetBlockStats(&st, sizeof(st));
+    HF(sceKernelMemoryPoolGetBlockStats(&st, sizeof(st)));
     return st;
 }
 
@@ -2526,7 +2711,7 @@ static int32_t tr_done(const char* op, uint64_t len, int32_t type, int32_t r, co
     return r;
 }
 
-static int32_t tr_commit(void* a, uint64_t len, int32_t type, int32_t prot, int32_t flags) {
+[[nodiscard]] static int32_t tr_commit(void* a, uint64_t len, int32_t type, int32_t prot, int32_t flags) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     const int32_t r =
         tr_done("commit", len, type, sceKernelMemoryPoolCommit(a, len, type, prot, flags), b);
@@ -2538,23 +2723,23 @@ static int32_t tr_commit(void* a, uint64_t len, int32_t type, int32_t prot, int3
     }
     return r;
 }
-static int32_t tr_decommit(void* a, uint64_t len, int32_t flags) {
+[[nodiscard]] static int32_t tr_decommit(void* a, uint64_t len, int32_t flags) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     return tr_done("decommit", len, -1, sceKernelMemoryPoolDecommit(a, len, flags), b);
 }
-static int32_t tr_reserve(void* in, uint64_t len, uint64_t align, int32_t flags, void** out) {
+[[nodiscard]] static int32_t tr_reserve(void* in, uint64_t len, uint64_t align, int32_t flags, void** out) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     return tr_done("reserve", len, -1, sceKernelMemoryPoolReserve(in, len, align, flags, out), b);
 }
-static int32_t tr_expand(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align, uint64_t* out) {
+[[nodiscard]] static int32_t tr_expand(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align, uint64_t* out) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     return tr_done("expand", len, -1, sceKernelMemoryPoolExpand(lo, hi, len, align, out), b);
 }
-static int32_t tr_munmap(void* a, size_t len) {
+[[nodiscard]] static int32_t tr_munmap(void* a, size_t len) {
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     return tr_done("munmap", len, -1, sceKernelMunmap(a, len), b);
 }
-static int32_t tr_mtypeprotect(const void* a, size_t len, int32_t type, int32_t prot) {
+[[nodiscard]] static int32_t tr_mtypeprotect(const void* a, size_t len, int32_t type, int32_t prot) {
     const XcSnap before = xc_snap(a);
     const PoolStats b = g_trace ? tr_read() : PoolStats{};
     const int32_t r =
@@ -2611,7 +2796,7 @@ static void run_p2() {
     const long c = alloc_al(0, g_dmem, 12, blk, 3, &r);
     if (c < 0)
         return setup_failed("P21", "pool layout", "alloc", r);
-    sceKernelReleaseDirectMemory(c, 12 * PG);
+    HF(sceKernelReleaseDirectMemory(c, 12 * PG));
     uint64_t pp = 0;
     const int32_t re = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &pp);
     const long b = alloc_in(c + 8 * PG, c + 12 * PG, 4, 3, &r);
@@ -2762,7 +2947,7 @@ struct PS {
 static PS ps() {
     PS st;
     my_memset(&st, 0, sizeof(st));
-    sceKernelMemoryPoolGetBlockStats(&st, sizeof(st));
+    HF(sceKernelMemoryPoolGetBlockStats(&st, sizeof(st)));
     return st;
 }
 
@@ -2838,7 +3023,7 @@ static void run_p7() {
         }
         l.end();
     }
-    sceKernelMunmap(rv, rsv);
+    HF(sceKernelMunmap(rv, rsv));
     {
         Line l = head("P73", "reserve 2,4,6,8M / munmap: delta");
         for (int m = 1; m <= 4; m++) {
@@ -2849,7 +3034,7 @@ static void run_p7() {
             delta(l, a, ps());
             if (r == 0) {
                 a = ps();
-                sceKernelMunmap(v, m * rsv);
+                HF(sceKernelMunmap(v, m * rsv));
                 l.c('|');
                 delta(l, a, ps());
             }
@@ -2870,20 +3055,20 @@ static void run_p7() {
                 const int32_t c3 = sceKernelMemoryPoolCommit(b, blk, 3, 0x3, 0);
                 l.s("t3:").c(c3 == 0 ? moved(a, ps()) : code(c3));
                 if (c3 == 0)
-                    sceKernelMemoryPoolDecommit(b, blk, 0);
+                    HF(sceKernelMemoryPoolDecommit(b, blk, 0));
                 a = ps();
                 const int32_t c0 = sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
                 l.s(" t0:").c(c0 == 0 ? moved(a, ps()) : code(c0));
                 if (c0 == 0)
-                    sceKernelMemoryPoolDecommit(b, blk, 0);
-                sceKernelMunmap(v, rsv);
+                    HF(sceKernelMemoryPoolDecommit(b, blk, 0));
+                HF(sceKernelMunmap(v, rsv));
             }
             void* w = 0;
             a = ps();
             const int32_t r2 = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &w);
             l.s(" reserve:").c(r2 == 0 ? moved(a, ps()) : code(r2));
             if (r2 == 0)
-                sceKernelMunmap(w, rsv);
+                HF(sceKernelMunmap(w, rsv));
         }
         l.end();
     }
@@ -2913,7 +3098,7 @@ static void run_p7() {
         void* v = 0;
         const int32_t r_res = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v);
         if (r_res == 0)
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         int32_t r_com = -1;
         if (nr > 0 && used < 32)
             r_com = sceKernelMemoryPoolCommit((uint8_t*)rs[nr - 1] + used * blk, blk, 3, 0x3, 0);
@@ -2924,7 +3109,7 @@ static void run_p7() {
         if (r_com == 0)
             used++;
         for (int i = 0; i < nr; i++)
-            sceKernelMunmap(rs[i], rsv);
+            HF(sceKernelMunmap(rs[i], rsv));
         l.c(' ');
         stats(l).end();
     }
@@ -2952,7 +3137,7 @@ static void reserve_sizes(const char* id, const char* name, const int* mb, int n
         d4(l, a, ps());
         if (r == 0) {
             const PS b = ps();
-            sceKernelMunmap(v, (uint64_t)mb[i] << 20);
+            HF(sceKernelMunmap(v, (uint64_t)mb[i] << 20));
             l.c('|');
             d4(l, b, ps());
         }
@@ -2983,7 +3168,7 @@ static void run_p8() {
         s4(l, ps()).end();
     }
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 48 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 48 * blk, blk, &px));
     static const int big1[] = {16, 32, 64};
     static const int big2[] = {128, 256, 512};
     reserve_sizes("P81", "reserve 16,32,64M | munmap", big1, 3);
@@ -3015,8 +3200,8 @@ static void run_p8() {
             uint8_t* b = (uint8_t*)v;
             int used = 0;
             if (ps().ac == 0) {
-                sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
-                sceKernelMemoryPoolDecommit(b, blk, 0);
+                HF(sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0));
+                HF(sceKernelMemoryPoolDecommit(b, blk, 0));
             }
             while (ps().af > 1 && used < 120 &&
                    sceKernelMemoryPoolCommit(b + used * blk, blk, 3, 0x3, 0) == 0)
@@ -3031,7 +3216,7 @@ static void run_p8() {
             } else {
                 l.s(" SKIP state");
             }
-            sceKernelMunmap(v, 8 * mb);
+            HF(sceKernelMunmap(v, 8 * mb));
             sceKernelUsleep(1000000);
             l.end();
         }
@@ -3042,10 +3227,10 @@ static void run_p8() {
         if (sceKernelMemoryPoolReserve(0, 2 * mb, 0, 0, &v) == 0) {
             int n = 0;
             for (int i = 0; i < 16; i++)
-                n += sceKernelMemoryPoolCommit((uint8_t*)v + i * blk, blk, 3, 0x3, 0) == 0;
+                n += okc(sceKernelMemoryPoolCommit((uint8_t*)v + i * blk, blk, 3, 0x3, 0));
             l.s("n=").dec(n).s(" before=");
             s4(l, ps()).c(' ');
-            sceKernelMunmap(v, 2 * mb);
+            HF(sceKernelMunmap(v, 2 * mb));
             series(l);
         } else {
             l.s("SKIP reserve");
@@ -3062,7 +3247,7 @@ static void run_p8() {
             if (r == 0)
                 l.s("dc=").c(code(sceKernelMemoryPoolDecommit(v, mb, 0))).c(' ');
             series(l);
-            sceKernelMunmap(v, 2 * mb);
+            HF(sceKernelMunmap(v, 2 * mb));
         } else {
             l.s("SKIP reserve");
         }
@@ -3090,7 +3275,7 @@ static void p9_case(const char* id, const char* name, int commit_type, int new_t
         l.s(" decommit=").c(code(sceKernelMemoryPoolDecommit(v, blk, 0))).c(':');
         d4(l, a, ps());
     }
-    sceKernelMunmap(v, 0x200000);
+    HF(sceKernelMunmap(v, 0x200000));
     l.end();
 }
 
@@ -3135,14 +3320,14 @@ static void run_t() {
     // T1-T7: the committed block itself, located through VirtualQuery
     {
         uint64_t x = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &x);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &x));
         void* r = 0;
         if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r) != 0 ||
             sceKernelMemoryPoolCommit(r, blk, 3, 0x3, 0) != 0) {
             say("T1   SKIP reserve/commit");
         } else {
             unsigned char vi[0x60];
-            my_memset(vi, 0, sizeof(vi));
+            out_prefill(vi, sizeof(vi));
             const int32_t rq = sceKernelVirtualQuery(r, 0, vi, 0x48);
             uint64_t off = 0;
             for (int k = 7; k >= 0; k--)
@@ -3170,7 +3355,7 @@ static void run_t() {
                     l.s(" va=").c(mapped(r, &pr) ? 'M' : '.').end();
                 }
             }
-            sceKernelMunmap(r, rsv);
+            HF(sceKernelMunmap(r, rsv));
         }
     }
     // T8: one release over [allocated A 4 pages][pool block]
@@ -3181,7 +3366,7 @@ static void run_t() {
         if (c < 0) {
             l.s("SKIP alloc").end();
         } else {
-            sceKernelReleaseDirectMemory(c, 8 * PG);
+            HF(sceKernelReleaseDirectMemory(c, 8 * PG));
             const long a4 = alloc_in(c, c + (long)blk, 4, 3, &rr);
             uint64_t pp = 0;
             const int32_t re =
@@ -3207,7 +3392,7 @@ static void run_t() {
         if (c < 0) {
             say("T9   SKIP alloc");
         } else {
-            sceKernelReleaseDirectMemory(c, 12 * PG);
+            HF(sceKernelReleaseDirectMemory(c, 12 * PG));
             uint64_t pp = 0;
             const int32_t re =
                 sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &pp);
@@ -3292,7 +3477,7 @@ static void run_t() {
             pdelta_run(l, "", sceKernelMemoryPoolDecommit(v, blk, 0), a);
             a = ps();
             pdelta_run(l, " ", sceKernelMemoryPoolDecommit((uint8_t*)v + blk, blk, 0), a);
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         } else {
             l.s("SKIP");
         }
@@ -3314,7 +3499,7 @@ static void run_t() {
                 pdelta_run(l, "|", sceKernelMemoryPoolDecommit(v, blk, 0), a);
                 l.c(' ');
             }
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -3330,8 +3515,8 @@ static void run_t() {
                 pdelta_run(l, "", sceKernelMunmap(r1, 2 * rsv), a);
             } else {
                 l.s("SKIP not adjacent");
-                sceKernelMunmap(r1, rsv);
-                sceKernelMunmap(r2, rsv);
+                HF(sceKernelMunmap(r1, rsv));
+                HF(sceKernelMunmap(r2, rsv));
             }
         } else {
             l.s("SKIP");
@@ -3364,6 +3549,7 @@ static void run_t() {
         Line l = head("T20", "block stats: bytes written per size");
         for (uint32_t sz : sizes) {
             unsigned char buf[0x30];
+            out_prefill(buf, sizeof(buf));
             my_memset(buf, 0xCC, sizeof(buf));
             const int32_t r = sceKernelMemoryPoolGetBlockStats(buf, sz);
             int last = 0;
@@ -3435,9 +3621,9 @@ static void run_u() {
                 }
                 l.end();
             }
-            sceKernelMunmap(rx, rsv);
+            HF(sceKernelMunmap(rx, rsv));
             for (int i = 0; i < nr; i++)
-                sceKernelMunmap(rs[i], rsv);
+                HF(sceKernelMunmap(rs[i], rsv));
         }
     }
     // U7: null info on a failing lookup
@@ -3445,7 +3631,7 @@ static void run_u() {
         int32_t rr = 0;
         const long pa = alloc(1, 3, &rr);
         if (pa >= 0) {
-            sceKernelReleaseDirectMemory(pa, PG);
+            HF(sceKernelReleaseDirectMemory(pa, PG));
             Line l = head("U7", "null info, free page: size 18 / 0");
             l.ret("s18", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0x18));
             l.ret("s0", sceKernelDirectMemoryQuery(pa, 0, nullptr, 0)).end();
@@ -3464,11 +3650,11 @@ static void run_u() {
                 const PS a = ps();
                 const int32_t r = sceKernelMtypeprotect(v, blk, t, 0x3);
                 l.c(r == 0 ? moved(a, ps()) : code(r));
-                sceKernelMemoryPoolDecommit(v, blk, 0);
+                HF(sceKernelMemoryPoolDecommit(v, blk, 0));
             } else {
                 l.c('C');
             }
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -3487,7 +3673,7 @@ static void run_u() {
             const int32_t r = sceKernelMtypeprotect(va, PG, t, 0x3);
             DmemInfo q;
             my_memset(&q, 0, sizeof(q));
-            sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+            HF(sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q)));
             l.c(code(r)).dec(q.mtype).c(' ');
             unmap_all(va, 1);
             release_all(pa, 1);
@@ -3500,11 +3686,11 @@ static void run_u() {
             void* v = 0;
             const int32_t r = sceKernelMemoryPoolReserve(0, size, 0, 0, &v);
             if (r == 0)
-                sceKernelMunmap(v, size);
+                HF(sceKernelMunmap(v, size));
             return r;
         };
         uint64_t lo = rsv, hi = 1ull << 40;
-        Line l = head("U10", "largest pool reserve (2M steps)");
+        Line l = head("U10", "largest pool reserve (2M steps): one step more");
         if (try_reserve(lo) != 0) {
             l.s("SKIP 2M fails");
         } else if (try_reserve(hi) == 0) {
@@ -3517,7 +3703,8 @@ static void run_u() {
                 else
                     hi = mid;
             }
-            l.s("max=").hex(lo).s(" next fails=").c(code(try_reserve(lo + rsv)));
+            l.s("next fails=").c(code(try_reserve(lo + rsv)));
+            l.lay().s("max=").hex(lo).beh();
         }
         l.end();
     }
@@ -3534,7 +3721,7 @@ static void run_u() {
                 PS a = ps();
                 void* at = v;
                 pdelta_run(l, "rsv=", sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa, PG), a);
-                sceKernelMunmap(v, rsv);
+                HF(sceKernelMunmap(v, rsv));
             }
             uint8_t* d = map(pa, 1, &rr);
             if (d) {
@@ -3578,7 +3765,7 @@ static void run_w() {
                 pdelta_run(l, "|", sceKernelMemoryPoolDecommit(v, blk, 0), a);
                 l.c(' ');
             }
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -3593,11 +3780,11 @@ static void run_w() {
         const int32_t r3 = sceKernelMemoryPoolReserve(0, 0x400000000ull, 0, 0, &v3);
         l.s(" 16G=").c(code(r3)).end();
         if (r1 == 0)
-            sceKernelMunmap(v1, 0x3FFE00000ull);
+            HF(sceKernelMunmap(v1, 0x3FFE00000ull));
         if (r2 == 0)
-            sceKernelMunmap(v2, 0x3FFE00000ull);
+            HF(sceKernelMunmap(v2, 0x3FFE00000ull));
         if (r3 == 0)
-            sceKernelMunmap(v3, 0x400000000ull);
+            HF(sceKernelMunmap(v3, 0x400000000ull));
     }
     {
         int32_t rr = 0;
@@ -3608,7 +3795,7 @@ static void run_w() {
             Line l = head("W3", "query info = read-only page");
             l.ret("ret", sceKernelDirectMemoryQuery(pa, 0, ro, 0x18));
             l.s("written=").c(*(volatile uint32_t*)ro != before ? '1' : '0').end();
-            sceKernelMunmap(ro, PG);
+            HF(sceKernelMunmap(ro, PG));
         } else {
             say("W3   SKIP");
         }
@@ -3626,7 +3813,7 @@ static void run_w() {
             a = ps();
             at = (uint8_t*)v + rsv - PG;
             pdelta_run(l, " tail=", sceKernelMapDirectMemory(&at, PG, 0x3, 0x10, pa, PG), a);
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         } else {
             l.s("SKIP");
         }
@@ -3640,12 +3827,12 @@ static void run_w() {
             const PS a = ps();
             void* at = v;
             pdelta_run(l, "rsv=", sceKernelMapFlexibleMemory(&at, PG, 0x3, 0x10), a);
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
             void* f = v;
             const int32_t r = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0x10);
             l.s(" free=").c(code(r)).s(" same=").c(f == v ? '1' : '0');
             if (r == 0)
-                sceKernelMunmap(f, PG);
+                HF(sceKernelMunmap(f, PG));
         } else {
             l.s("SKIP");
         }
@@ -3664,7 +3851,7 @@ static void run_w() {
             l.c(mapped(va, &pr) ? (char)('0' + (pr & 7)) : '.');
             DmemInfo q;
             my_memset(&q, 0, sizeof(q));
-            sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+            HF(sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q)));
             l.s(" mtype=").dec(q.mtype).end();
             unmap_all(va, 1);
         }
@@ -3695,7 +3882,7 @@ static void fixed_over(const char* id, const char* name, uint64_t at_off, uint64
     pdelta_run(l, "", r, a);
     if (r == 0) {
         l.s(" same=").c(at == (uint8_t*)v + at_off ? '1' : '0');
-        sceKernelMunmap(at, len);
+        HF(sceKernelMunmap(at, len));
     }
     a = ps();
     pdelta_run(l, " munmap rsv=", sceKernelMunmap(v, rsv), a);
@@ -3721,7 +3908,7 @@ static void run_x() {
             const int32_t r = sceKernelMtypeprotect(va, PG, 10, pr);
             DmemInfo q;
             my_memset(&q, 0, sizeof(q));
-            sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+            HF(sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q)));
             l.c(code(r)).dec(q.mtype).c(' ');
             unmap_all(va, 1);
             release_all(pa, 1);
@@ -3738,8 +3925,8 @@ static void run_x() {
             const int32_t r = sceKernelMemoryPoolCommit(v, blk, 10, pr, 0);
             l.c(r == 0 ? moved(a, ps()) : code(r));
             if (r == 0)
-                sceKernelMemoryPoolDecommit(v, blk, 0);
-            sceKernelMunmap(v, rsv);
+                HF(sceKernelMemoryPoolDecommit(v, blk, 0));
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -3756,7 +3943,7 @@ static void run_x() {
             l.s("SKIP");
         }
         if (v)
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         l.end();
     }
     fixed_over("X4", "fixed over rsv tail (last page)", rsv - PG, PG, false);
@@ -3773,7 +3960,7 @@ static uint64_t max_reserve(uint64_t hi) {
         void* v = 0;
         const int32_t r = sceKernelMemoryPoolReserve(0, size, 0, 0, &v);
         if (r == 0)
-            sceKernelMunmap(v, size);
+            HF(sceKernelMunmap(v, size));
         return r == 0;
     };
     if (!ok(rsv))
@@ -3802,31 +3989,48 @@ static void run_y() {
         uint8_t* d = pa >= 0 ? map(pa, 1, &rr) : nullptr;
         const int32_t a = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r);
         const int32_t b = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
-        Line l = head("Y1", "VA of pool rsv / dmem map / flex");
-        l.s("rsv=").hex(a == 0 ? (uint64_t)r : 0).s(" dmem=").hex((uint64_t)d);
-        l.s(" flex=").hex(b == 0 ? (uint64_t)f : 0).end();
+        // region of each (the addresses are layout), the reservation 2 MiB aligned (=), and whether
+        // the flexible page follows the direct page directly (flex-dmem)
+        Line l = head("Y1", "pool rsv / dmem map / flex: region, rsv aligned, flex-dmem");
+        l.s("rsv=").c(a == 0 ? region((uint64_t)r) : '-');
+        l.c(a == 0 && (uint64_t)r % rsv == 0 ? '=' : '!');
+        l.s(" dmem=").c(d ? region((uint64_t)d) : '-');
+        l.s(" flex=").c(b == 0 ? region((uint64_t)f) : '-');
+        if (d && b == 0)
+            l.s(" flex-dmem=").shex((long long)((uint64_t)f - (uint64_t)d));
+        l.lay().s("rsv=").hex(a == 0 ? (uint64_t)r : 0).s(" dmem=").hex((uint64_t)d);
+        l.s(" flex=").hex(b == 0 ? (uint64_t)f : 0).beh();
+        l.end();
         if (a == 0)
-            sceKernelMunmap(r, rsv);
+            HF(sceKernelMunmap(r, rsv));
         if (b == 0)
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         unmap_all(d, 1);
         release_all(pa, 1);
     }
     {
-        Line l = head("Y2", "max rsv / again holding it / w 8G");
+        // m1 the largest reservation; m2 the largest while m1 is held; m3 the largest while an
+        // 8 GiB one is held. The sizes and addresses are layout; behaviour is m2, m1-m3 (8 GiB
+        // when the 8 GiB reservation is taken out of the same space) and both at one address (=).
+        Line l = head("Y2", "max rsv: m2 holding it | m1-m3 holding 8G | same address");
         const uint64_t m1 = max_reserve(top);
-        l.s("m1=").hex(m1);
+        l.lay().s("m1=").hex(m1).beh();
         void* h = 0;
         if (m1 && sceKernelMemoryPoolReserve(0, m1, 0, 0, &h) == 0) {
-            l.s(" m2=").hex(max_reserve(top)).s(" at=").hex((uint64_t)h);
-            sceKernelMunmap(h, m1);
+            l.s("m2=").hex(max_reserve(top));
+            l.lay().s(" at=").hex((uint64_t)h).beh();
+            HF(sceKernelMunmap(h, m1));
+        } else {
+            l.s("SKIP m1");
         }
         void* e = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000000ull, 0, 0, &e) == 0) {
-            l.s(" m3=").hex(max_reserve(top)).s(" at8G=").hex((uint64_t)e);
-            sceKernelMunmap(e, 0x200000000ull);
+            const uint64_t m3 = max_reserve(top);
+            l.s(" | m1-m3=").shex((long long)(m1 - m3)).s(" | ").c(e == h ? '=' : '!');
+            l.lay().s(" m3=").hex(m3).s(" at8G=").hex((uint64_t)e).beh();
+            HF(sceKernelMunmap(e, 0x200000000ull));
         } else {
-            l.s(" 8G fails");
+            l.s(" | 8G fails");
         }
         l.end();
     }
@@ -3840,8 +4044,8 @@ static void run_y() {
             const int32_t r = sceKernelMemoryPoolCommit(v, blk, 10, pr, 0);
             l.c(code(r));
             if (r == 0)
-                sceKernelMemoryPoolDecommit(v, blk, 0);
-            sceKernelMunmap(v, rsv);
+                HF(sceKernelMemoryPoolDecommit(v, blk, 0));
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -3851,19 +4055,19 @@ static void run_y() {
         Line l = head("Y4", "t10 prot 1 commit with ac>0: move");
         if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
             uint8_t* b = (uint8_t*)v;
-            sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0);
-            sceKernelMemoryPoolDecommit(b, blk, 0);
+            HF(sceKernelMemoryPoolCommit(b, blk, 0, 0x3, 0));
+            HF(sceKernelMemoryPoolDecommit(b, blk, 0));
             const PS a = ps();
             l.s("ac=").dec(a.ac).s(" af=").dec(a.af).c(' ');
             if (a.ac > 0 && a.af > 0) {
                 const int32_t r = sceKernelMemoryPoolCommit(b + blk, blk, 10, 0x1, 0);
                 l.s("move=").c(r == 0 ? moved(a, ps()) : code(r));
                 if (r == 0)
-                    sceKernelMemoryPoolDecommit(b + blk, blk, 0);
+                    HF(sceKernelMemoryPoolDecommit(b + blk, blk, 0));
             } else {
                 l.s("SKIP state");
             }
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         } else {
             l.s("SKIP");
         }
@@ -3886,8 +4090,8 @@ static void run_z() {
     uint8_t* x = (uint8_t*)rx;
     // a cached block: commit type 0 then decommit it
     if (ps().ac == 0) {
-        sceKernelMemoryPoolCommit(x, blk, 0, 0x3, 0);
-        sceKernelMemoryPoolDecommit(x, blk, 0);
+        HF(sceKernelMemoryPoolCommit(x, blk, 0, 0x3, 0));
+        HF(sceKernelMemoryPoolDecommit(x, blk, 0));
     }
     // type 3 commits draw flushed blocks first: use them up
     for (int it = 0; it < 1024 && ps().af > 0; it++) {
@@ -3911,9 +4115,9 @@ static void run_z() {
         l.s("SKIP state");
     }
     l.end();
-    sceKernelMunmap(rx, rsv);
+    HF(sceKernelMunmap(rx, rsv));
     for (int i = 0; i < nr; i++)
-        sceKernelMunmap(rs[i], rsv);
+        HF(sceKernelMunmap(rs[i], rsv));
 }
 
 // ---- J: paths in the shadPS4 changes that no other line exercises ----------------------------
@@ -3929,7 +4133,7 @@ static void run_j() {
         Line l = head("J1", "query info inside a pool reservation");
         if (pa >= 0 && sceKernelMemoryPoolReserve(0, rsv, 0, 0, &v) == 0) {
             l.ret("ret", sceKernelDirectMemoryQuery(pa, 0, v, 0x18));
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         } else {
             l.s("SKIP");
         }
@@ -3942,7 +4146,7 @@ static void run_j() {
         uint8_t* va = pa >= 0 ? map(pa + (long)PG, 2, &rr) : nullptr;
         Line l = head("J2", "info straddles writable->unmapped");
         if (va) {
-            sceKernelMunmap(va + PG, PG);
+            HF(sceKernelMunmap(va + PG, PG));
             unsigned char* tail = va + PG - 8;
             my_memset(tail, 0xCC, 8);
             const int32_t r = sceKernelDirectMemoryQuery(pa, 0, tail, 0x18);
@@ -3950,7 +4154,7 @@ static void run_j() {
             for (int k = 0; k < 8; k++)
                 written += tail[k] != 0xCC;
             l.ret("ret", r).s("bytes changed in first page=").dec(written);
-            sceKernelMunmap(va, PG);
+            HF(sceKernelMunmap(va, PG));
         } else {
             l.s("SKIP");
         }
@@ -3967,8 +4171,8 @@ static void run_j() {
             const int32_t r = sceKernelMemoryPoolCommit(v, blk, t, 0x3, 0);
             l.c(code(r));
             if (r == 0)
-                sceKernelMemoryPoolDecommit(v, blk, 0);
-            sceKernelMunmap(v, rsv);
+                HF(sceKernelMemoryPoolDecommit(v, blk, 0));
+            HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -4014,18 +4218,18 @@ static void run_j() {
         if (m1 && sceKernelMemoryPoolReserve(0, m1, 0, 0, &h) == 0) {
             const uint64_t left = max_reserve(1ull << 40);
             const uint64_t ask = (left + 2 * rsv) < 0x400000000ull ? left + 2 * rsv : 0;
-            l.s("left=").hex(left).c(' ');
+            l.lay().s("left=").hex(left).beh();
             if (ask) {
                 void* v = 0;
                 const PS a = ps();
                 const int32_t r = sceKernelMemoryPoolReserve(0, ask, 0, 0, &v);
                 pdelta_run(l, "ask left+4M=", r, a);
                 if (r == 0)
-                    sceKernelMunmap(v, ask);
+                    HF(sceKernelMunmap(v, ask));
             } else {
                 l.s("SKIP left too large");
             }
-            sceKernelMunmap(h, m1);
+            HF(sceKernelMunmap(h, m1));
         } else {
             l.s("SKIP");
         }
@@ -4048,8 +4252,8 @@ static void run_m() {
         if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rx) == 0) {
             uint8_t* x = (uint8_t*)rx;
             if (ps().ac == 0) {
-                sceKernelMemoryPoolCommit(x, blk, 0, 0x3, 0);
-                sceKernelMemoryPoolDecommit(x, blk, 0);
+                HF(sceKernelMemoryPoolCommit(x, blk, 0, 0x3, 0));
+                HF(sceKernelMemoryPoolDecommit(x, blk, 0));
             }
             for (int it = 0; it < 1024 && ps().af > 0; it++) {
                 if (used == 32) {
@@ -4070,9 +4274,9 @@ static void run_m() {
                 pdelta_run(l, "d=", sceKernelMemoryPoolCommit(x + blk, blk, 10, 0x1, 0), a);
             else
                 l.s("SKIP state");
-            sceKernelMunmap(rx, rsv);
+            HF(sceKernelMunmap(rx, rsv));
             for (int i = 0; i < nr; i++)
-                sceKernelMunmap(rs[i], rsv);
+                HF(sceKernelMunmap(rs[i], rsv));
         } else {
             l.s("SKIP");
         }
@@ -4086,7 +4290,7 @@ static void run_m() {
             const int32_t r = sceKernelMemoryPoolReserve(0, rsv, 0, f, &v);
             l.c(code(r));
             if (r == 0)
-                sceKernelMunmap(v, rsv);
+                HF(sceKernelMunmap(v, rsv));
         }
         l.end();
     }
@@ -4100,7 +4304,7 @@ static void run_m() {
             l.c(code(r));
             if (r == 0) {
                 l.c((uint64_t)v % a == 0 ? '=' : '!');
-                sceKernelMunmap(v, rsv);
+                HF(sceKernelMunmap(v, rsv));
             }
             l.c(' ');
         }
@@ -4109,7 +4313,7 @@ static void run_m() {
     {
         // M4: reserve with MAP_FIXED over free VA, part of a reservation, a whole reservation, a
         // direct mapping; each plain (10) and with no-overwrite (90)
-        Line l = head("M4", "fixed rsv 10|90: free/part/whole/dmem");
+        Line l = head("M4", "fixed rsv 10|90: free/part/whole/dmem at an unaligned address");
         static const int32_t fixed_flags[] = {0x10, 0x90};
         for (int32_t f : fixed_flags) {
             l.hex((uint64_t)f).c(':');
@@ -4118,7 +4322,7 @@ static void run_m() {
                 l.s("SKIP ");
                 continue;
             }
-            sceKernelMunmap(base, 2 * rsv);
+            HF(sceKernelMunmap(base, 2 * rsv));
             PS a = ps();
             void* v = base;
             int32_t r = sceKernelMemoryPoolReserve(base, rsv, 0, f, &v);
@@ -4130,27 +4334,32 @@ static void run_m() {
                 const int32_t r2 = sceKernelMemoryPoolReserve(w, rsv, 0, f, &w);
                 pdelta_run(l, " part=", r2, a);
                 if (r2 == 0)
-                    sceKernelMunmap(w, rsv);
+                    HF(sceKernelMunmap(w, rsv));
                 a = ps();
                 void* x = base;
                 const int32_t r3 = sceKernelMemoryPoolReserve(base, rsv, 0, f, &x);
                 pdelta_run(l, " whole=", r3, a);
-                sceKernelMunmap(base, rsv);
+                HF(sceKernelMunmap(base, rsv));
             }
+            // dmem: a direct mapping at an address that is not 2 MiB aligned, chosen by the test
+            // (round 128; until round 127 it was left to the search: unaligned on the PS4, aligned
+            // on shadPS4, so the two ran different cases). One page into a 2 MiB aligned reserved
+            // range, then the fixed pool reservation at that page. '!' not aligned, as intended.
+            // M5 is the aligned case.
             const long pa = alloc(1, 3, &rr);
-            uint8_t* d = pa >= 0 ? map(pa, 1, &rr) : nullptr;
-            if (d) {
+            void* b2 = 0;
+            if (pa >= 0 && sceKernelReserveVirtualRange(&b2, 2 * rsv, 0, rsv) == 0) {
+                void* d = (uint8_t*)b2 + PG;
+                const int32_t rm = sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
                 a = ps();
                 void* y = d;
                 const int32_t r4 = sceKernelMemoryPoolReserve(d, rsv, 0, f, &y);
+                l.s(" map=").c(code(rm));
                 pdelta_run(l, " dmem=", r4, a);
-                // '=' when the direct mapping is 2 MiB aligned, '!' when not (round 127: the PS4
-                // places it unaligned, so EINVAL is the address check, as in "part"; M5 aligned)
                 l.c((uint64_t)d % rsv == 0 ? '=' : '!');
-                if (r4 == 0)
-                    sceKernelMunmap(y, rsv);
-                else
-                    unmap_all(d, 1);
+                HF(sceKernelMunmap(b2, 2 * rsv));
+            } else {
+                l.s(" dmem=SKIP");
             }
             release_all(pa, 1);
             l.c(' ');
@@ -4181,7 +4390,7 @@ static void run_m() {
             void* y = base;
             const int32_t r = sceKernelMemoryPoolReserve(base, rsv, 0, f, &y);
             pdelta_run(l, " rsv=", r, a);
-            sceKernelMunmap(base, rsv);
+            HF(sceKernelMunmap(base, rsv));
             release_all(pa, 1);
             l.c(' ');
         }
@@ -4197,7 +4406,7 @@ static void run_m() {
             l.c(code(r));
             if (r == 0) {
                 l.c((uint64_t)d % a == 0 ? '=' : '!');
-                sceKernelMunmap(d, PG);
+                HF(sceKernelMunmap(d, PG));
             }
             l.c(' ');
         }
@@ -4220,7 +4429,7 @@ static void run_n() {
             l.c(code(r));
             if (r == 0) {
                 l.c((uint64_t)v % (1ull << b) == 0 ? '=' : '!');
-                sceKernelMunmap(v, rsv);
+                HF(sceKernelMunmap(v, rsv));
             }
         }
         l.end();
@@ -4235,7 +4444,7 @@ static void run_n() {
             l.c(code(r));
             if (r == 0) {
                 l.c((uint64_t)d % (1ull << b) == 0 ? '=' : '!');
-                sceKernelMunmap(d, PG);
+                HF(sceKernelMunmap(d, PG));
             }
         }
         l.end();
@@ -4243,14 +4452,16 @@ static void run_n() {
     }
     {
         static const uint64_t lows[] = {0x200000ull, 0x40000000ull};
-        Line l = head("N3", "fixed rsv at 200000, 40000000");
+        // per address: what is visible there before (occ), code, = at the address
+        Line l = head("N3", "fixed rsv at 200000, 40000000: occ code");
         for (uint64_t at : lows) {
             void* v = (void*)at;
+            l.c('@').c(occ(at, rsv));
             const int32_t r = sceKernelMemoryPoolReserve((void*)at, rsv, 0, 0x90, &v);
             l.c(code(r));
             if (r == 0) {
                 l.c(v == (void*)at ? '=' : '!');
-                sceKernelMunmap(v, rsv);
+                HF(sceKernelMunmap(v, rsv));
             }
             l.c(' ');
         }
@@ -4262,14 +4473,16 @@ static void run_n() {
         // each address below 400000, then at 400000. '=' when it lands at the address.
         static const uint64_t lows[] = {0x4000ull,   0x10000ull,  0x100000ull,
                                         0x1FC000ull, 0x200000ull, 0x3FC000ull, 0x400000ull};
-        Line l = head("N6", "fixed 16K rsv at 4000 10000 100000 1FC000 200000 3FC000 400000");
+        Line l = head("N6", "fixed 16K rsv at 4000 10000 100000 1FC000 200000 3FC000 400000: "
+                            "occ code");
         for (uint64_t at : lows) {
             void* v = (void*)at;
+            l.c('@').c(occ(at, PG));
             const int32_t r = sceKernelReserveVirtualRange(&v, PG, 0x90, 0);
             l.c(code(r));
             if (r == 0) {
                 l.c(v == (void*)at ? '=' : '!');
-                sceKernelMunmap(v, PG);
+                HF(sceKernelMunmap(v, PG));
             }
             l.c(' ');
         }
@@ -4280,7 +4493,7 @@ static void run_n() {
         Line l = head("N4", "fixed rsv over 2nd half of a 4M rsv");
         void* base = 0;
         if (sceKernelMemoryPoolReserve(0, 4 * rsv, 0, 0, &base) == 0) {
-            sceKernelMunmap(base, 4 * rsv);
+            HF(sceKernelMunmap(base, 4 * rsv));
             void* r1 = base;
             if (sceKernelMemoryPoolReserve(base, 2 * rsv, 0, 0x10, &r1) == 0) {
                 static const int32_t ff[] = {0x10, 0x90};
@@ -4292,9 +4505,9 @@ static void run_n() {
                     pdelta_run(l, "", r, a);
                     l.c(' ');
                     if (r == 0)
-                        sceKernelMunmap(w, 2 * rsv);
+                        HF(sceKernelMunmap(w, 2 * rsv));
                 }
-                sceKernelMunmap(base, 2 * rsv);
+                HF(sceKernelMunmap(base, 2 * rsv));
             } else {
                 l.s("SKIP fixed");
             }
@@ -4318,13 +4531,13 @@ static void run_n() {
                 pdelta_run(l, "", r, a);
                 l.c(' ');
                 if (r == 0) {
-                    sceKernelMunmap(w, rsv);
+                    HF(sceKernelMunmap(w, rsv));
                     d = 0;
                     break;
                 }
             }
             if (d)
-                sceKernelMunmap(d, rsv);
+                HF(sceKernelMunmap(d, rsv));
         } else {
             l.s("SKIP");
         }
@@ -4335,13 +4548,18 @@ static void run_n() {
 
 // ---- L: the occupied band above the stacks, and where the default search ends -----------------
 
-static bool fixed_probe(long pa, uint64_t at) {
-    // true when a 16 KiB fixed, no-overwrite direct mapping fits at `at`
+// The code of a 16 KiB fixed, no-overwrite direct mapping at `at` (unmapped again when it fits).
+// Round 128: LA1 and LA2 print the code; until round 127 they printed o or x, and x did not say
+// whether the address was refused (EINVAL) or taken (ENOMEM).
+static int32_t fixed_code(long pa, uint64_t at) {
     void* d = (void*)at;
-    if (sceKernelMapDirectMemory(&d, PG, 0x3, 0x90, pa, PG) != 0)
-        return false;
-    sceKernelMunmap(d, PG);
-    return true;
+    const int32_t r = sceKernelMapDirectMemory(&d, PG, 0x3, 0x90, pa, PG);
+    if (r == 0)
+        HF(sceKernelMunmap(d, PG));
+    return r;
+}
+static bool fixed_probe(long pa, uint64_t at) {
+    return fixed_code(pa, at) == 0;
 }
 
 static void run_l() {
@@ -4357,7 +4575,7 @@ static void run_l() {
                                       0xFC0000000ull, 0xFC4000000ull, 0x1000000000ull};
         Line l = head("LA1", "free at 7EEC0,7EF0,7F00,7F80,7FC0,..,10000");
         for (uint64_t a : at)
-            l.c(fixed_probe(pa, a) ? 'o' : 'x');
+            l.c(code(fixed_code(pa, a)));
         l.end();
     }
     {
@@ -4374,8 +4592,11 @@ static void run_l() {
             return hi;
         };
         Line l = head("LA2", "band edges (16K)");
-        const bool f1 = fixed_probe(pa, 0x7EF000000ull), f2 = fixed_probe(pa, 0x7F0000000ull);
-        const bool f3 = fixed_probe(pa, 0x800000000ull);
+        const int32_t c1 = fixed_code(pa, 0x7EF000000ull), c2 = fixed_code(pa, 0x7F0000000ull);
+        const int32_t c3 = fixed_code(pa, 0x800000000ull);
+        const bool f1 = c1 == 0, f2 = c2 == 0, f3 = c3 == 0;
+        // the codes at 7EF000000, 7F0000000, 800000000, then the edges
+        l.c(code(c1)).c(code(c2)).c(code(c3)).c(' ');
         if (f1 && !f2)
             l.s("first occupied=").hex(edge(0x7EF000000ull, 0x7F0000000ull, true));
         else
@@ -4418,31 +4639,45 @@ static void run_l() {
             }
         }
         Line l = head("LA3", "default search after filling");
-        l.s("rsv=").dec(nh);
+        // how many reservations and small mappings it took is layout; behaviour is the code of the
+        // mapping that no longer fits and whether one was placed at or above 7EF000000
+        l.s("last=").c(code(last)).s(" above 7EF000000=").c(outside ? '1' : '0');
+        l.lay().s("rsv=").dec(nh);
         if (nh)
             l.s(" last rsv at=").hex((uint64_t)held[nh - 1]);
-        l.s(" small maps=").dec(ns).s(" last=").c(code(last));
+        l.s(" small maps=").dec(ns);
         if (outside)
-            l.s(" first above 7EF000000 at=").hex(outside);
+            l.s(" first above at=").hex(outside);
+        l.beh();
         l.end();
         for (int i = 0; i < ns; i++)
-            sceKernelMunmap(small[i], PG);
+            HF(sceKernelMunmap(small[i], PG));
         for (int i = 0; i < nh; i++)
-            sceKernelMunmap(held[i], held_size[i]);
+            HF(sceKernelMunmap(held[i], held_size[i]));
     }
     release_all(pa, 1);
 }
 
 // ---- HB: a non-fixed mapping whose address hint is occupied or runs past the search end ------
 
-static void hint_line(const char* id, const char* name, void* hint, uint64_t len) {
+// own: the hint range is one this test made itself (the distance from the hint is behaviour).
+// Otherwise the hint is a fixed address, and what is there depends on the layout: the line shows
+// what is visible in the hint range before (occ) and whether the mapping is at the hint (=) or
+// not (!); the address and the distance are in the notes.
+static void hint_line(const char* id, const char* name, void* hint, uint64_t len, bool own) {
+    const char pre = occ((uint64_t)hint, len);
     void* v = hint;
     const int32_t r = sceKernelMemoryPoolReserve(hint, len, 0, 0, &v);
     Line l = head(id, name);
-    l.c(code(r));
+    l.c('@').c(pre).c(' ').c(code(r));
     if (r == 0) {
-        l.s(" at=").hex((uint64_t)v).s(" rel hint=").shex((long long)((uint64_t)v - (uint64_t)hint));
-        sceKernelMunmap(v, len);
+        const long long rel = (long long)((uint64_t)v - (uint64_t)hint);
+        if (own)
+            l.s(" rel hint=").shex(rel);
+        else
+            l.c(rel == 0 ? '=' : '!').lay().s("rel hint=").shex(rel).beh();
+        l.lay().s(" at=").hex((uint64_t)v).beh();
+        HF(sceKernelMunmap(v, len));
     }
     l.end();
 }
@@ -4452,18 +4687,20 @@ static void run_hb() {
     const uint64_t rsv = 0x200000;
     void* held = 0;
     if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &held) == 0) {
-        hint_line("HB1", "hint = an existing reservation", held, rsv);
-        sceKernelMunmap(held, rsv);
+        hint_line("HB1", "hint = an existing reservation", held, rsv, true);
+        HF(sceKernelMunmap(held, rsv));
     } else {
         say("HB1  SKIP");
     }
-    hint_line("HB2", "hint 7EEA00000, 4M (crosses 7EEC00000)", (void*)0x7EEA00000ull, 2 * rsv);
-    hint_line("HB3", "hint 800000000 (system region)", (void*)0x800000000ull, rsv);
-    hint_line("HB4", "hint 7EEC00000 exactly, 2M", (void*)0x7EEC00000ull, rsv);
+    hint_line("HB2", "hint 7EEA00000, 4M (crosses 7EEC00000)", (void*)0x7EEA00000ull, 2 * rsv,
+              false);
+    hint_line("HB3", "hint 800000000 (system region)", (void*)0x800000000ull, rsv, false);
+    hint_line("HB4", "hint 7EEC00000 exactly, 2M", (void*)0x7EEC00000ull, rsv, false);
     {
         // HB5: what VirtualQuery (next area) reports from 7EEA00000 and from 800000000: are the
         // ranges HB2-HB4 skipped mapped (layout) or empty (a rule)? first 4 areas from each
-        Line l = head("HB5", "areas from 7EEA00000 | from 800000000 (start-end, up to 4)");
+        // (layout: the areas are in the notes; the line has how many were found)
+        Line l = head("HB5", "areas from 7EEA00000 | from 800000000: count (up to 4)");
         static const uint64_t from[] = {0x7EEA00000ull, 0x800000000ull};
         for (int k = 0; k < 2; k++) {
             uint64_t a = from[k];
@@ -4473,18 +4710,18 @@ static void run_hb() {
                     uint64_t start, end;
                     unsigned char rest[0x38];
                 } qi;
-                my_memset(&qi, 0, sizeof(qi));
+                out_prefill(&qi, sizeof(qi));
                 if (sceKernelVirtualQuery((void*)a, 1, &qi, 0x48) != 0)
                     break;
-                l.hex(qi.start >> 12).c('-').hex(qi.end >> 12).c(' ');
+                l.lay().hex(qi.start >> 12).c('-').hex(qi.end >> 12).c(' ').beh();
                 if (qi.end <= a)
                     break;
                 a = qi.end;
             }
             if (k == 0)
-                l.s("| ");
+                l.lay().s("| ").beh();
         }
-        l.end();
+        l.s("see LY").end();
     }
 }
 
@@ -4529,9 +4766,9 @@ static void fill_default(DefaultFill& f, long pa, uint64_t stop) {
 
 static void unfill_default(DefaultFill& f) {
     for (int i = 0; i < f.ns; i++)
-        sceKernelMunmap(f.small[i], PG);
+        HF(sceKernelMunmap(f.small[i], PG));
     for (int i = 0; i < f.nh; i++)
-        sceKernelMunmap(f.held[i], f.held_size[i]);
+        HF(sceKernelMunmap(f.held[i], f.held_size[i]));
 }
 
 static int mf_open() {
@@ -4559,10 +4796,13 @@ static void mf_line(const char* id, const char* name, int fd, void* hint) {
     Line l = head(id, name);
     l.c(code(r));
     if (r == 0) {
-        l.s(" at=").hex((uint64_t)v);
+        // the region; with a hint the distance from it (MF3's hint is a reservation made by the
+        // test, MF4's a fixed address: free on the PS4 and shadPS4, round 127)
+        l.c(' ');
+        where(l, "at", (uint64_t)v, (uint64_t)hint);
         if (hint)
             l.s(" rel hint=").shex((long long)((uint64_t)v - (uint64_t)hint));
-        sceKernelMunmap(v, 0x10000);
+        HF(sceKernelMunmap(v, 0x10000));
     }
     l.end();
 }
@@ -4580,7 +4820,7 @@ static void run_xc() {
         if (c < 0) {
             l.s("SKIP").end();
         } else {
-            sceKernelReleaseDirectMemory(c, 16 * PG);
+            HF(sceKernelReleaseDirectMemory(c, 16 * PG));
             uint64_t px = 0;
             // fits exactly at the start of the window
             int32_t r = sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + blk, blk, blk, &px);
@@ -4599,7 +4839,7 @@ static void run_xc() {
         Line l = head("XC2", "fixed rsv at +4000, +100000, +200000");
         void* base = 0;
         if (sceKernelMemoryPoolReserve(0, 2 * rsv, 0, 0, &base) == 0) {
-            sceKernelMunmap(base, 2 * rsv);
+            HF(sceKernelMunmap(base, 2 * rsv));
             static const uint64_t offs[] = {0x4000, 0x100000, 0x200000};
             for (uint64_t o : offs) {
                 void* at = (uint8_t*)base + o;
@@ -4608,7 +4848,7 @@ static void run_xc() {
                 l.c(code(r));
                 if (r == 0) {
                     l.c(v == at ? '=' : '!');
-                    sceKernelMunmap(v, rsv);
+                    HF(sceKernelMunmap(v, rsv));
                 }
                 l.c(' ');
             }
@@ -4635,7 +4875,7 @@ static void run_xc() {
         uint8_t* va = pa >= 0 ? map(pa, 2, &rr) : nullptr;
         Line l = head("XC4", "straddle into RO (8) / unmapped (4)");
         if (va) {
-            sceKernelMprotect(va + PG, PG, 0x1);
+            HF(sceKernelMprotect(va + PG, PG, 0x1));
             unsigned char* t = va + PG - 8;
             my_memset(t, 0xCC, 8);
             int32_t r = sceKernelDirectMemoryQuery(pa, 0, t, 0x18);
@@ -4643,7 +4883,7 @@ static void run_xc() {
             for (int k = 0; k < 8; k++)
                 w += t[k] != 0xCC;
             l.s("ro: ").c(code(r)).c(':').dec(w).c(' ');
-            sceKernelMunmap(va + PG, PG);
+            HF(sceKernelMunmap(va + PG, PG));
             t = va + PG - 4;
             my_memset(t, 0xCC, 4);
             r = sceKernelDirectMemoryQuery(pa, 0, t, 0x18);
@@ -4651,7 +4891,7 @@ static void run_xc() {
             for (int k = 0; k < 4; k++)
                 w += t[k] != 0xCC;
             l.s("unmapped: ").c(code(r)).c(':').dec(w);
-            sceKernelMunmap(va, PG);
+            HF(sceKernelMunmap(va, PG));
         } else {
             l.s("SKIP");
         }
@@ -4669,16 +4909,17 @@ static void run_xc() {
         void* rv = 0;
         const int32_t rp = sceKernelMemoryPoolReserve(0, rsv, 0, 0, &rv);
         Line l = head("XC5", "default space full: flex / pool rsv");
-        l.s("filled small=").dec(f.ns).s(" escaped=").c(f.escaped ? '1' : '0');
+        l.lay().s("filled small=").dec(f.ns).beh();
+        l.s("escaped=").c(f.escaped ? '1' : '0');
         l.s(" flex=").c(code(rf));
         if (rf == 0) {
-            l.c(':').hex((uint64_t)fx);
-            sceKernelMunmap(fx, PG);
+            where(l, "flex", (uint64_t)fx, 0);
+            HF(sceKernelMunmap(fx, PG));
         }
         l.s(" rsv=").c(code(rp));
         if (rp == 0) {
-            l.c(':').hex((uint64_t)rv);
-            sceKernelMunmap(rv, rsv);
+            where(l, "rsv", (uint64_t)rv, 0);
+            HF(sceKernelMunmap(rv, rsv));
         }
         l.end();
         const int fd = mf_open();
@@ -4701,7 +4942,7 @@ static void run_xc() {
             void* held = 0;
             if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &held) == 0) {
                 mf_line("MF3", "file mmap, hint = a reservation", fd, held);
-                sceKernelMunmap(held, rsv);
+                HF(sceKernelMunmap(held, rsv));
             }
             mf_line("MF4", "file mmap, hint 900000000", fd, (void*)0x900000000ull);
             sceKernelClose(fd);
@@ -4722,9 +4963,9 @@ static void cg_case(const char* id, const char* name, uint64_t writable, uint64_
         return;
     }
     if (ro)
-        sceKernelMprotect(va + PG, PG, 0x1);
+        HF(sceKernelMprotect(va + PG, PG, 0x1));
     else
-        sceKernelMunmap(va + PG, PG);
+        HF(sceKernelMunmap(va + PG, PG));
     unsigned char* t = va + PG - writable;
     my_memset(t, 0xCC, writable);
     const int32_t r = sceKernelDirectMemoryQuery(pa, 0, t, size);
@@ -4733,9 +4974,9 @@ static void cg_case(const char* id, const char* name, uint64_t writable, uint64_
         w += t[k] != 0xCC;
     l.c(code(r)).s(" written=").hex((uint64_t)w).end();
     if (ro)
-        sceKernelMunmap(va, 2 * PG);
+        HF(sceKernelMunmap(va, 2 * PG));
     else
-        sceKernelMunmap(va, PG);
+        HF(sceKernelMunmap(va, PG));
     release_all(pa, 3);
 }
 
@@ -4754,7 +4995,7 @@ static void run_cg() {
 
 static void vq_field(Line& l, uint64_t at, uint64_t rel_to) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     const int32_t r = sceKernelVirtualQuery((void*)at, 0, vi, 0x48);
     if (r != 0) {
         l.c(code(r));
@@ -4774,19 +5015,37 @@ static void vq_field(Line& l, uint64_t at, uint64_t rel_to) {
 
 static void vq_name(Line& l, uint64_t at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0) {
         l.s("?");
+        return;
+    }
+    // A name made from a code address ("anon:" and 12 lower-case hex digits) is printed as
+    // anon:<12x>: where the code is loaded is layout, so the name itself goes to the notes. Any
+    // other name, one of another form included, is printed as it is.
+    bool addr_name = vi[0x21] == 'a' && vi[0x22] == 'n' && vi[0x23] == 'o' && vi[0x24] == 'n' &&
+                     vi[0x25] == ':' && vi[0x26 + 12] == 0;
+    for (int k = 0; addr_name && k < 12; k++) {
+        const unsigned char c = vi[0x26 + k];
+        addr_name = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }
+    if (addr_name) {
+        l.s("anon:<12x>");
+        l.lay().c(' ').s((const char*)vi + 0x21).beh();
         return;
     }
     for (int k = 0; k < 32 && vi[0x21 + k]; k++)
         l.c(vi[0x21 + k] >= 0x20 && vi[0x21 + k] < 0x7F ? (char)vi[0x21 + k] : '?');
 }
 
-// " rel=" and the name's "anon:" address minus fn, or " rel=-" when the name is not of that form
-static void vq_rel(Line& l, uint64_t at, uint64_t fn) {
+// " rel=" and the name's "anon:" address minus fn, or " rel=-" when the name is not of that form;
+// then " site=" and which code address the name is (round 128, so that the number need not be
+// interpreted): C inside fn, the function that made the call (the call's own return address), P
+// the return address of fn itself (the address in fn's caller; pass it as parent_ret), ? neither.
+// rel is the same on the PS4 and an emulator, which run the same executable.
+static void vq_rel(Line& l, uint64_t at, uint64_t fn, uint64_t parent_ret = 0) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     l.s(" rel=");
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0 || vi[0x21] != 'a' || vi[0x22] != 'n' ||
         vi[0x23] != 'o' || vi[0x24] != 'n' || vi[0x25] != ':') {
@@ -4799,6 +5058,7 @@ static void vq_rel(Line& l, uint64_t at, uint64_t fn) {
         v = (v << 4) | (uint64_t)(c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0');
     }
     l.shex((long long)(v - fn));
+    l.s(" site=").c(v > fn && v - fn < 0x100 ? 'C' : parent_ret && v == parent_ret ? 'P' : '?');
 }
 
 // one creator per kind of mapping for VQ7 (they call the real functions, so the names are their own)
@@ -4844,14 +5104,14 @@ static void run_vq() {
     say("== VQ VirtualQuery of pool memory; ranges relative to the reservation");
     const uint64_t blk = 0x10000;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
         say("VQ1  SKIP reserve");
         return;
     }
     const uint64_t R = (uint64_t)rv;
-    sceKernelMemoryPoolCommit(rv, blk, 0, 0x3, 0);
+    HF(sceKernelMemoryPoolCommit(rv, blk, 0, 0x3, 0));
     {
         Line l = head("VQ1", "commit at start: committed | rest");
         vq_field(l, R, R);
@@ -4859,7 +5119,7 @@ static void run_vq() {
         vq_field(l, R + blk, R);
         l.end();
     }
-    sceKernelMemoryPoolCommit((void*)(R + 2 * blk), blk, 3, 0x1, 0);
+    HF(sceKernelMemoryPoolCommit((void*)(R + 2 * blk), blk, 3, 0x1, 0));
     {
         Line l = head("VQ2", "type-3 commit in the middle: gap | it | rest");
         vq_field(l, R + blk, R);
@@ -4869,7 +5129,7 @@ static void run_vq() {
         vq_field(l, R + 3 * blk, R);
         l.end();
     }
-    sceKernelMemoryPoolDecommit(rv, blk, 0);
+    HF(sceKernelMemoryPoolDecommit(rv, blk, 0));
     {
         Line l = head("VQ3", "first commit decommitted: start");
         vq_field(l, R, R);
@@ -4881,7 +5141,7 @@ static void run_vq() {
         vq_field(l, R + 2 * blk, R);
         l.end();
     }
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
     // VQ4: two adjacent reservations from the same call site; VQ6: names and the call site
     void* a = 0;
     void* b = 0;
@@ -4902,8 +5162,8 @@ static void run_vq() {
         l.end();
     }
     {
-        Line l = head("VQ6", "names: fn, 1st, 2nd, name-fn");
-        l.s("fn=").hex((uint64_t)&vq_reserve).s(" ");
+        Line l = head("VQ6", "names: 1st, 2nd, name-fn, site");
+        l.lay().s("fn=").hex((uint64_t)&vq_reserve).beh();
         vq_name(l, A);
         l.s(" ");
         if (rb == 0)
@@ -4912,21 +5172,21 @@ static void run_vq() {
         l.end();
     }
     if (rb == 0)
-        sceKernelMunmap(b, 0x200000);
-    sceKernelMunmap(a, 0x200000);
+        HF(sceKernelMunmap(b, 0x200000));
+    HF(sceKernelMunmap(a, 0x200000));
     // VQ8: names of a reservation's parts after a commit and a decommit
     {
         Line l8 = head("VQ8", "names rel: decommitted | reserved rest | committed");
         void* c = 0;
         if (vq_reserve(0, 0, &c) == 0) {
             uint8_t* C = (uint8_t*)c;
-            sceKernelMemoryPoolCommit(C, 0x10000, 0, 0x3, 0);
-            sceKernelMemoryPoolDecommit(C, 0x10000, 0);
-            sceKernelMemoryPoolCommit(C + 0x20000, 0x10000, 0, 0x3, 0);
+            HF(sceKernelMemoryPoolCommit(C, 0x10000, 0, 0x3, 0));
+            HF(sceKernelMemoryPoolDecommit(C, 0x10000, 0));
+            HF(sceKernelMemoryPoolCommit(C + 0x20000, 0x10000, 0, 0x3, 0));
             vq_rel(l8, (uint64_t)C, (uint64_t)&vq_reserve);
             vq_rel(l8, (uint64_t)C + 0x10000, (uint64_t)&vq_reserve);
             vq_rel(l8, (uint64_t)C + 0x20000, (uint64_t)&vq_reserve);
-            sceKernelMunmap(c, 0x200000);
+            HF(sceKernelMunmap(c, 0x200000));
         } else {
             l8.s("SKIP");
         }
@@ -4938,7 +5198,7 @@ static void run_vq() {
     if (vq_mk_flex(&m) == 0) {
         vq_name(l, (uint64_t)m);
         vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_flex);
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
     }
     int32_t rr = 0;
     const long pa = alloc(1, 3, &rr);
@@ -4946,14 +5206,14 @@ static void run_vq() {
     if (pa >= 0 && vq_mk_direct(pa, &m) == 0) {
         vq_name(l, (uint64_t)m);
         vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_direct);
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
     }
     release_all(pa, 1);
     l.s(" | ");
     if (vq_mk_anon(&m) == 0) {
         vq_name(l, (uint64_t)m);
         vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_anon);
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
     }
     l.s(" | ");
     char path[64];
@@ -4963,7 +5223,7 @@ static void run_vq() {
         if (vq_mk_file(fd, &m) == 0) {
             vq_name(l, (uint64_t)m);
             vq_rel(l, (uint64_t)m, (uint64_t)&vq_mk_file);
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         }
         sceKernelClose(fd);
     }
@@ -4976,10 +5236,10 @@ static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
     uint64_t at = from;
     for (int n = 0; n < max_rows && at < to; n++) {
         unsigned char vi[0x60];
-        my_memset(vi, 0, sizeof(vi));
+        out_prefill(vi, sizeof(vi));
         if (sceKernelVirtualQuery((void*)at, 1, vi, 0x48) != 0) {
             Line l;
-            l.s(id).s("   end of map after ").hex(at).end();
+            l.s("LY ").s(id).s(" end of map after ").hex(at).end();
             return;
         }
         uint64_t st = 0, en = 0;
@@ -4988,7 +5248,7 @@ static void vq_walk(const char* id, uint64_t from, uint64_t to, int max_rows) {
             en = (en << 8) | vi[8 + k];
         }
         Line l;
-        l.s(id).s("   ").hex(st).c('-').hex(en).s(" prot=").hex(vi[0x18]).s(" flags=");
+        l.s("LY ").s(id).c(' ').hex(st).c('-').hex(en).s(" prot=").hex(vi[0x18]).s(" flags=");
         l.hex(vi[0x20]).s(" name=");
         for (int k = 0; k < 20 && vi[0x21 + k]; k++)
             l.c(vi[0x21 + k] >= 0x20 && vi[0x21 + k] < 0x7F ? (char)vi[0x21 + k] : '?');
@@ -5006,14 +5266,17 @@ static void run_k() {
     {
         static const uint64_t hints[] = {0, 0x10000000ull, 0x300000000ull, 0x7F0000000ull,
                                          0x900000000ull, 0x10000000000ull};
-        Line l = head("K1", "rsv hint 0,1000,3000,7F00,9000,10000(M)");
+        // per hint: what is visible there before (occ), code, where it went (where)
+        Line l = head("K1", "rsv hint 0,1000,3000,7F00,9000,10000(M): occ code where");
         for (uint64_t hnt : hints) {
             void* v = 0;
+            if (hnt)
+                l.c('@').c(occ(hnt, rsv));
             const int32_t r = sceKernelMemoryPoolReserve((void*)hnt, rsv, 0, 0, &v);
             l.c(code(r));
             if (r == 0) {
-                l.c(':').hex((uint64_t)v >> 20);
-                sceKernelMunmap(v, rsv);
+                where(l, "at", (uint64_t)v, hnt);
+                HF(sceKernelMunmap(v, rsv));
             }
             l.c(' ');
         }
@@ -5021,22 +5284,24 @@ static void run_k() {
     }
     {
         const long pa = alloc(1, 3, &rr);
-        Line l = head("K1b", "dmem / flex hint 9000(M), 10000(M)");
+        // free: what is visible in the two pages at FF0000000 (where a moved mapping goes)
+        Line l = head("K1b", "dmem / flex hint 9000(M), 10000(M): code where");
+        l.s("FF0000000:@").c(occ(0xFF0000000ull, 2 * PG)).c(' ');
         static const uint64_t hints[] = {0x900000000ull, 0x10000000000ull};
         for (uint64_t hnt : hints) {
             void* d = (void*)hnt;
             const int32_t a = pa >= 0 ? sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG) : -1;
             l.s("d:").c(code(a));
             if (a == 0) {
-                l.c(':').hex((uint64_t)d >> 20);
-                sceKernelMunmap(d, PG);
+                where(l, "d", (uint64_t)d, hnt);
+                HF(sceKernelMunmap(d, PG));
             }
             void* f = (void*)hnt;
             const int32_t b = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
             l.s(" f:").c(code(b));
             if (b == 0) {
-                l.c(':').hex((uint64_t)f >> 20);
-                sceKernelMunmap(f, PG);
+                where(l, "f", (uint64_t)f, hnt);
+                HF(sceKernelMunmap(f, PG));
             }
             l.c(' ');
         }
@@ -5049,10 +5314,12 @@ static void run_k() {
         // noted, hint 7EFFF8000 | 7EFFFC000 | 7EFFFC000 two pages (reaches 7F0000000) | 7F0000000 |
         // FEFFFC000 | FF0000000; flexible at 7F0000000 | FEFFFC000; Map2 at 900000000.
         // vq: VirtualQuery (flags 0) at the hint before the map: o mapped, A free or hidden.
-        // Printed: code:address>>12 (absolute)
+        // Printed (round 128): first what is visible in the two pages at FF0000000 (occ), then per
+        // case vq, code and where it went: = at the hint, F at FF0000000, else the region letter.
         const long pa = alloc(2, 3, &rr);
         Line l = head("K1c", "dmem hint 7EFFF8 7EFFFC 7EFFFCx2 7F0000 FEFFFC FF0000 | flex 7F0000 "
-                             "FEFFFC | map2 900000: vq code:addr");
+                             "FEFFFC | map2 900000: vq code where");
+        l.s("FF0000000:@").c(occ(0xFF0000000ull, 2 * PG)).c(' ');
         struct Case {
             uint64_t hint;
             int pages;
@@ -5069,6 +5336,7 @@ static void run_k() {
                 l.s("| ");
             k++;
             unsigned char vi[0x48];
+            out_prefill(vi, sizeof(vi));
             l.c(code(sceKernelVirtualQuery((void*)c.hint, 0, vi, 0x48)));
             void* m = (void*)c.hint;
             const size_t len = (size_t)c.pages * PG;
@@ -5081,8 +5349,8 @@ static void run_k() {
                 r = sceKernelMapDirectMemory2(&m, len, 3, 0x3, 0, pa, PG);
             l.c(code(r));
             if (r == 0) {
-                l.c(':').hex((uint64_t)m >> 12);
-                sceKernelMunmap(m, len);
+                where(l, "at", (uint64_t)m, c.hint);
+                HF(sceKernelMunmap(m, len));
             }
             l.c(' ');
         }
@@ -5094,13 +5362,14 @@ static void run_k() {
         void* held[8];
         uint64_t held_size[8];
         int nh = 0;
-        Line l = head("K2", "fill with rsv: at/size ... then d/f");
+        // the reservations (address/size, in MiB) are layout: in the notes
+        Line l = head("K2", "fill with rsv, then d/f: code where");
         for (; nh < 8; nh++) {
             const uint64_t m = max_reserve(1ull << 40);
             if (!m || sceKernelMemoryPoolReserve(0, m, 0, 0, &held[nh]) != 0)
                 break;
             held_size[nh] = m;
-            l.hex((uint64_t)held[nh] >> 20).c('/').hex(m >> 20).c(' ');
+            l.lay().c(' ').hex((uint64_t)held[nh] >> 20).c('/').hex(m >> 20).beh();
             if (m < 2 * rsv) {
                 nh++;
                 break;
@@ -5111,24 +5380,24 @@ static void run_k() {
         const int32_t a = pa >= 0 ? sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG) : -1;
         l.s("d:").c(code(a));
         if (a == 0) {
-            l.c(':').hex((uint64_t)d >> 20);
-            sceKernelMunmap(d, PG);
+            where(l, "d", (uint64_t)d, 0);
+            HF(sceKernelMunmap(d, PG));
         }
         void* f = 0;
         const int32_t b = sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
         l.s(" f:").c(code(b));
         if (b == 0) {
-            l.c(':').hex((uint64_t)f >> 20);
-            sceKernelMunmap(f, PG);
+            where(l, "f", (uint64_t)f, 0);
+            HF(sceKernelMunmap(f, PG));
         }
         l.end();
         release_all(pa, 1);
         for (int i = 0; i < nh; i++)
-            sceKernelMunmap(held[i], held_size[i]);
+            HF(sceKernelMunmap(held[i], held_size[i]));
     }
-    say("K4   regions from 700000000 upward (find-next):");
+    say("K4   regions from 700000000 upward (find-next): in the LY K4 lines");
     vq_walk("K4", 0x700000000ull, 0x10000000000ull, 24);
-    say("K6   every region from 0 (find-next, up to 64):");
+    say("K6   every region from 0 (find-next, up to 64): in the LY K6 lines");
     vq_walk("K6", 0, 0x10000000000ull, 64);
     {
         static const uint64_t addrs[] = {0x7F0000000ull, 0x800000000ull, 0x1000000000ull,
@@ -5141,7 +5410,7 @@ static void run_k() {
             l.c(code(r));
             if (r == 0) {
                 l.c(d == (void*)at ? '=' : '!');
-                sceKernelMunmap(d, PG);
+                HF(sceKernelMunmap(d, PG));
             }
             l.c(' ');
         }
@@ -5150,14 +5419,15 @@ static void run_k() {
     }
     {
         static const uint64_t aligns[] = {0x4000000ull, 0x40000000ull, 0x100000000ull};
-        Line l = head("K5", "rsv align 64M, 1G, 4G: addr");
+        Line l = head("K5", "rsv align 64M, 1G, 4G: code, = aligned, region");
         for (uint64_t al : aligns) {
             void* v = 0;
             const int32_t r = sceKernelMemoryPoolReserve(0, rsv, al, 0, &v);
             l.c(code(r));
             if (r == 0) {
-                l.c(':').hex((uint64_t)v >> 20);
-                sceKernelMunmap(v, rsv);
+                l.c((uint64_t)v % al == 0 ? '=' : '!');
+                where(l, "at", (uint64_t)v, 0);
+                HF(sceKernelMunmap(v, rsv));
             }
             l.c(' ');
         }
@@ -5244,9 +5514,9 @@ static void run_mf2() {
         l.end();
     }
     if (a == 0)
-        sceKernelMunmap(m_rw, 0x10000);
+        HF(sceKernelMunmap(m_rw, 0x10000));
     if (b == 0)
-        sceKernelMunmap(m_ro, 0x10000);
+        HF(sceKernelMunmap(m_ro, 0x10000));
     if (fd_rw >= 0)
         sceKernelClose(fd_rw);
     if (fd_ro >= 0)
@@ -5262,7 +5532,7 @@ static void run_mf2() {
         l.c(code(r));
         if (r == 0) {
             l.s(" byte=").hex(((volatile unsigned char*)m)[0x8001]);
-            sceKernelMunmap(m, 0x10000);
+            HF(sceKernelMunmap(m, 0x10000));
         }
         l.end();
     }
@@ -5275,7 +5545,7 @@ static void run_mf2() {
         if (fd >= 0) {
             r1 = sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &m);
             if (r1 == 0)
-                sceKernelMunmap(m, 0x10000);
+                HF(sceKernelMunmap(m, 0x10000));
             sceKernelClose(fd);
         }
         fd = sceKernelOpen(path, 0x0002, 0777);
@@ -5284,7 +5554,7 @@ static void run_mf2() {
             if (r2 == 0) {
                 same = ((volatile unsigned char*)m)[0x8001] ==
                        (unsigned char)((0x8001 * 7) & 0xFF);
-                sceKernelMunmap(m, 0x10000);
+                HF(sceKernelMunmap(m, 0x10000));
             }
             sceKernelClose(fd);
         }
@@ -5311,7 +5581,7 @@ static void run_mf2() {
         Line l = head("MF11", "empty file, ro fd, read-only map");
         l.c(code(r)).end();
         if (r == 0)
-            sceKernelMunmap(m, 0x10000);
+            HF(sceKernelMunmap(m, 0x10000));
         if (fd >= 0)
             sceKernelClose(fd);
     }
@@ -5355,7 +5625,7 @@ static void mf_sized(const char* id, const char* name, int open_flags, uint64_t 
         // only the first page is read, which lies inside the file whenever the file is not empty
         if (file_size > (uint64_t)offset)
             l.s(" byte0=").hex(*(volatile unsigned char*)m);
-        sceKernelMunmap(m, map_len);
+        HF(sceKernelMunmap(m, map_len));
     }
     l.end();
     if (fd >= 0)
@@ -5397,7 +5667,7 @@ static void run_mf3() {
             if (r == 0) {
                 const volatile unsigned char* b = (const volatile unsigned char*)m;
                 l.c(' ').hex(b[0]).c(' ').hex(b[0x27FF]).c(' ').hex(b[0x2800]).c(' ').hex(b[0x3FFF]);
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             l.end();
             Line l2 = head("MF23", "fd position after that mmap (set 123)");
@@ -5460,7 +5730,7 @@ static void mf_grid_line(const char* id, uint64_t file_size, bool writable = fal
             if (file_size >= off && file_size < off + len && file_size < page_end)
                 ok = ok && b[file_size - off] == 0;
             l.c(ok ? 'o' : '!');
-            sceKernelMunmap(m, len);
+            HF(sceKernelMunmap(m, len));
         }
         l.c(' ');
     }
@@ -5539,7 +5809,7 @@ static void run_mf25() {
             sceKernelClose(fw);
         }
         l.c(' ').hex(*(volatile unsigned char*)m);
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
     }
     l.end();
     if (fd >= 0)
@@ -5551,7 +5821,7 @@ static void run_cov6() {
     say("== coverage batch 6: direct map past dmem, bad addresses, queries, file mmap access");
     void* hole = 0;
     if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
-        sceKernelMunmap(hole, PG);
+        HF(sceKernelMunmap(hole, PG));
     {
         // MP1: MapDirectMemory at the end of direct memory | across it
         Line l = head("MP1", "map direct: phys = dmem end | dmem end - 4000, len 8000");
@@ -5559,12 +5829,12 @@ static void run_cov6() {
         int32_t r = sceKernelMapDirectMemory(&m, PG, 0x3, 0, (long)g_dmem, PG);
         l.c(code(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMapDirectMemory(&m, 2 * PG, 0x3, 0, (long)g_dmem - (long)PG, PG);
         l.c(code(r));
         if (r == 0)
-            sceKernelMunmap(m, 2 * PG);
+            HF(sceKernelMunmap(m, 2 * PG));
         l.end();
     }
     {
@@ -5576,7 +5846,7 @@ static void run_cov6() {
             const int32_t r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0x10);
             l.c(code(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         }
         l.s(" | ");
         l.c(code(sceKernelMunmap((void*)0x7FFFFFFFC000ull, PG)));
@@ -5606,7 +5876,7 @@ static void run_cov6() {
         } else {
             l.c(code(sceKernelCheckedReleaseDirectMemory(pa, 0))).c(allocated(pa) ? 'y' : 'n');
             l.s(" | ").c(code(sceKernelMtypeprotect(m, 0, 0, 0x3))).end();
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
     }
@@ -5624,7 +5894,7 @@ static void run_cov6() {
             if (r == 0 && sceKernelQueryMemoryProtection(rv, &s0, &e0, &p) == 0)
                 l.c(':').hex((uint32_t)p);
             l.end();
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         }
     }
     {
@@ -5643,13 +5913,13 @@ static void run_cov6() {
             l.s("SKIP setup").end();
         } else {
             ((uint8_t*)m)[0x3000] = 0x66;
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
             sceKernelClose(fd);
             fd = sceKernelOpen(path, 0x0002, 0);
             m = 0;
             if (fd >= 0 && sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m) == 0) {
                 l.hex((uint32_t)((uint8_t*)m)[0x3000]).c(' ');
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             } else {
                 l.c('-');
             }
@@ -5658,7 +5928,7 @@ static void run_cov6() {
             m = 0;
             if (sceKernelMmap(0, PG, 0x3, 0x1, fd, 0, &m) == 0) {
                 ((uint8_t*)m)[0x3000] = 0x66;
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             sceKernelLseek(fd, 0x3FFF, 0);
             const unsigned char one = 0x11;
@@ -5666,7 +5936,7 @@ static void run_cov6() {
             m = 0;
             if (sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m) == 0) {
                 l.hex((uint32_t)((uint8_t*)m)[0x3000]);
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             } else {
                 l.c('-');
             }
@@ -5686,14 +5956,14 @@ static void run_cov6() {
             uint8_t* b = (uint8_t*)f;
             for (int i = 0; i < (int)PG; i++)
                 b[i] = 0x5A;
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
             void* g = f;
             const int32_t r = sceKernelMapFlexibleMemory(&g, PG, 0x3, 0x10);
             l.c(code(r));
             if (r == 0) {
                 l.c(g == f ? '=' : '!').c(' ').hex((uint32_t)((uint8_t*)g)[0]).c(' ');
                 l.hex((uint32_t)((uint8_t*)g)[PG - 1]);
-                sceKernelMunmap(g, PG);
+                HF(sceKernelMunmap(g, PG));
             }
             l.end();
         }
@@ -5710,7 +5980,7 @@ static void run_cov6() {
             int p = -1;
             if (sceKernelQueryMemoryProtection(rv, &s0, &e0, &p) == 0)
                 l.c(':').hex((uint32_t)p);
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         } else {
             l.c('-');
         }
@@ -5722,18 +5992,17 @@ static void run_cov6() {
     {
         // SH1: a search hint below 400000 (where shadPS4's address space starts; N6: the PS4 maps from
         // 4000): non-fixed 16K reservations with hint 4000 | 100000; '=' at the hint, else the address
-        Line l = head("SH1", "rsv hint 4000 | 100000 (not fixed): = or address");
+        // per hint: what is visible there before (occ), code, = at the hint or the region
+        Line l = head("SH1", "rsv hint 4000 | 100000 (not fixed): occ code where");
         static const uint64_t hints[] = {0x4000ull, 0x100000ull};
         for (uint64_t h : hints) {
             void* v = (void*)h;
+            l.c('@').c(occ(h, PG));
             const int32_t r = sceKernelReserveVirtualRange(&v, PG, 0, 0);
             l.c(code(r));
             if (r == 0) {
-                if (v == (void*)h)
-                    l.c('=');
-                else
-                    l.c(':').hex((uint64_t)v);
-                sceKernelMunmap(v, PG);
+                where(l, "at", (uint64_t)v, h);
+                HF(sceKernelMunmap(v, PG));
             }
             l.c(' ');
         }
@@ -5771,7 +6040,7 @@ static void run_cov6() {
             const int32_t r = sceKernelMmap(a, PG, prot, flags, f, 0, &m);
             l.c(code(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         };
         const int ro = sceKernelOpen(path, 0x0000, 0);
         const int wo = sceKernelOpen(path, 0x0001, 0);
@@ -5784,7 +6053,10 @@ static void run_cov6() {
             mm(0, 0x1, 0x1, wo);
         l.c(' ');
         const int dfd = sceKernelOpen(g_log_path[1] == 'd' ? "/data" : "/temp0", 0x20000, 0);
+        // d: the directory opened; x: it did not (the code goes to ?=)
         l.c(dfd >= 0 ? 'd' : 'x');
+        if (dfd < 0 && g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)dfd;
         if (dfd >= 0) {
             mm(0, 0x1, 0x1, dfd);
             sceKernelClose(dfd);
@@ -5793,7 +6065,7 @@ static void run_cov6() {
         void* f = 0;
         if (ro >= 0 && sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) == 0) {
             mm(f, 0x1, 0x1 | 0x10 | 0x80, ro);
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         }
         if (ro >= 0)
             mm((void*)0x800000000000ull, 0x1, 0x1 | 0x10, ro);
@@ -5822,13 +6094,13 @@ static void run_mf24() {
         b[0] = 0x77;
         b[0x3000] = 0x66;
         l.s(" mprotect=").c(code(sceKernelMprotect(m, 0x4000, 0x1)));
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
         l.s(" size=").hex((uint64_t)sceKernelLseek(fd, 0, 2));
         void* m2 = 0;
         if (sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m2) == 0) {
             const volatile unsigned char* c = (const volatile unsigned char*)m2;
             l.s(" byte0=").hex(c[0]).s(" 3000=").hex(c[0x3000]);
-            sceKernelMunmap(m2, 0x4000);
+            HF(sceKernelMunmap(m2, 0x4000));
         }
     }
     l.end();
@@ -5856,7 +6128,7 @@ static void run_mf21() {
     l.c(code(r));
     if (r == 0) {
         l.s(" byte0=").hex(*(volatile unsigned char*)m);
-        sceKernelMunmap(m, 0x4000);
+        HF(sceKernelMunmap(m, 0x4000));
     }
     l.end();
     if (fd >= 0)
@@ -5868,13 +6140,8 @@ static void run_mf21() {
 //      the protection read back, or u when the page is unmapped. -----------------------------------
 
 // NU codes: the letter, and any code without one is listed at the end of the line
-static uint32_t g_unk[16];
-static int g_nunk = 0;
 static char ncode(int32_t r) {
-    const char c = code(r);
-    if (c == '?' && g_nunk < 16)
-        g_unk[g_nunk++] = (uint32_t)r;
-    return c;
+    return code(r);
 }
 static Line& unk(Line& l) {
     if (g_nunk) {
@@ -5914,16 +6181,16 @@ static void nu_munmap() {
     nu_page(l, f);
     l.c(',');
     nu_page(l, f + PG);
-    sceKernelMunmap(f, 2 * PG);
+    HF(sceKernelMunmap(f, 2 * PG));
     if ((f = nu_flex2())) {
         l.s(" | ").c(ncode(sceKernelMunmap(f, 0x4001))).c(':');
         nu_page(l, f);
         l.c(',');
         nu_page(l, f + PG);
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     if ((f = nu_flex2())) {
-        sceKernelMunmap(f + PG, PG);
+        HF(sceKernelMunmap(f + PG, PG));
         l.s(" | ").c(ncode(sceKernelMunmap(f, 2 * PG))).c(':');
         nu_page(l, f);
     }
@@ -5947,25 +6214,25 @@ static void nu_mprotect() {
     nu_page(l, f);
     l.c(',');
     nu_page(l, f + PG);
-    sceKernelMunmap(f, 2 * PG);
+    HF(sceKernelMunmap(f, 2 * PG));
     if ((f = nu_flex2())) {
         l.s(" | ").c(ncode(sceKernelMprotect(f, 0x4001, 0x1))).c(':');
         nu_page(l, f);
         l.c(',');
         nu_page(l, f + PG);
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     if ((f = nu_flex2())) {
-        sceKernelMunmap(f + PG, PG);
+        HF(sceKernelMunmap(f + PG, PG));
         l.s(" | ").c(ncode(sceKernelMprotect(f, 2 * PG, 0x1))).c(':');
         nu_page(l, f);
-        sceKernelMunmap(f, PG);
+        HF(sceKernelMunmap(f, PG));
     }
     // a flexible page followed by a direct page
     int32_t rr = 0;
     const long pa = alloc(1, 3, &rr);
     if (pa >= 0 && (f = nu_flex2())) {
-        sceKernelMunmap(f + PG, PG);
+        HF(sceKernelMunmap(f + PG, PG));
         void* d = f + PG;
         const int32_t rd = sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
         l.s(" | ");
@@ -5974,11 +6241,11 @@ static void nu_mprotect() {
             nu_page(l, f);
             l.c(',');
             nu_page(l, f + PG);
-            sceKernelMunmap(f + PG, PG);
+            HF(sceKernelMunmap(f + PG, PG));
         } else {
             l.s("map ").c(ncode(rd));
         }
-        sceKernelMunmap(f, PG);
+        HF(sceKernelMunmap(f, PG));
     }
     release_all(pa, 1);
     if ((f = nu_flex2())) {
@@ -5987,7 +6254,7 @@ static void nu_mprotect() {
         l.s(" | ").c(ncode(sceKernelMprotect(f + PG, PG, 0x41))).c(ncode(
             sceKernelMprotect(f + PG, PG, 0x101))).c(':');
         nu_page(l, f + PG);
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     unk(l).end();
 }
@@ -6003,21 +6270,21 @@ static void nu_mtypeprotect() {
         return unk(l.s("SKIP")).end();
     }
     l.c(ncode(sceKernelMtypeprotect(va + 0x1000, PG, 0, 0x3)));
-    sceKernelMunmap(va + PG, PG);
+    HF(sceKernelMunmap(va + PG, PG));
     l.s(" | ").c(ncode(sceKernelMtypeprotect(va, 2 * PG, 0, 0x3)));
-    sceKernelMunmap(va, PG);
+    HF(sceKernelMunmap(va, PG));
     release_all(pa, 2);
     uint8_t* f = nu_flex2();
     if (f) {
         l.s(" | ").c(ncode(sceKernelMtypeprotect(f, PG, 0, 0x3)));
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
         l.s(" | ").c(ncode(sceKernelMtypeprotect(rv, 0x10000, 0, 0x3)));
-        sceKernelMunmap(rv, 0x200000);
+        HF(sceKernelMunmap(rv, 0x200000));
     }
     unk(l).end();
 }
@@ -6079,7 +6346,7 @@ static void nu_pool() {
     Line l = head("NU5", "pool: commit twice | decommit twice | half | 0 | +4000 | 4000 | outside | 2 rsv");
     const uint64_t blk = 0x10000, rsv = 0x200000;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px));
     void* r1 = 0;
     if (sceKernelMemoryPoolReserve(0, rsv, 0, 0, &r1) != 0)
         return unk(l.s("SKIP")).end();
@@ -6088,7 +6355,7 @@ static void nu_pool() {
     l.c(ncode(sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0)));
     l.s(" | ").c(ncode(sceKernelMemoryPoolDecommit(R, blk, 0)));
     l.c(ncode(sceKernelMemoryPoolDecommit(R, blk, 0)));
-    sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0);
+    HF(sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0));
     l.s(" | ").c(ncode(sceKernelMemoryPoolDecommit(R, 2 * blk, 0))).c(' ');
     stats(l);
     l.s(" | ").c(ncode(sceKernelMemoryPoolCommit(R, 0, 0, 0x3, 0)));
@@ -6097,7 +6364,7 @@ static void nu_pool() {
     uint8_t* f = nu_flex2();
     if (f) {
         l.s(" | ").c(ncode(sceKernelMemoryPoolCommit(f, blk, 0, 0x3, 0)));
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     void* r2 = R + rsv;
     const int32_t rb = sceKernelMemoryPoolReserve(r2, rsv, 0, 0x90, &r2);
@@ -6106,12 +6373,12 @@ static void nu_pool() {
         const int32_t rc = sceKernelMemoryPoolCommit(R + rsv - blk, 2 * blk, 0, 0x3, 0);
         l.c(ncode(rc));
         if (rc == 0)
-            sceKernelMemoryPoolDecommit(R + rsv - blk, 2 * blk, 0);
-        sceKernelMunmap(r2, rsv);
+            HF(sceKernelMemoryPoolDecommit(R + rsv - blk, 2 * blk, 0));
+        HF(sceKernelMunmap(r2, rsv));
     } else {
         l.s("rsv ").c(ncode(rb));
     }
-    sceKernelMunmap(R, rsv);
+    HF(sceKernelMunmap(R, rsv));
     unk(l).end();
 }
 
@@ -6127,23 +6394,23 @@ static void nu_file() {
     int32_t r = sceKernelMmap(0, 0, 0x1, 0x1, fd, 0, &m);
     l.c(ncode(r));
     if (r == 0)
-        sceKernelMunmap(m, PG);
+        HF(sceKernelMunmap(m, PG));
     r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0x1000, &m);
     l.s(" | ").c(ncode(r));
     if (r == 0)
-        sceKernelMunmap(m, PG);
+        HF(sceKernelMunmap(m, PG));
     uint8_t* f = nu_flex2();
     if (f) {
         m = f + 0x1000;
         r = sceKernelMmap(f + 0x1000, PG, 0x1, 0x11, fd, 0, &m);
         l.s(" | fixed ").c(ncode(r));
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     sceKernelClose(fd);
     r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m);
     l.s(" | closed ").c(ncode(r));
     if (r == 0)
-        sceKernelMunmap(m, PG);
+        HF(sceKernelMunmap(m, PG));
     unk(l).end();
 }
 
@@ -6158,7 +6425,7 @@ static void nu_query() {
         return unk(l.s("SKIP")).end();
     }
     unsigned char info[0x18];
-    my_memset(info, 0, sizeof(info));
+    out_prefill(info, sizeof(info));
     int32_t r = sceKernelDirectMemoryQuery(pa + 0x1001, 0, info, sizeof(info));
     l.c(ncode(r));
     if (r == 0) {
@@ -6171,18 +6438,18 @@ static void nu_query() {
     }
     l.s(" | ");
     vq_field(l, (uint64_t)va + 0x1234, (uint64_t)va);
-    sceKernelMunmap(va + PG, PG);
+    HF(sceKernelMunmap(va + PG, PG));
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     l.s(" | ").c(ncode(sceKernelVirtualQuery(va + PG, 0, vi, 0x48)));
-    sceKernelMunmap(va, PG);
+    HF(sceKernelMunmap(va, PG));
     release_all(pa, 2);
     unk(l).end();
 }
 
 static int32_t nu_vtype(uint64_t at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0)
         return -1;
     return (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) | ((uint32_t)vi[0x1E] << 16) |
@@ -6197,12 +6464,12 @@ static void nu_protbits() {
         return unk(l.s("SKIP")).end();
     static const int32_t bits[] = {0x8, 0x40, 0x80, 0x100, 0x200, 0x400};
     for (int32_t b : bits) {
-        sceKernelMprotect(f, PG, 0x3);
+        HF(sceKernelMprotect(f, PG, 0x3));
         l.c(ncode(sceKernelMprotect(f, PG, 0x1 | b))).c(':');
         nu_page(l, f);
         l.c(' ');
     }
-    sceKernelMunmap(f, 2 * PG);
+    HF(sceKernelMunmap(f, 2 * PG));
     unk(l).end();
 }
 
@@ -6215,7 +6482,7 @@ static void nu_rounding() {
         nu_page(l, f);
         l.c(',');
         nu_page(l, f + PG);
-        sceKernelMunmap(f, 2 * PG);
+        HF(sceKernelMunmap(f, 2 * PG));
     }
     int32_t rr = 0;
     const long pa = alloc(2, 3, &rr);
@@ -6223,7 +6490,7 @@ static void nu_rounding() {
     if (va) {
         l.s(" | ").c(ncode(sceKernelMtypeprotect(va + 0x1000, PG, 0, 0x3))).c(':');
         l.dec(nu_vtype((uint64_t)va)).c(',').dec(nu_vtype((uint64_t)va + PG));
-        sceKernelMunmap(va, 2 * PG);
+        HF(sceKernelMunmap(va, 2 * PG));
     }
     release_all(pa, 2);
     unk(l).end();
@@ -6234,7 +6501,7 @@ static void nu_poolorder() {
     Line l = head("NU10", "commit +4000 len0 | len0 t7 | len0 exec | decommit len0 | +4000");
     const uint64_t blk = 0x10000;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, blk, blk, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
         return unk(l.s("SKIP")).end();
@@ -6244,7 +6511,7 @@ static void nu_poolorder() {
     l.s(" | ").c(ncode(sceKernelMemoryPoolCommit(R, 0, 0, 0x7, 0)));
     l.s(" | ").c(ncode(sceKernelMemoryPoolDecommit(R, 0, 0)));
     l.s(" | ").c(ncode(sceKernelMemoryPoolDecommit(R + 0x4000, blk, 0)));
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
     unk(l).end();
 }
 
@@ -6253,19 +6520,30 @@ struct NuPool {
     uint8_t* r[6] = {};
     int nr = 0;
     uint64_t used[6] = {};
+    // what the last commit() came to: 'o', the code letter of the commit, 'r' the reservation for
+    // it failed (its code goes to ?=), '-' nothing left to use. Round 128: printed in place of
+    // o / x, which did not say what failed.
+    char last = '-';
     // commits one 64 KiB block of the given type somewhere; false when nothing is left to use
     bool commit(int32_t type, uint64_t len = 0x10000) {
+        last = '-';
         for (int i = 0; i < 6; i++) {
             if (i == nr) {
                 void* rv = 0;
-                if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
+                const int32_t rr = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv);
+                if (rr != 0) {
+                    if (g_nunk < 16)
+                        g_unk[g_nunk++] = (uint32_t)rr;
+                    last = 'r';
                     return false;
+                }
                 r[nr++] = (uint8_t*)rv;
             }
             if (used[i] + len <= 0x200000) {
                 const int32_t c = sceKernelMemoryPoolCommit(r[i] + used[i], len, type,
                                                             type == 10 ? 0x1 : 0x3, 0);
                 used[i] += len;
+                last = code(c);
                 return c == 0;
             }
         }
@@ -6273,7 +6551,7 @@ struct NuPool {
     }
     void release() {
         for (int i = 0; i < nr; i++)
-            sceKernelMunmap(r[i], 0x200000);
+            HF(sceKernelMunmap(r[i], 0x200000));
         nr = 0;
     }
 };
@@ -6296,7 +6574,7 @@ static void nu_fewblocks() {
     l.c(ncode(r)).c(' ');
     stats(l);
     if (r == 0)
-        sceKernelMunmap(rv, 0x3C0000000ull);
+        HF(sceKernelMunmap(rv, 0x3C0000000ull));
     np.release();
     unk(l).end();
 }
@@ -6310,11 +6588,13 @@ static void nu_flushedout() {
             break;
     PoolStats b = tr_read();
     l.s("af=").hex((uint32_t)b.avail_flushed).c(' ');
-    l.c(np.commit(3) ? 'o' : 'x').c(' ');
+    np.commit(3);
+    l.c(np.last).c(' ');
     stats(l);
     l.s(" | ");
     if (tr_read().avail_flushed == 0) {
-        l.c(np.commit(10, 0x20000) ? 'o' : 'x').c(' ');
+        np.commit(10, 0x20000);
+        l.c(np.last).c(' ');
         stats(l);
     } else {
         l.s("af>0");
@@ -6326,7 +6606,8 @@ static void nu_flushedout() {
     b = tr_read();
     l.s("af=").hex((uint32_t)b.avail_flushed).c(' ');
     if (b.avail_flushed == 1) {
-        l.c(np.commit(10, 0x20000) ? 'o' : 'x').c(' ');
+        np.commit(10, 0x20000);
+        l.c(np.last).c(' ');
         stats(l);
     }
     np.release();
@@ -6354,11 +6635,16 @@ struct NuStock {
         }
         return nr > 0;
     }
+    // as NuPool::last: 'o', the commit's code letter, '-' no slot left
+    char last = '-';
     bool commit(int32_t type) {
+        last = '-';
         if (nf == 0)
             return false;
         uint8_t* at = free_[--nf];
-        if (sceKernelMemoryPoolCommit(at, 0x10000, type, type == 10 ? 0x1 : 0x3, 0) != 0) {
+        const int32_t c = sceKernelMemoryPoolCommit(at, 0x10000, type, type == 10 ? 0x1 : 0x3, 0);
+        last = code(c);
+        if (c != 0) {
             free_[nf++] = at;
             return false;
         }
@@ -6377,7 +6663,7 @@ struct NuStock {
     }
     void release() {
         for (int i = 0; i < nr; i++)
-            sceKernelMunmap(r[i], 0x200000);
+            HF(sceKernelMunmap(r[i], 0x200000));
         nr = 0;
     }
 };
@@ -6406,7 +6692,8 @@ static void nu_threshold_one(NuStock& ns, int32_t type, int t) {
         return;
     }
     nu_stats4(l, b);
-    l.s(" -> ").c(ns.commit(type) ? 'o' : 'x').c(' ');
+    ns.commit(type);
+    l.s(" -> ").c(ns.last).c(' ');
     const PoolStats a = tr_read();
     nu_stats4(l, a);
     l.s(a.avail_flushed > 0 ? " converted" : " kept");
@@ -6445,7 +6732,7 @@ static void nu_mtype_reserved_twice() {
     l.c(ncode(sceKernelMtypeprotect(R, blk, 3, 0x3)));
     l.s(" | ").c(ncode(sceKernelMtypeprotect(R + blk, blk, 0, 0x3)));
     l.c(ncode(sceKernelMtypeprotect(R + blk, blk, 0, 0x3)));
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
     unk(l).end();
 }
 
@@ -6455,7 +6742,7 @@ static void nu_mtype_reserved() {
     Line l = head("NU14", "mtypeprotect on reserved: t0 | t3 | t10 | t0 2blk | t0 half");
     const uint64_t blk = 0x10000;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
         return unk(l.s("SKIP")).end();
@@ -6469,7 +6756,7 @@ static void nu_mtype_reserved() {
         l.c(ncode(sceKernelMtypeprotect(R + 5 * blk, 2 * blk, 0, 0x3)));
     else
         l.s("commit failed");
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
     unk(l).end();
 }
 
@@ -6510,7 +6797,7 @@ static void rv_try(Line& l, void* hint, size_t len, int32_t flags, size_t align)
             l.c(v == hint ? '=' : '!');
         // a zero-length success has nothing of its own to unmap
         if (len)
-            sceKernelMunmap(v, len);
+            HF(sceKernelMunmap(v, len));
     }
 }
 
@@ -6536,7 +6823,7 @@ static void run_rv() {
             l.s(" | ");
             rv_prot(l, v);
             vq_rel(l, (uint64_t)v, (uint64_t)&rv_mk);
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         }
         unk(l).end();
     }
@@ -6555,7 +6842,7 @@ static void run_rv() {
         l.c(' ');
         void* a = 0;
         if (sceKernelReserveVirtualRange(&a, rsv, 0, 0) == 0) {
-            sceKernelMunmap(a, rsv);
+            HF(sceKernelMunmap(a, rsv));
             rv_try(l, a, rsv, 0x10, 0);
             l.c(' ');
             rv_try(l, (uint8_t*)a + 0x4000, rsv, 0x10, 0);
@@ -6564,7 +6851,7 @@ static void run_rv() {
         uint8_t* f = nu_flex2();
         if (f) {
             rv_try(l, f, 2 * PG, 0x90, 0);
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         }
         unk(l).end();
     }
@@ -6588,7 +6875,7 @@ static void run_rv() {
                 l.s(" | ").c(ncode(sceKernelMunmap(R + 0x10000, PG))).s(" | ");
                 vq_field(l, (uint64_t)R + 0x10000, (uint64_t)R);
             }
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         } else {
             l.s("SKIP");
         }
@@ -6612,7 +6899,7 @@ static void run_rv() {
             l.s(" | ").c(ncode(rf));
             if (rf == 0)
                 l.c(fx == R + 2 * PG ? '=' : '!');
-            sceKernelMunmap(R + PG, rsv - PG);
+            HF(sceKernelMunmap(R + PG, rsv - PG));
         } else {
             l.s("SKIP");
         }
@@ -6623,7 +6910,7 @@ static void run_rv() {
 // NM: named mappings and SetVirtualRangeName. A name prints as its length and first 4 characters.
 static void nm_show(Line& l, uint64_t at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     if (sceKernelVirtualQuery((void*)at, 0, vi, 0x48) != 0) {
         l.s("?");
         return;
@@ -6660,7 +6947,7 @@ static void run_nm() {
             if (r == 0) {
                 l.c(':');
                 nm_show(l, (uint64_t)m);
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -6677,7 +6964,7 @@ static void run_nm() {
             if (r == 0) {
                 l.c(':');
                 nm_show(l, (uint64_t)m);
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -6698,9 +6985,9 @@ static void run_nm() {
             nm_show(l, (uint64_t)f);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(f, 0, "nm3c"))).c(':');
             nm_show(l, (uint64_t)f);
-            sceKernelMunmap(f + PG, PG);
+            HF(sceKernelMunmap(f + PG, PG));
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(f + PG, PG, "nm3d")));
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         } else {
             l.s("SKIP");
         }
@@ -6714,18 +7001,18 @@ static void run_nm() {
         if (va) {
             l.c(ncode(sceKernelSetVirtualRangeName(va, PG, "nm4a"))).c(':');
             nm_show(l, (uint64_t)va);
-            sceKernelMunmap(va, PG);
+            HF(sceKernelMunmap(va, PG));
         }
         release_all(pa, 1);
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(rv, 0x10000, "nm4b"))).c(':');
             nm_show(l, (uint64_t)rv);
             l.c(',');
             nm_show(l, (uint64_t)rv + 0x10000);
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         }
         unk(l).end();
     }
@@ -6738,25 +7025,25 @@ static void run_fl() {
         say("FL1 starting");
         Line l = head("FL1", "avail: -map64K | +unmap | release 16K of 32K: code, avail, pages");
         size_t a0 = 0, a1 = 0, a2 = 0;
-        sceKernelAvailableFlexibleMemorySize(&a0);
+        HF(sceKernelAvailableFlexibleMemorySize(&a0));
         void* m = 0;
         if (sceKernelMapFlexibleMemory(&m, 0x10000, 0x3, 0) == 0) {
-            sceKernelAvailableFlexibleMemorySize(&a1);
-            sceKernelMunmap(m, 0x10000);
-            sceKernelAvailableFlexibleMemorySize(&a2);
+            HF(sceKernelAvailableFlexibleMemorySize(&a1));
+            HF(sceKernelMunmap(m, 0x10000));
+            HF(sceKernelAvailableFlexibleMemorySize(&a2));
             l.hex((uint64_t)(a0 - a1)).s(" | ").hex((uint64_t)(a2 - a1));
         }
         uint8_t* f = nu_flex2();
         if (f) {
             size_t b0 = 0, b1 = 0;
-            sceKernelAvailableFlexibleMemorySize(&b0);
+            HF(sceKernelAvailableFlexibleMemorySize(&b0));
             l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(f, PG)));
-            sceKernelAvailableFlexibleMemorySize(&b1);
+            HF(sceKernelAvailableFlexibleMemorySize(&b1));
             l.s(" +").hex((uint64_t)(b1 - b0)).c(' ');
             nu_page(l, f);
             l.c(',');
             nu_page(l, f + PG);
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         }
         unk(l).end();
     }
@@ -6768,17 +7055,17 @@ static void run_fl() {
         uint8_t* va = pa >= 0 ? map(pa, 1, &rr) : nullptr;
         if (va) {
             l.c(ncode(sceKernelReleaseFlexibleMemory(va, PG)));
-            sceKernelMunmap(va, PG);
+            HF(sceKernelMunmap(va, PG));
         }
         release_all(pa, 1);
         uint8_t* f = nu_flex2();
         if (f) {
-            sceKernelMunmap(f + PG, PG);
+            HF(sceKernelMunmap(f + PG, PG));
             l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(f + PG, PG)));
             l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(f, 0)));
             l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(f + 0x1000, PG))).c(':');
             nu_page(l, f);
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         }
         unk(l).end();
     }
@@ -6829,10 +7116,10 @@ static void run_bm() {
         l.s(" | ").c(ncode(sceKernelBatchMap2(e2, 2, &n, 0))).c(' ').dec(n);
         n = -1;
         l.s(" | ").c(ncode(sceKernelBatchMap2(e2, 2, &n, 0x10))).c(' ').dec(n);
-        sceKernelMunmap(R, PG);
+        HF(sceKernelMunmap(R, PG));
         unk(l).end();
     }
-    sceKernelMunmap(v, 0x200000);
+    HF(sceKernelMunmap(v, 0x200000));
     release_all(pa, 1);
 }
 
@@ -6859,7 +7146,7 @@ static void run_pb() {
     say("== PB MemoryPoolBatch: code, entries processed, counters before -> after");
     const uint64_t blk = 0x10000;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
         say("PB   SKIP");
@@ -6886,10 +7173,10 @@ static void run_pb() {
         int32_t n = -1;
         l.c(ncode(sceKernelMemoryPoolBatch(e, 3, &n, 0))).c(' ').dec(n).s(" | ");
         rv_prot(l, R);
-        sceKernelMemoryPoolDecommit(R, blk, 0);
+        HF(sceKernelMemoryPoolDecommit(R, blk, 0));
         unk(l).end();
     }
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
 }
 
 // ---- coverage batch 4 (analysis/COVERAGE.md): pool argument checks and moves --------------------
@@ -6928,7 +7215,7 @@ static void run_cov4() {
         l.c(code(sceKernelMemoryPoolReserve(0, 0, 0, 0, &r))).end();
     }
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 4 * blk, blk, &px));
     void* rv = 0;
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0) {
         say("PD1  SKIP reserve");
@@ -6936,18 +7223,18 @@ static void run_cov4() {
     }
     uint8_t* R = (uint8_t*)rv;
     void* f = 0;
-    sceKernelMapFlexibleMemory(&f, PG, 0x3, 0);
+    HF(sceKernelMapFlexibleMemory(&f, PG, 0x3, 0));
     int32_t rr = 0;
     const long pa = alloc(1, 3, &rr);
     void* d = 0;
     if (pa >= 0)
-        sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG);
+        HF(sceKernelMapDirectMemory(&d, PG, 0x3, 0, pa, PG));
     {
         // PD1: decommit len 4000 of a committed block | flexible memory | direct memory
         Line l = head("PD1", "decommit: len 4000 | flexible | direct");
         if (sceKernelMemoryPoolCommit(R, blk, 0, 0x3, 0) == 0) {
             l.c(code(sceKernelMemoryPoolDecommit(R, 0x4000, 0)));
-            sceKernelMemoryPoolDecommit(R, blk, 0);
+            HF(sceKernelMemoryPoolDecommit(R, blk, 0));
         } else {
             l.c('-');
         }
@@ -6964,7 +7251,7 @@ static void run_cov4() {
         const bool c2 = sceKernelMemoryPoolCommit(R + 2 * blk, blk, 0, 0x3, 0) == 0;
         void* hole = 0;
         if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
-            sceKernelMunmap(hole, PG);
+            HF(sceKernelMunmap(hole, PG));
         auto mv = [&](void* dest, void* src) {
             PbEntry e;
             my_memset(&e, 0, sizeof(e));
@@ -7001,16 +7288,18 @@ static void run_cov4() {
         l.c(code(sceKernelMemoryPoolBatch(&e, 1, &n, 0))).dec(n);
         l.end();
     }
-    sceKernelMunmap(R, 0x200000);
+    HF(sceKernelMunmap(R, 0x200000));
     if (f)
-        sceKernelMunmap(f, PG);
+        HF(sceKernelMunmap(f, PG));
     if (d)
-        sceKernelMunmap(d, PG);
+        HF(sceKernelMunmap(d, PG));
     release_all(pa, 1);
 }
 
 // PX: the POSIX variants; failures print -1 and errno
+static uint64_t g_px1_ret = 0;
 __attribute__((noinline)) static void* px_mk() {
+    g_px1_ret = (uint64_t)__builtin_return_address(0);
     return mmap(0, 0x4000, 0x3, 0x1002, -1, 0);
 }
 
@@ -7025,13 +7314,15 @@ static void run_px() {
     say("== PX POSIX mmap, munmap, mprotect, msync, mlock, munlock: result or -1/errno");
     {
         say("PX1 starting");
-        Line l = head("PX1", "mmap anon: result, name rel | munmap");
+        // site: C the name is the return address of the mmap call (inside px_mk), P the return
+        // address of px_mk itself (the function that called mmap), as PX3
+        Line l = head("PX1", "mmap anon: result, name rel site | munmap");
         void* m = px_mk();
         if (m == (void*)-1) {
             px_ret(l, -1);
         } else {
             l.s("ok");
-            vq_rel(l, (uint64_t)m, (uint64_t)&px_mk);
+            vq_rel(l, (uint64_t)m, (uint64_t)&px_mk, g_px1_ret);
             l.s(" | ");
             px_ret(l, munmap(m, 0x4000));
         }
@@ -7043,7 +7334,7 @@ static void run_px() {
         uint8_t* f = nu_flex2();
         if (f) {
             px_ret(l, munmap(f, 0));
-            sceKernelMunmap(f + PG, PG);
+            HF(sceKernelMunmap(f + PG, PG));
             l.s(" | ");
             px_ret(l, mprotect(f + PG, PG, 0x1));
             l.s(" | ");
@@ -7054,7 +7345,7 @@ static void run_px() {
             px_ret(l, mlock(f, PG));
             l.s(" | ");
             px_ret(l, munlock(f, PG));
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         } else {
             l.s("SKIP");
         }
@@ -7078,7 +7369,7 @@ static void run_ms() {
             long s = 0, e = 0;
             l.s(" | ").c(ncode(sceKernelGetDirectMemoryType(pa, &t, &s, &e))).c(':').dec(t);
             l.s(" | ").dec(nu_vtype((uint64_t)m));
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
         unk(l).end();
@@ -7105,7 +7396,7 @@ static void run_ms() {
         if (f) {
             s = e = 0;
             l.s(" | ").c(ncode(sceKernelIsStack(f, &s, &e))).c(' ').c(s ? 'y' : 'n');
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         }
         unk(l).end();
     }
@@ -7115,9 +7406,9 @@ static void run_ms() {
         uint8_t* f = nu_flex2();
         if (f) {
             l.c(ncode(sceKernelMlock(f, PG))).c(ncode(sceKernelMunlock(f, PG)));
-            sceKernelMunmap(f + PG, PG);
+            HF(sceKernelMunmap(f + PG, PG));
             l.s(" | ").c(ncode(sceKernelMlock(f + PG, PG))).c(ncode(sceKernelMunlock(f + PG, PG)));
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         }
         unk(l).end();
     }
@@ -7149,7 +7440,7 @@ static void run_followups() {
         say("PG1 starting");
         Line l = head("PG1", "pool: commit 1 | commit 3 | mprotect 1 | 13 | 30");
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             uint8_t* R = (uint8_t*)rv;
@@ -7162,7 +7453,7 @@ static void run_followups() {
                 l.s(" | ").c(ncode(sceKernelMprotect(R + 0x10000, 0x10000, p))).c(' ');
                 rv_prot(l, R + 0x10000);
             }
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         } else {
             l.s("SKIP");
         }
@@ -7172,7 +7463,7 @@ static void run_followups() {
         say("PG3 starting");
         Line l = head("PG3", "pool vq: commit 1 | commit 3, mprotect 1 (no writes)");
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             uint8_t* R = (uint8_t*)rv;
@@ -7182,7 +7473,7 @@ static void run_followups() {
             if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0 &&
                 sceKernelMprotect(R + 0x10000, 0x10000, 0x1) == 0)
                 vq_field(l, (uint64_t)R + 0x10000, (uint64_t)R);
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         } else {
             l.s("SKIP");
         }
@@ -7216,12 +7507,12 @@ static void run_followups() {
         if (f) {
             static const int32_t bits[] = {0x800, 0x1000, 0x2000, 0x4000, 0x10000};
             for (int32_t b : bits) {
-                sceKernelMprotect(f, PG, 0x3);
+                HF(sceKernelMprotect(f, PG, 0x3));
                 l.c(ncode(sceKernelMprotect(f, PG, 0x1 | b))).c(':');
                 nu_page(l, f);
                 l.c(' ');
             }
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         } else {
             l.s("SKIP");
         }
@@ -7231,16 +7522,16 @@ static void run_followups() {
         say("FL3 starting");
         Line l = head("FL3", "64K flexible touched: avail -map, -touch | release 16K: avail, value");
         size_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
-        sceKernelAvailableFlexibleMemorySize(&a0);
+        HF(sceKernelAvailableFlexibleMemorySize(&a0));
         void* m = 0;
         if (sceKernelMapFlexibleMemory(&m, 0x10000, 0x3, 0) == 0) {
-            sceKernelAvailableFlexibleMemorySize(&a1);
+            HF(sceKernelAvailableFlexibleMemorySize(&a1));
             for (int k = 0; k < 4; k++)
                 *(volatile uint32_t*)((uint8_t*)m + k * PG) = 0xABCD0000u + k;
-            sceKernelAvailableFlexibleMemorySize(&a2);
+            HF(sceKernelAvailableFlexibleMemorySize(&a2));
             l.hex((uint64_t)(a0 - a1)).s(" ").hex((uint64_t)(a1 - a2));
             l.s(" | ").c(ncode(sceKernelReleaseFlexibleMemory(m, PG)));
-            sceKernelAvailableFlexibleMemorySize(&a3);
+            HF(sceKernelAvailableFlexibleMemorySize(&a3));
             l.s(" +").hex((uint64_t)(a3 - a2)).c(' ');
             void* s = 0;
             void* e = 0;
@@ -7249,37 +7540,46 @@ static void run_followups() {
                 l.hex(*(volatile uint32_t*)m);
             else
                 l.s("unreadable");
-            sceKernelMunmap(m, 0x10000);
+            HF(sceKernelMunmap(m, 0x10000));
         }
         unk(l).end();
     }
     {
         say("VQ9 starting");
-        Line l = head("VQ9", "fixed dmem at: map | vq0 | vq1 | qprot");
+        Line l = head("VQ9", "fixed dmem at: occ map | vq0 | vq1 | qprot");
         int32_t rr = 0;
         const long pa = alloc(1, 3, &rr);
         void* a0 = 0;
         const bool have_low = sceKernelReserveVirtualRange(&a0, PG, 0, 0) == 0;
         if (have_low)
-            sceKernelMunmap(a0, PG);
+            HF(sceKernelMunmap(a0, PG));
         const uint64_t at[] = {have_low ? (uint64_t)a0 : 0, 0x7EEC00000ull, 0x7EF000000ull,
                                0x880000000ull, 0x900000000ull, 0x1000000000ull, 0x3F00000000ull};
         for (uint64_t x : at) {
             if (!x || pa < 0)
                 continue;
             void* m = (void*)x;
+            // the first address is where a search placed a page (layout): "search"; before each,
+            // what is visible there (occ)
+            const char pre = occ(x, PG);
             const int32_t r = sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG);
-            l.hex(x >> 20).s("M:").c(ncode(r));
+            if (have_low && x == (uint64_t)a0) {
+                l.s("search:");
+                l.lay().s("search=").hex(x).beh();
+            } else {
+                l.hex(x >> 20).s("M:");
+            }
+            l.c('@').c(pre).c(ncode(r));
             if (r == 0) {
                 unsigned char vi[0x60];
-                my_memset(vi, 0, sizeof(vi));
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
                 l.c(ncode(sceKernelVirtualQuery(m, 1, vi, 0x48)));
                 void* s0 = 0;
                 void* e0 = 0;
                 int32_t p = 0;
                 l.c(ncode(sceKernelQueryMemoryProtection(m, &s0, &e0, &p)));
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -7288,17 +7588,20 @@ static void run_followups() {
     }
     {
         say("FL4 starting");
-        Line l = head("FL4", "avail flexible: before | after 16M map + touch | after unmap");
+        // the sizes are layout (what the system uses of the budget); behaviour is the change
+        Line l = head("FL4", "avail flexible: code | change by 16M map + touch | after unmap = before");
         size_t a0 = 0, a1 = 0, a2 = 0;
-        l.c(ncode(sceKernelAvailableFlexibleMemorySize(&a0))).c(':').hex((uint64_t)a0);
+        l.c(ncode(sceKernelAvailableFlexibleMemorySize(&a0)));
+        l.lay().s("before=").hex((uint64_t)a0).beh();
         void* m = 0;
         if (sceKernelMapFlexibleMemory(&m, 0x1000000, 0x3, 0) == 0) {
             *(volatile uint32_t*)m = 1;
-            sceKernelAvailableFlexibleMemorySize(&a1);
-            l.s(" | ").hex((uint64_t)a1);
-            sceKernelMunmap(m, 0x1000000);
-            sceKernelAvailableFlexibleMemorySize(&a2);
-            l.s(" | ").hex((uint64_t)a2);
+            HF(sceKernelAvailableFlexibleMemorySize(&a1));
+            l.s(" | ").shex((long long)a1 - (long long)a0);
+            HF(sceKernelMunmap(m, 0x1000000));
+            HF(sceKernelAvailableFlexibleMemorySize(&a2));
+            l.s(" | ").c(a2 == a0 ? '=' : '!');
+            l.lay().s(" after map=").hex((uint64_t)a1).s(" after unmap=").hex((uint64_t)a2).beh();
         } else {
             l.s(" | map failed");
         }
@@ -7315,20 +7618,21 @@ static void run_followups() {
                                0x8000000000ull, 0x10000000000ull};
         for (uint64_t x : at) {
             unsigned char vi[0x60];
+            out_prefill(vi, sizeof(vi));
             l.hex(x >> 20).s("M:");
             void* m = (void*)x;
             const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
             l.c(ncode(r));
             if (r == 0) {
-                my_memset(vi, 0, sizeof(vi));
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
                 l.c(ncode(sceKernelVirtualQuery(m, 1, vi, 0x48)));
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             } else {
                 l.s("--");
             }
             // the same address with nothing mapped there
-            my_memset(vi, 0, sizeof(vi));
+            out_prefill(vi, sizeof(vi));
             l.c(ncode(sceKernelVirtualQuery((void*)x, 0, vi, 0x48)));
             l.c(ncode(sceKernelVirtualQuery((void*)x, 1, vi, 0x48)));
             l.c(' ');
@@ -7342,13 +7646,13 @@ static void run_followups() {
         static const uint64_t sizes[] = {0x10000, 0x100000, 0x200000, 0x204000, 0x400000, 0x404000};
         for (uint64_t sz : sizes) {
             size_t a0 = 0, a1 = 0;
-            sceKernelAvailableFlexibleMemorySize(&a0);
+            HF(sceKernelAvailableFlexibleMemorySize(&a0));
             void* m = 0;
             if (sceKernelMapFlexibleMemory(&m, sz, 0x3, 0) == 0) {
                 *(volatile uint32_t*)m = 1;
-                sceKernelAvailableFlexibleMemorySize(&a1);
+                HF(sceKernelAvailableFlexibleMemorySize(&a1));
                 l.hex((uint64_t)(a0 - a1));
-                sceKernelMunmap(m, sz);
+                HF(sceKernelMunmap(m, sz));
             } else {
                 l.s("x");
             }
@@ -7370,9 +7674,9 @@ static void run_followups() {
             l.c(ncode(r));
             if (r == 0) {
                 unsigned char vi[0x60];
-                my_memset(vi, 0, sizeof(vi));
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -7393,9 +7697,9 @@ static void run_followups() {
             l.c(ncode(r));
             if (r == 0) {
                 unsigned char vi[0x60];
-                my_memset(vi, 0, sizeof(vi));
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -7415,9 +7719,9 @@ static void run_followups() {
             l.c(ncode(r));
             if (r == 0) {
                 unsigned char vi[0x60];
-                my_memset(vi, 0, sizeof(vi));
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
@@ -7429,31 +7733,42 @@ static void run_followups() {
         // every module's first segment, the main thread's TLS (errno), a stack variable, our code,
         // and the GnmDriver area at 0xFE0000000; each as address:vq-code
         say("VQ14 starting");
-        Line l = head("VQ14", "module first segment, TLS, stack, our code, FE0000000: addr:vq");
+        // Round 128: the line has the VirtualQuery code of each and, for the modules, how many are
+        // listed and how many of them VirtualQuery reports; names and addresses are in the notes.
+        Line l = head("VQ14", "modules listed/visible, TLS, stack, our code, FE0000000: vq code");
         auto vq_at = [&](const void* a) {
             unsigned char vi[0x60];
-            my_memset(vi, 0, sizeof(vi));
-            l.hex((uint64_t)a).c(':').c(ncode(sceKernelVirtualQuery((void*)a, 0, vi, 0x48))).c(' ');
+            out_prefill(vi, sizeof(vi));
+            const char c = ncode(sceKernelVirtualQuery((void*)a, 0, vi, 0x48));
+            l.c(c).c(' ');
+            l.lay().hex((uint64_t)a).c(':').c(c).c(' ').beh();
+            return c;
         };
         static int32_t handles[64];
         size_t n = 0;
         const int32_t r = sceKernelGetModuleList(handles, 64, &n);
-        l.s("list ").c(ncode(r)).s(" n=").dec((long long)n).s(" | ");
+        int visible = 0;
         for (size_t i = 0; r == 0 && i < n && i < 64; i++) {
             static DtModuleInfo info;
             my_memset(&info, 0, sizeof(info));
             info.size = sizeof(info);
             if (sceKernelGetModuleInfo(handles[i], &info) != 0 || info.segment_count == 0) {
-                l.s("? ");
+                l.lay().s("? ").beh();
                 continue;
             }
+            unsigned char vi[0x60];
+            out_prefill(vi, sizeof(vi));
+            const int32_t rq = sceKernelVirtualQuery(info.segment[0].address, 0, vi, 0x48);
+            visible += rq == 0;
+            l.lay();
             for (int k = 0; k < 24 && info.name[k]; k++)
                 l.c(info.name[k]);
-            l.c('=');
-            vq_at(info.segment[0].address);
+            l.c('=').hex((uint64_t)info.segment[0].address).c(':').c(ncode(rq)).c(' ').beh();
         }
+        l.s("list ").c(ncode(r)).s(" n=").dec((long long)n).s(" visible=").dec(visible);
+        l.lay().s("| ").beh();
         int stack_var = 0;
-        l.s("| tls=");
+        l.s(" | tls=");
         vq_at(__error());
         l.s("stack=");
         vq_at(&stack_var);
@@ -7470,18 +7785,19 @@ static void run_followups() {
         Line l = head("VQ15", "vq1 from 7EFFFC000: vq0 there | a) next=module | b) own page at 7F0000000");
         auto vq1 = [&](uint64_t at) {
             unsigned char vi[0x60];
-            my_memset(vi, 0, sizeof(vi));
+            out_prefill(vi, sizeof(vi));
             const int32_t r = sceKernelVirtualQuery((void*)at, 1, vi, 0x48);
             l.c(ncode(r));
             if (r == 0) {
                 uint64_t st = 0;
                 for (int k = 7; k >= 0; k--)
                     st = (st << 8) | vi[k];
-                l.c(':').hex(st);
+                l.c(':');
+                where(l, "next", st, 0);
             }
         };
         unsigned char v0[0x60];
-        my_memset(v0, 0, sizeof(v0));
+        out_prefill(v0, sizeof(v0));
         l.c(ncode(sceKernelVirtualQuery((void*)0x7EFFFC000ull, 0, v0, 0x48))).s(" | ");
         vq1(0x7EFFFC000ull);
         l.s(" | ");
@@ -7492,7 +7808,7 @@ static void run_followups() {
         l.c(ncode(r)).c(' ');
         if (r == 0) {
             vq1(0x7EFFFC000ull);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
         unk(l).end();
@@ -7504,24 +7820,24 @@ static void run_followups() {
         size_t a0 = 0, a1 = 0;
         static const int counts[] = {16, 0, 17};
         for (int n : counts) {
-            sceKernelAvailableFlexibleMemorySize(&a0);
+            HF(sceKernelAvailableFlexibleMemorySize(&a0));
             int made = 0;
             void* one = 0;
             if (n == 0) {
-                made = sceKernelMapFlexibleMemory(&one, 0x100000, 0x3, 0) == 0;
+                made = okc(sceKernelMapFlexibleMemory(&one, 0x100000, 0x3, 0));
             } else {
                 for (int i = 0; i < n; i++)
-                    made += sceKernelMapFlexibleMemory(&maps[i], 0x10000, 0x3, 0) == 0;
+                    made += okc(sceKernelMapFlexibleMemory(&maps[i], 0x10000, 0x3, 0));
             }
-            sceKernelAvailableFlexibleMemorySize(&a1);
+            HF(sceKernelAvailableFlexibleMemorySize(&a1));
             l.dec(made).c(':').hex((uint64_t)(a0 - a1)).c(' ');
             if (n == 0) {
                 if (one)
-                    sceKernelMunmap(one, 0x100000);
+                    HF(sceKernelMunmap(one, 0x100000));
             } else {
                 for (int i = 0; i < n; i++)
                     if (maps[i])
-                        sceKernelMunmap(maps[i], 0x10000);
+                        HF(sceKernelMunmap(maps[i], 0x10000));
             }
             for (int i = 0; i < 17; i++)
                 maps[i] = 0;
@@ -7530,13 +7846,15 @@ static void run_followups() {
     }
     {
         say("PX3 starting");
-        Line l = head("PX3", "POSIX mmap name - return address of the function calling mmap");
+        // rel is against px3_mk, the function calling mmap (until round 127 against its return
+        // address); site C: the name is the mmap call's return address, P: px3_mk's own
+        Line l = head("PX3", "POSIX mmap name: rel to the function calling mmap, site");
         void* m = px3_mk();
         if (m == (void*)-1) {
             px_ret(l, -1);
         } else {
             l.s("ok");
-            vq_rel(l, (uint64_t)m, g_px3_ret);
+            vq_rel(l, (uint64_t)m, (uint64_t)&px3_mk, g_px3_ret);
             munmap(m, 0x4000);
         }
         l.end();
@@ -7592,7 +7910,7 @@ static void run_rg() {
             vq_field(l, (uint64_t)m, (uint64_t)m);
             l.s(" |");
             rg_jit(l, (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -7608,7 +7926,7 @@ static void run_rg() {
             px_ret(l, mprotect(m, PG, 0x37));
             l.s(" |");
             rg_jit(l, (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -7624,7 +7942,7 @@ static void run_rg() {
             vq_field(l, (uint64_t)m, (uint64_t)m);
             l.s(" |");
             rg_jit(l, (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -7649,17 +7967,17 @@ static void run_last() {
             int32_t n = -1;
             l.c(ncode(sceKernelBatchMap(e, 3, &n))).c(' ').dec(n).s(" | ");
             rv_prot(l, R);
-            sceKernelMunmap(R, PG);
+            HF(sceKernelMunmap(R, PG));
             unk(l).end();
         }
-            sceKernelMunmap(v, 0x200000);
+            HF(sceKernelMunmap(v, 0x200000));
         }
         release_all(pa, 1);
     }
     {
         const uint64_t blk = 0x10000;
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 2 * blk, blk, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             uint8_t* R = (uint8_t*)rv;
@@ -7747,7 +8065,7 @@ static void run_last() {
             }
             unk(l).end();
         }
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         }
     }
 }
@@ -7829,6 +8147,7 @@ static void run_bp() {
     bp_step("BP10", "allocate 64K (args not in the log)", sceKernelAllocateDirectMemory(0, g_dmem, blk, blk, 0, &pa), OK, nullptr);
     bp_step("BP11", "checked release the pool block", sceKernelCheckedReleaseDirectMemory((long)px1, blk), ENOENT_, nullptr);
     unsigned char info[0x18];
+    out_prefill(info, sizeof(info));
     bp_step("BP12", "dmem query 0 the pool block", sceKernelDirectMemoryQuery((long)px1, 0, info, sizeof(info)), EACCES_, nullptr);
     bp_step("BP13", "dmem query 1 the pool block", sceKernelDirectMemoryQuery((long)px1, 1, info, sizeof(info)), EACCES_, nullptr);
     int32_t t = 0;
@@ -7850,7 +8169,7 @@ static void run_bp() {
     bp_step("BP19", "mprotect bp2 2M rw+gpu rw", sceKernelMprotect(bp2, 0x200000, 0x33), OK, "0/1/2/1");
     bp_step("BP20", "munmap bp2-10000 2M+10000", sceKernelMunmap(bp2 - blk, 0x200000 + blk), OK, "2/2/0/0");
     if (pa >= 0)
-        sceKernelReleaseDirectMemory(pa, blk);
+        HF(sceKernelReleaseDirectMemory(pa, blk));
 }
 
 // ---- BT (near the end): every bit of every flags/protection parameter, every value of every type
@@ -7875,7 +8194,7 @@ static uint8_t* g_bt_pool = nullptr;
 
 static int32_t bt_unmap_ret(int32_t r, void* m, uint64_t len) {
     if (r == 0 && m)
-        sceKernelMunmap(m, len);
+        HF(sceKernelMunmap(m, len));
     return r;
 }
 
@@ -7893,7 +8212,7 @@ static void run_bt() {
     }
     // enough pool blocks that the pool sweeps are not decided by running out of them
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 0x80000, 0x10000, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x80000, 0x10000, &px));
     {
         void* rv = 0;
         g_bt_pool = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0 ? (uint8_t*)rv : nullptr;
@@ -7944,35 +8263,35 @@ static void run_bt() {
         if (!g_bt_flex)
             return -1;
         const int32_t r = sceKernelMprotect(g_bt_flex, PG, (int32_t)(1u << b));
-        sceKernelMprotect(g_bt_flex, PG, 0x3);
+        HF(sceKernelMprotect(g_bt_flex, PG, 0x3));
         return r;
     });
     bt_bits("BT12", "mprotect direct: prot bit", 32, [](int b) {
         if (!g_bt_dmem)
             return -1;
         const int32_t r = sceKernelMprotect(g_bt_dmem, PG, (int32_t)(1u << b));
-        sceKernelMprotect(g_bt_dmem, PG, 0x3);
+        HF(sceKernelMprotect(g_bt_dmem, PG, 0x3));
         return r;
     });
     bt_bits("BT13", "mprotect pool committed: prot bit", 32, [](int b) {
         if (!g_bt_pool)
             return -1;
         const int32_t r = sceKernelMprotect(g_bt_pool, 0x10000, (int32_t)(1u << b));
-        sceKernelMprotect(g_bt_pool, 0x10000, 0x3);
+        HF(sceKernelMprotect(g_bt_pool, 0x10000, 0x3));
         return r;
     });
     bt_bits("BT14", "mtypeprotect direct t0: prot bit", 32, [](int b) {
         if (!g_bt_dmem)
             return -1;
         const int32_t r = sceKernelMtypeprotect(g_bt_dmem, PG, 0, (int32_t)(1u << b));
-        sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3);
+        HF(sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3));
         return r;
     });
     bt_bits("BT15", "mtypeprotect direct rw: type value", 32, [](int t) {
         if (!g_bt_dmem)
             return -1;
         const int32_t r = sceKernelMtypeprotect(g_bt_dmem, PG, t, 0x3);
-        sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3);
+        HF(sceKernelMtypeprotect(g_bt_dmem, PG, 0, 0x3));
         return r;
     });
     bt_bits("BT16", "PoolReserve flags bit", 32, [](int b) {
@@ -7988,7 +8307,7 @@ static void run_bt() {
             return -1;
         const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, 0, 0x3, (int32_t)(1u << b));
         if (r == 0)
-            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+            HF(sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0));
         return r;
     });
     bt_bits("BT19", "PoolCommit t0: prot bit", 32, [](int b) {
@@ -7996,7 +8315,7 @@ static void run_bt() {
             return -1;
         const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, 0, (int32_t)(1u << b), 0);
         if (r == 0)
-            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+            HF(sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0));
         return r;
     });
     bt_bits("BT20", "PoolCommit read: type value", 32, [](int t) {
@@ -8004,7 +8323,7 @@ static void run_bt() {
             return -1;
         const int32_t r = sceKernelMemoryPoolCommit(g_bt_pool + 0x10000, 0x10000, t, 0x1, 0);
         if (r == 0)
-            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+            HF(sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0));
         return r;
     });
     bt_bits("BT21", "PoolDecommit flags bit", 32, [](int b) {
@@ -8012,30 +8331,31 @@ static void run_bt() {
             return -1;
         const int32_t r = sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, (int32_t)(1u << b));
         if (r != 0)
-            sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0);
+            HF(sceKernelMemoryPoolDecommit(g_bt_pool + 0x10000, 0x10000, 0));
         return r;
     });
     bt_bits("BT22", "AllocateDirectMemory: type value", 32, [](int t) {
         long p = -1;
         const int32_t r = sceKernelAllocateDirectMemory(0, g_dmem, PG, PG, t, &p);
         if (r == 0)
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         return r;
     });
     bt_bits("BT23", "AllocateDirectMemory: alignment 1<<k", 40, [](int k) {
         long p = -1;
         const int32_t r = sceKernelAllocateDirectMemory(0, g_dmem, PG, 1ull << k, 0, &p);
         if (r == 0)
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         return r;
     });
     bt_bits("BT24", "VirtualQuery flags bit", 32, [](int b) {
         unsigned char vi[0x60];
-        my_memset(vi, 0, sizeof(vi));
+        out_prefill(vi, sizeof(vi));
         return g_bt_flex ? sceKernelVirtualQuery(g_bt_flex, (int32_t)(1u << b), vi, 0x48) : -1;
     });
     bt_bits("BT25", "DirectMemoryQuery flags bit", 32, [](int b) {
         unsigned char info[0x18];
+        out_prefill(info, sizeof(info));
         return g_bt_pa < 0 ? -1 : sceKernelDirectMemoryQuery(g_bt_pa, (int32_t)(1u << b), info, sizeof(info));
     });
     bt_bits("BT26", "BatchMap2 (one protect entry) flags bit", 32, [](int b) {
@@ -8076,11 +8396,11 @@ static void run_bt() {
         l.end();
     }
     if (g_bt_pool)
-        sceKernelMunmap(g_bt_pool, 0x200000);
+        HF(sceKernelMunmap(g_bt_pool, 0x200000));
     if (g_bt_dmem)
-        sceKernelMunmap(g_bt_dmem, PG);
+        HF(sceKernelMunmap(g_bt_dmem, PG));
     if (g_bt_flex)
-        sceKernelMunmap(g_bt_flex, PG);
+        HF(sceKernelMunmap(g_bt_flex, PG));
     release_all(g_bt_pa, 1);
 }
 
@@ -8091,7 +8411,7 @@ static void run_bt() {
 // VirtualQuery protection and flags of one address, as "p<prot>/f<flags>"
 static void sf_vq(Line& l, const void* at) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     const int32_t r = sceKernelVirtualQuery((void*)at, 0, vi, 0x48);
     if (r != 0) {
         l.s("vq").c(ncode(r));
@@ -8109,12 +8429,12 @@ static void run_sf() {
         int32_t r = sceKernelMapFlexibleMemory(&m, 0x2000, 0x3, 0);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         m = 0;
         r = sceKernelMapFlexibleMemory(&m, 0x6000, 0x3, 0);
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, 0x8000);
+            HF(sceKernelMunmap(m, 0x8000));
         unk(l).end();
     }
     char path[64];
@@ -8129,24 +8449,24 @@ static void run_sf() {
         int32_t r = sceKernelMmap(0, PG, 0x3, 0x1002, -1, 0x4000, &m);
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = fd >= 0 ? sceKernelMmap(0, PG, 0x3, 0x1002, fd, 0, &m) : -1;
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMmap(0, PG, 0x3, 0x102, -1, 0x4000, &m);
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMmap(0, PG, 0x3, 0x102, -1, 0, &m);
         l.s(" | ").c(ncode(r));
         if (r == 0) {
             l.c(' ');
             sf_vq(l, m); // :626 void forces prot 0
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         unk(l).end();
     }
@@ -8157,26 +8477,26 @@ static void run_sf() {
         int32_t r = sceKernelMmap(0, PG, 0x1, 0x1402, -1, 0, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = fd >= 0 ? sceKernelMmap(0, PG, 0x3, 0x0402, fd, 0, &m) : -1;
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMmap(0, PG, 0x3, 0x1402, -1, 0, &m);
         l.s(" | ").c(ncode(r));
         if (r == 0) {
             l.c(' ');
             sf_vq(l, m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         void* hi = (void*)0xFC00000000ull;
         m = hi;
         r = sceKernelMmap(hi, PG, 0x3, 0x1412, -1, 0, &m);
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         uint8_t* f = nu_flex2();
         if (f) {
             m = f;
@@ -8184,7 +8504,7 @@ static void run_sf() {
             l.s(" | ").c(ncode(r));
             l.c(' ');
             nu_page(l, f);
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
         }
         unk(l).end();
     }
@@ -8193,12 +8513,12 @@ static void run_sf() {
         Line l = head("SF4", ":257 fixed file, addr offset != file offset | :419 directory");
         uint8_t* f = nu_flex2();
         if (f && fd >= 0) {
-            sceKernelMunmap(f, 2 * PG);
+            HF(sceKernelMunmap(f, 2 * PG));
             void* m = f + 0x1000;
             const int32_t r = sceKernelMmap(f + 0x1000, PG, 0x1, 0x11, fd, 0, &m);
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         }
         const int dfd = sceKernelOpen("/data", 0x0000, 0);
         l.s(" | open ").c(dfd >= 0 ? 'o' : ncode(dfd));
@@ -8207,7 +8527,7 @@ static void run_sf() {
             const int32_t r = sceKernelMmap(0, PG, 0x1, 0x1, dfd, 0, &m);
             l.c(' ').c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             sceKernelClose(dfd);
         }
         unk(l).end();
@@ -8218,9 +8538,22 @@ static void run_sf() {
         // :548-:905 each named anon flag: result, VirtualQuery protection/flags, 2 MiB aligned, and a
         // write read back when the mapping reads back writable
         say("SF5 starting");
+        // a: whether a flag makes the address 2 MiB aligned. Round 128: a one-page flexible mapping
+        // is held during the probe and a plain anonymous mapping made first ("plain="), so the
+        // column means something only where plain is '-' (until round 127 the search alone put
+        // every mapping at an aligned address on shadPS4 and at an unaligned one on the PS4).
         Line l = head("SF5", ":548 anon flag: code p/f a(2M aligned) w(write ok)");
         static const int32_t flags[] = {0x1,    0x2,     0x200,   0x800,    0x2000,  0x4000,
                                         0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x800000};
+        void* spacer = 0;
+        HF(sceKernelMapFlexibleMemory(&spacer, PG, 0x3, 0));
+        {
+            void* m = 0;
+            const int32_t r = sceKernelMmap(0, PG, 0x3, 0x1002, -1, 0, &m);
+            l.s("plain=").c(r != 0 ? ncode(r) : ((uint64_t)m & 0x1FFFFF) == 0 ? 'a' : '-').c(' ');
+            if (r == 0)
+                HF(sceKernelMunmap(m, PG));
+        }
         for (int32_t fl : flags) {
             void* m = 0;
             const int32_t base = (fl == 0x1 || fl == 0x2) ? 0x1000 : 0x1002;
@@ -8234,10 +8567,12 @@ static void run_sf() {
                     *(volatile uint32_t*)m = 0xA5A5A5A5;
                     l.c(*(volatile uint32_t*)m == 0xA5A5A5A5 ? 'w' : 'x');
                 }
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             l.c(' ');
         }
+        if (spacer)
+            HF(sceKernelMunmap(spacer, PG));
         unk(l).end();
     }
     {
@@ -8248,13 +8583,13 @@ static void run_sf() {
         const long pa = alloc(1, 0, &rr);
         if (pa >= 0) {
             void* a0 = 0;
-            sceKernelReserveVirtualRange(&a0, PG, 0, 0);
-            sceKernelMunmap(a0, PG);
+            HF(sceKernelReserveVirtualRange(&a0, PG, 0, 0));
+            HF(sceKernelMunmap(a0, PG));
             auto mk = [&](uint64_t at, size_t len, int32_t flags, long phys, size_t align) {
                 void* m = (void*)at;
                 const int32_t r = sceKernelMapDirectMemory2(&m, len, 0, 0x1, flags, phys, align);
                 if (r == 0)
-                    sceKernelMunmap(m, len ? len : PG);
+                    HF(sceKernelMunmap(m, len ? len : PG));
                 return r;
             };
             const uint64_t A = (uint64_t)a0;
@@ -8280,26 +8615,26 @@ static void run_sf() {
             if (r == 0) {
                 int32_t t = -1;
                 long s0 = 0, e0 = 0;
-                sceKernelGetDirectMemoryType(pa, &t, &s0, &e0);
+                HF(sceKernelGetDirectMemoryType(pa, &t, &s0, &e0));
                 l.s(" t=").dec(t);
                 // overlap: the same physical page mapped a second time
                 void* m2 = 0;
                 const int32_t r2 = sceKernelMapDirectMemory2(&m2, PG, 3, 0x3, 0, pa, PG);
                 l.s(" | overlap ").c(ncode(r2));
                 if (r2 == 0)
-                    sceKernelMunmap(m2, PG);
-                sceKernelMunmap(m, PG);
+                    HF(sceKernelMunmap(m2, PG));
+                HF(sceKernelMunmap(m, PG));
             }
             m = 0;
             r = sceKernelMapDirectMemory2(&m, PG, -2, 0x3, 0, pa, PG);
             l.s(" | ").c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             m = 0;
             r = sceKernelMapDirectMemory2(&m, PG, 10, 0x1, 0, pa, PG);
             l.s(" | ").c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -8323,9 +8658,9 @@ static void run_sf8() {
         const int32_t r2 = r == 0 ? sceKernelMapDirectMemory(&m2, PG, 0x3, 0, pa, PG) : -1;
         l.s(" | ").c(ncode(r)).c(ncode(r2));
         if (r2 == 0)
-            sceKernelMunmap(m2, PG);
+            HF(sceKernelMunmap(m2, PG));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
     }
     release_all(pa, 1);
     unk(l).end();
@@ -8340,7 +8675,7 @@ static long av_free_area() {
     long r = -1;
     if (sceKernelAllocateDirectMemory(0, g_dmem, 0x400000, 0x200000, 0, &r) != 0)
         return -1;
-    sceKernelReleaseDirectMemory(r, 0x400000);
+    HF(sceKernelReleaseDirectMemory(r, 0x400000));
     return r;
 }
 
@@ -8386,7 +8721,7 @@ static void run_av_al() {
         long mid = -1;
         if (sceKernelAllocateDirectMemory(R + 0x100000, R + 0x104000, 0x4000, 0x4000, 0, &mid) == 0) {
             av_line(l, R, R, R + 0x400000, 0x4000);
-            sceKernelReleaseDirectMemory(mid, 0x4000);
+            HF(sceKernelReleaseDirectMemory(mid, 0x4000));
             av_line(l, R, R, R + 0x400000, 0x4000); // :1381 after the release
         }
         unk(l).end();
@@ -8398,9 +8733,9 @@ static void run_av_al() {
         if (r == 0) {
             int32_t t = 0;
             long rs = 0, re = 0;
-            sceKernelGetDirectMemoryType(p, &t, &rs, &re);
+            HF(sceKernelGetDirectMemoryType(p, &t, &rs, &re));
             l.c(':').shex((long long)(p - R)).c('+').hex((uint64_t)(re - rs));
-            sceKernelReleaseDirectMemory(p, len);
+            HF(sceKernelReleaseDirectMemory(p, len));
         }
         l.c(' ');
     };
@@ -8433,7 +8768,7 @@ static void run_av_al() {
         long first = -1;
         if (sceKernelAllocateDirectMemory(R, R + 0x4000, 0x4000, 0x4000, 0, &first) == 0) {
             al(l, R, R + 0x400000, 0x4000, 0x20000, 0);
-            sceKernelReleaseDirectMemory(first, 0x4000);
+            HF(sceKernelReleaseDirectMemory(first, 0x4000));
         }
         unk(l).end();
     }
@@ -8443,7 +8778,7 @@ static void run_av_al() {
 //      mappings and the flexible budget. Nothing is written into device memory. -------------------------
 static void df_vq(Line& l, const void* at, uint64_t rel_to) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     const int32_t r = sceKernelVirtualQuery((void*)at, 0, vi, 0x48);
     l.c(ncode(r));
     if (r != 0)
@@ -8473,9 +8808,10 @@ static void run_df() {
                 df_vq(l, m, (uint64_t)pa);
                 l.s(" | ").c(ncode(sceKernelReleaseDirectMemory(pa, 0x10000))).c(' ');
                 unsigned char vi[0x60];
+                out_prefill(vi, sizeof(vi));
                 l.c(ncode(sceKernelVirtualQuery(m, 0, vi, 0x48)));
             } else {
-                sceKernelReleaseDirectMemory(pa, 0x10000);
+                HF(sceKernelReleaseDirectMemory(pa, 0x10000));
             }
         }
         unk(l).end();
@@ -8495,11 +8831,11 @@ static void run_df() {
                         l.c(' ');
                         df_vq(l, m, (uint64_t)pa);
                     }
-                    sceKernelMunmap(m, 0x10000);
+                    HF(sceKernelMunmap(m, 0x10000));
                 }
                 l.c(' ');
             }
-            sceKernelReleaseDirectMemory(pa, 0x10000);
+            HF(sceKernelReleaseDirectMemory(pa, 0x10000));
         } else {
             l.s("SKIP");
         }
@@ -8519,13 +8855,13 @@ static void run_df() {
             if (r == 0) {
                 l.s(" | ");
                 df_vq(l, m, 0);
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             m = 0;
             r = sceKernelMmap(0, 0x4000, 0x3, 0x2, gfd, 0, &m);
             l.s(" | ").c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
         }
         unk(l).end();
     }
@@ -8548,14 +8884,14 @@ static void run_df() {
             }
         }
         size_t avail = 1;
-        sceKernelAvailableFlexibleMemorySize(&avail);
+        HF(sceKernelAvailableFlexibleMemorySize(&avail));
         l.s("maps=").dec(n).s(" avail=").hex((uint64_t)avail);
         if (gfd > 0) {
             void* m = 0;
             const int32_t r = sceKernelMmap(0, 0x4000, 0x3, 0, gfd, 0, &m);
             l.s(" | ").c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
         }
         char path[96];
         const char* word = sceKernelGetFsSandboxRandomWord();
@@ -8573,11 +8909,11 @@ static void run_df() {
             const int32_t r = sceKernelMmap(0, 0x4000, 0x3, 0, sfd, 0, &m);
             l.c(' ').c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             sceKernelClose(sfd);
         }
         for (int i = 0; i < n; i++)
-            sceKernelMunmap(maps[i], lens[i]);
+            HF(sceKernelMunmap(maps[i], lens[i]));
         unk(l).end();
     }
     if (gfd > 0)
@@ -8624,7 +8960,7 @@ static void run_fm_fx() {
             unsigned char got[16];
             fm_read_at(fd, 0, got, 16);
             l.s(" | ").c(got[1] == 7 ? 'y' : 'n');
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         }
         if (fd >= 0)
             sceKernelClose(fd);
@@ -8642,7 +8978,7 @@ static void run_fm_fx() {
             const uint64_t base = a & ~(uint64_t)0x3FFF;
             l.s(" ").hex(a & 0x3FFF).s(" | ");
             unsigned char vi[0x60];
-            my_memset(vi, 0, sizeof(vi));
+            out_prefill(vi, sizeof(vi));
             if (sceKernelVirtualQuery((void*)base, 0, vi, 0x48) == 0) {
                 uint64_t st = 0, en = 0, off = 0;
                 for (int k = 7; k >= 0; k--) {
@@ -8653,7 +8989,7 @@ static void run_fm_fx() {
                 l.shex((long long)(st - base)).c('-').shex((long long)(en - base)).s(" | ").hex(off);
             }
             l.s(" | ").c(*(volatile unsigned char*)m == (unsigned char)((0x5000 * 7) & 0xFF) ? 'y' : 'n');
-            sceKernelMunmap((void*)base, 0x10000);
+            HF(sceKernelMunmap((void*)base, 0x10000));
         }
         if (fd >= 0)
             sceKernelClose(fd);
@@ -8671,7 +9007,7 @@ static void run_fm_fx() {
             for (int k = 0; k < 16; k++)
                 b[k] = 0;
             l.s(" | ").c(b[1] == 0 ? 'y' : 'n');
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
             unsigned char got[16];
             fm_read_at(fd, 0, got, 16);
             l.s(" | ").c(got[1] == 0 ? 'y' : 'n');
@@ -8686,39 +9022,39 @@ static void run_fm_fx() {
         Line l = head("FX1", "budget drop for 1M: flex | anon | stack | void | 64K /data file");
         auto drop = [&](int32_t (*mk)(void**)) {
             size_t a0 = 0, a1 = 0;
-            sceKernelAvailableFlexibleMemorySize(&a0);
+            HF(sceKernelAvailableFlexibleMemorySize(&a0));
             void* m = 0;
             const int32_t r = mk(&m);
             l.c(ncode(r));
             if (r == 0) {
-                sceKernelAvailableFlexibleMemorySize(&a1);
+                HF(sceKernelAvailableFlexibleMemorySize(&a1));
                 l.c(':').hex((uint64_t)(a0 - a1));
             }
             return m;
         };
         void* m = drop([](void** o) { return sceKernelMapFlexibleMemory(o, 0x100000, 0x3, 0); });
-        if (m) sceKernelMunmap(m, 0x100000);
+        if (m) HF(sceKernelMunmap(m, 0x100000));
         l.s(" | ");
         m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x3, 0x1002, -1, 0, o); });
-        if (m) sceKernelMunmap(m, 0x100000);
+        if (m) HF(sceKernelMunmap(m, 0x100000));
         l.s(" | ");
         m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x3, 0x1402, -1, 0, o); });
-        if (m) sceKernelMunmap(m, 0x100000);
+        if (m) HF(sceKernelMunmap(m, 0x100000));
         l.s(" | ");
         m = drop([](void** o) { return sceKernelMmap(0, 0x100000, 0x0, 0x102, -1, 0, o); });
-        if (m) sceKernelMunmap(m, 0x100000);
+        if (m) HF(sceKernelMunmap(m, 0x100000));
         l.s(" | ");
         const int fd = fm_file(path);
         if (fd >= 0) {
             size_t a0 = 0, a1 = 0;
-            sceKernelAvailableFlexibleMemorySize(&a0);
+            HF(sceKernelAvailableFlexibleMemorySize(&a0));
             void* f = 0;
             const int32_t r = sceKernelMmap(0, 0x10000, 0x1, 0x1, fd, 0, &f);
             l.c(ncode(r));
             if (r == 0) {
-                sceKernelAvailableFlexibleMemorySize(&a1);
+                HF(sceKernelAvailableFlexibleMemorySize(&a1));
                 l.c(':').hex((uint64_t)(a0 - a1));
-                sceKernelMunmap(f, 0x10000);
+                HF(sceKernelMunmap(f, 0x10000));
             }
             sceKernelClose(fd);
         }
@@ -8730,7 +9066,7 @@ static void run_fm_fx() {
         void* m = 0;
         if (sceKernelMapFlexibleMemory(&m, PG, 0x3, 0) == 0) {
             vq_field(l, (uint64_t)m, (uint64_t)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         unk(l).end();
     }
@@ -8742,7 +9078,7 @@ static void run_fm_fx() {
             uint8_t* m = (uint8_t*)v;
             for (int p = 0; p < 3; p++)
                 *(volatile uint32_t*)(m + p * PG) = 0x11111111;
-            sceKernelMunmap(m + PG, PG);
+            HF(sceKernelMunmap(m + PG, PG));
             const bool kept = *(volatile uint32_t*)m == 0x11111111 &&
                               *(volatile uint32_t*)(m + 2 * PG) == 0x11111111;
             l.c(kept ? 'y' : 'n');
@@ -8758,7 +9094,7 @@ static void run_fm_fx() {
             l.s(" | ").c(ncode(r2));
             if (r2 == 0)
                 l.c(' ').c(*(volatile uint32_t*)m == 0x11111111 ? 'y' : 'n');
-            sceKernelMunmap(m, 3 * PG);
+            HF(sceKernelMunmap(m, 3 * PG));
         }
         unk(l).end();
     }
@@ -8797,23 +9133,23 @@ static void run_dt() {
         int32_t r = sceKernelMapDirectMemory2(&m, PG, 0, 0x3, 0, R, PG);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         const long p = dt_alloc_at(R, 0);
         m = 0;
         if (p >= 0 && sceKernelMapDirectMemory(&m, PG, 0x3, 0, p, PG) == 0) {
             l.s(" | ");
             vq_field(l, (uint64_t)m, (uint64_t)m);
             unsigned char vi[0x60];
-            my_memset(vi, 0, sizeof(vi));
-            sceKernelVirtualQuery(m, 0, vi, 0x48);
+            out_prefill(vi, sizeof(vi));
+            HF(sceKernelVirtualQuery(m, 0, vi, 0x48));
             uint64_t off = 0;
             for (int k = 7; k >= 0; k--)
                 off = (off << 8) | vi[0x10 + k];
             l.s(" off-phys=").shex((long long)(off - (uint64_t)p));
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         if (p >= 0)
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         unk(l).end();
     }
     {
@@ -8838,14 +9174,14 @@ static void run_dt() {
             void* c = 0;
             if (q == p && sceKernelMapDirectMemory(&c, PG, 0x3, 0, q, PG) == 0) {
                 l.s(" | ").c(*(volatile uint32_t*)c == 0x5A5A1234 ? 'y' : 'n');
-                sceKernelMunmap(c, PG);
+                HF(sceKernelMunmap(c, PG));
             }
             if (q >= 0)
-                sceKernelReleaseDirectMemory(q, PG);
+                HF(sceKernelReleaseDirectMemory(q, PG));
         } else {
             l.s("SKIP");
             if (p >= 0)
-                sceKernelReleaseDirectMemory(p, PG);
+                HF(sceKernelReleaseDirectMemory(p, PG));
         }
         unk(l).end();
     }
@@ -8856,29 +9192,29 @@ static void run_dt() {
         void* m = 0;
         if (sceKernelAllocateDirectMemory(R, R + 3 * PG, 3 * PG, PG, 0, &p) == 0 &&
             sceKernelMapDirectMemory(&m, 3 * PG, 0x3, 0, p, PG) == 0) {
-            sceKernelReleaseDirectMemory(p + PG, PG);
+            HF(sceKernelReleaseDirectMemory(p + PG, PG));
             uint8_t* b = (uint8_t*)m;
             nu_page(l, b);
             l.c(',');
             nu_page(l, b + PG);
             l.c(',');
             nu_page(l, b + 2 * PG);
-            sceKernelMunmap(m, 3 * PG);
+            HF(sceKernelMunmap(m, 3 * PG));
             void* m1 = 0;
             int32_t r = sceKernelMapDirectMemory(&m1, 3 * PG, 0x3, 0, p, PG);
             l.s(" | ").c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m1, 3 * PG);
+                HF(sceKernelMunmap(m1, 3 * PG));
             m1 = 0;
             r = sceKernelMapDirectMemory2(&m1, 3 * PG, -1, 0x3, 0, p, PG);
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m1, 3 * PG);
-            sceKernelReleaseDirectMemory(p, 3 * PG);
+                HF(sceKernelMunmap(m1, 3 * PG));
+            HF(sceKernelReleaseDirectMemory(p, 3 * PG));
         } else {
             l.s("SKIP");
             if (p >= 0)
-                sceKernelReleaseDirectMemory(p, 3 * PG);
+                HF(sceKernelReleaseDirectMemory(p, 3 * PG));
         }
         unk(l).end();
     }
@@ -8898,7 +9234,7 @@ static void run_dt() {
                     l.c('-'); // type 10 cannot be written by the CPU
                 } else {
                     *(volatile uint32_t*)m = 0xC0DE0000u + (uint32_t)t;
-                    sceKernelMunmap(m, PG);
+                    HF(sceKernelMunmap(m, PG));
                     m = 0;
                     if (sceKernelMapDirectMemory(&m, PG, prot, 0, p, PG) == 0)
                         l.c(*(volatile uint32_t*)m == 0xC0DE0000u + (uint32_t)t ? 'y' : 'n');
@@ -8906,11 +9242,11 @@ static void run_dt() {
                         l.c('m');
                 }
                 if (m)
-                    sceKernelMunmap(m, PG);
+                    HF(sceKernelMunmap(m, PG));
             } else {
                 l.c('m');
             }
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         }
         unk(l).end();
     }
@@ -8927,16 +9263,16 @@ static void run_dt() {
             l.c(' ');
             dt_area(l, R, b);
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             l.s(" | ");
             dt_area(l, R, a);
         } else {
             l.s("SKIP");
         }
         if (a >= 0)
-            sceKernelReleaseDirectMemory(a, PG);
+            HF(sceKernelReleaseDirectMemory(a, PG));
         if (b >= 0)
-            sceKernelReleaseDirectMemory(b, PG);
+            HF(sceKernelReleaseDirectMemory(b, PG));
         unk(l).end();
     }
     {
@@ -8949,18 +9285,18 @@ static void run_dt() {
             const int32_t r = p >= 0 ? sceKernelMapDirectMemory(&m, PG, pr, 0, p, PG) : -1;
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         }
         if (p >= 0)
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         const long q = dt_alloc_at(R, 0);
         void* m = 0;
         const int32_t r = q >= 0 ? sceKernelMapDirectMemory2(&m, PG, 10, 0x3, 0, q, PG) : -1;
         l.s(" | ").c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         if (q >= 0)
-            sceKernelReleaseDirectMemory(q, PG);
+            HF(sceKernelReleaseDirectMemory(q, PG));
         unk(l).end();
     }
     {
@@ -8979,7 +9315,7 @@ static void run_dt() {
                 l.s(" | ");
             if (api == 2 && p >= 0) {
                 // MapDirectMemory2 sets the type itself: the same page again, allocated as type 0
-                sceKernelReleaseDirectMemory(p, PG);
+                HF(sceKernelReleaseDirectMemory(p, PG));
                 p = -1;
             }
             const long q = api == 2 ? dt_alloc_at(R, 0) : p;
@@ -8997,15 +9333,15 @@ static void run_dt() {
                     }
                     l.c(ncode(r));
                     if (r == 0)
-                        sceKernelMunmap(m, PG);
+                        HF(sceKernelMunmap(m, PG));
                 }
                 l.c(' ');
             }
             if (api == 2 && q >= 0)
-                sceKernelReleaseDirectMemory(q, PG);
+                HF(sceKernelReleaseDirectMemory(q, PG));
         }
         if (p >= 0)
-            sceKernelReleaseDirectMemory(p, PG);
+            HF(sceKernelReleaseDirectMemory(p, PG));
         unk(l).end();
     }
     {
@@ -9018,7 +9354,7 @@ static void run_dt() {
         const long a4 = dt_alloc_at(R + 3 * PG, 3);
         void* m = 0;
         if (a1 >= 0 && sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, a1, PG) == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         const long a3 = dt_alloc_at(R + 2 * PG, 3);
         for (int i = 0; i < 4; i++) {
             dt_area(l, R, R + i * PG);
@@ -9029,7 +9365,7 @@ static void run_dt() {
         (void)a2;
         (void)a3;
         (void)a4;
-        sceKernelReleaseDirectMemory(R, 4 * PG);
+        HF(sceKernelReleaseDirectMemory(R, 4 * PG));
         unk(l).end();
     }
     {
@@ -9039,7 +9375,7 @@ static void run_dt() {
         const long b = dt_alloc_at(R + PG, 3);
         void* m = 0;
         if (a >= 0 && sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, a, PG) == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         if (a >= 0 && b >= 0) {
             m = 0;
             int32_t r = sceKernelMapDirectMemory2(&m, 2 * PG, -1, 0x3, 0, a, PG);
@@ -9048,7 +9384,7 @@ static void run_dt() {
             l.c(' ');
             dt_area(l, R, R + PG);
             if (r == 0)
-                sceKernelMunmap(m, 2 * PG);
+                HF(sceKernelMunmap(m, 2 * PG));
             m = 0;
             r = sceKernelMapDirectMemory2(&m, 2 * PG, 3, 0x3, 0, a, PG);
             l.s(" | ").c(ncode(r)).c(' ');
@@ -9056,11 +9392,11 @@ static void run_dt() {
             l.c(' ');
             dt_area(l, R, R + PG);
             if (r == 0)
-                sceKernelMunmap(m, 2 * PG);
+                HF(sceKernelMunmap(m, 2 * PG));
         } else {
             l.s("SKIP");
         }
-        sceKernelReleaseDirectMemory(R, 2 * PG);
+        HF(sceKernelReleaseDirectMemory(R, 2 * PG));
         unk(l).end();
     }
 }
@@ -9075,7 +9411,7 @@ static void co_scan(Line& l, uint64_t base, uint64_t size) {
     int n = 0;
     while (cur < base + size && n < 12) {
         unsigned char vi[0x60];
-        my_memset(vi, 0, sizeof(vi));
+        out_prefill(vi, sizeof(vi));
         if (sceKernelVirtualQuery((void*)cur, 1, vi, 0x48) != 0)
             break;
         uint64_t st = 0, en = 0;
@@ -9121,7 +9457,7 @@ static void co_kind(const char* id, const char* name, uint64_t piece, int32_t (*
     co_scan(l, base, 5 * piece);
     l.s(" | mlock ").c(ncode(sceKernelMlock((void*)base, 5 * piece))).c(' ');
     co_scan(l, base, 5 * piece);
-    sceKernelMunmap((void*)base, 5 * piece);
+    HF(sceKernelMunmap((void*)base, 5 * piece));
     unk(l).end();
 }
 
@@ -9153,10 +9489,10 @@ static void run_co() {
             void* o = (void*)at;
             r = sceKernelMapDirectMemory(&o, 0x20000, 0x33, 0x10, p, 0);
             if (r != 0)
-                sceKernelReleaseDirectMemory(p, 0x20000);
+                HF(sceKernelReleaseDirectMemory(p, 0x20000));
             return r;
         }, 0x3);
-        sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000);
+        HF(sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000));
     }
     char path[64];
     mf_named(path, "dmem_co.bin");
@@ -9197,10 +9533,10 @@ static void run_co() {
             void* o = (void*)at;
             r = sceKernelMapDirectMemory(&o, 0x20000, 0x3, 0x10, p, 0);
             if (r != 0)
-                sceKernelReleaseDirectMemory(p, 0x20000);
+                HF(sceKernelReleaseDirectMemory(p, 0x20000));
             return r;
         }, 0x1);
-        sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000);
+        HF(sceKernelReleaseDirectMemory(g_co_R, 5 * 0x20000));
     }
     // reservations in the middle of a larger range (pieces 1-5 of 7): left to right (1, 2), right to
     // left (5, 4), then the middle (3); the areas after each step
@@ -9229,7 +9565,7 @@ static void run_co() {
             put(3);
             l.c(' ');
             co_scan(l, b, 7 * 0x20000);
-            sceKernelMunmap(a, 7 * 0x20000);
+            HF(sceKernelMunmap(a, 7 * 0x20000));
         }
         unk(l).end();
     }
@@ -9260,7 +9596,7 @@ static void run_co() {
             l.c(' ');
             co_scan(l, b, c.pieces * 0x20000);
             l.s(" | ");
-            sceKernelMunmap(a, c.pieces * 0x20000);
+            HF(sceKernelMunmap(a, c.pieces * 0x20000));
         }
         unk(l).end();
     }
@@ -9291,7 +9627,7 @@ static void run_pt_tp() {
             co_scan(l, b, 5 * 0x20000);
             l.s(" | ").c(ncode(sceKernelMprotect((void*)b, 5 * 0x20000, 0x0))).c(' ');
             co_scan(l, b, 5 * 0x20000);
-            sceKernelMunmap(a, 5 * 0x20000);
+            HF(sceKernelMunmap(a, 5 * 0x20000));
         }
         unk(l).end();
     }
@@ -9305,13 +9641,13 @@ static void run_pt_tp() {
         const long pa = alloc(1, 0, &rr);
         if (pa >= 0 && sceKernelReserveVirtualRange(&a, 5 * PG, 0, 0) == 0) {
             uint8_t* b = (uint8_t*)a;
-            sceKernelMunmap(a, 5 * PG);
+            HF(sceKernelMunmap(a, 5 * PG));
             void* f = b;
             void* d = b + PG;
             void* n = b + 3 * PG;
-            sceKernelMapFlexibleMemory(&f, PG, 0x3, 0x10);
-            sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG);
-            sceKernelMmap(b + 3 * PG, PG, 0x3, 0x1012, -1, 0, &n);
+            HF(sceKernelMapFlexibleMemory(&f, PG, 0x3, 0x10));
+            HF(sceKernelMapDirectMemory(&d, PG, 0x3, 0x10, pa, PG));
+            HF(sceKernelMmap(b + 3 * PG, PG, 0x3, 0x1012, -1, 0, &n));
             l.c(ncode(sceKernelMprotect(b, 5 * PG, 0x1))).c(' ');
             for (int i = 0; i < 4; i++) {
                 nu_page(l, b + i * PG);
@@ -9319,7 +9655,7 @@ static void run_pt_tp() {
             }
             l.s("| ");
             co_scan(l, (uint64_t)b, 5 * PG);
-            sceKernelMunmap(b, 5 * PG);
+            HF(sceKernelMunmap(b, 5 * PG));
         } else {
             l.s("SKIP");
         }
@@ -9336,11 +9672,11 @@ static void run_pt_tp() {
             l.c(ncode(sceKernelMprotect(b + 0x3000, 0x10000, 0x1))).c(' ');
             for (int i = 0; i < 6; i++)
                 nu_page(l, b + i * PG);
-            sceKernelMprotect(b, 6 * PG, 0x3);
+            HF(sceKernelMprotect(b, 6 * PG, 0x3));
             l.s(" | ").c(ncode(sceKernelMprotect(b + 0x1000, 0xF000, 0x1))).c(' ');
             for (int i = 0; i < 6; i++)
                 nu_page(l, b + i * PG);
-            sceKernelMunmap(b, 6 * PG);
+            HF(sceKernelMunmap(b, 6 * PG));
         }
         unk(l).end();
     }
@@ -9356,9 +9692,9 @@ static void run_pt_tp() {
             l.s(" | ").c(ncode(sceKernelMtypeprotect(m, PG, 0, 0x3)));
             int32_t t = -1;
             long s0 = 0, e0 = 0;
-            sceKernelGetDirectMemoryType(pa, &t, &s0, &e0);
+            HF(sceKernelGetDirectMemoryType(pa, &t, &s0, &e0));
             l.s(" | t").dec(t);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -9389,12 +9725,12 @@ static void run_pt_tp() {
                 dt_area(l, R, p + i * PG);
                 l.c(i < 2 ? ',' : ' ');
             }
-            sceKernelMunmap(m, 3 * PG);
+            HF(sceKernelMunmap(m, 3 * PG));
         } else {
             l.s("SKIP");
         }
         if (p >= 0)
-            sceKernelReleaseDirectMemory(p, 3 * PG);
+            HF(sceKernelReleaseDirectMemory(p, 3 * PG));
         unk(l).end();
     }
     {
@@ -9404,12 +9740,12 @@ static void run_pt_tp() {
         if (sceKernelMapFlexibleMemory(&f, PG, 0x3, 0) == 0) {
             l.c(ncode(sceKernelMtypeprotect(f, PG, 11, 0x3)));
             l.c(ncode(sceKernelMtypeprotect(f, PG, 0, 0x3)));
-            sceKernelMunmap(f, PG);
+            HF(sceKernelMunmap(f, PG));
         }
         void* r = 0;
         if (sceKernelReserveVirtualRange(&r, PG, 0, 0) == 0) {
             l.c(ncode(sceKernelMtypeprotect(r, PG, 0, 0x3)));
-            sceKernelMunmap(r, PG);
+            HF(sceKernelMunmap(r, PG));
             l.c(ncode(sceKernelMtypeprotect(r, PG, 0, 0x3)));
         }
         unk(l).end();
@@ -9477,6 +9813,59 @@ __attribute__((noinline)) static int32_t fr_b(void* at, int32_t prot, int32_t fl
     void* o = 0;
     return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
 }
+__attribute__((noinline)) static int32_t fr_c(void* at, int32_t prot, int32_t flags) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
+}
+// The name of the page at `at`, as one of: a, b, c the call site name ("anon:" and an address
+// inside fr_a, fr_b, fr_c), M "Mapping" (what the FR probes rename to), 0 no name, - not reported
+// by VirtualQuery, otherwise the name in quotes (a call site name of another function as
+// "anon:<12x>").
+static void fr_name(Line& l, const void* at) {
+    unsigned char vi[0x60];
+    out_prefill(vi, sizeof(vi));
+    if (sceKernelVirtualQuery(at, 0, vi, 0x48) != 0) {
+        l.c('-');
+        return;
+    }
+    const char* nm = (const char*)vi + 0x21;
+    if (nm[0] == 0) {
+        l.c('0');
+        return;
+    }
+    const char* mp = "Mapping";
+    int k = 0;
+    while (mp[k] && nm[k] == mp[k])
+        k++;
+    if (mp[k] == 0 && nm[k] == 0) {
+        l.c('M');
+        return;
+    }
+    bool addr = nm[0] == 'a' && nm[1] == 'n' && nm[2] == 'o' && nm[3] == 'n' && nm[4] == ':' &&
+                nm[17] == 0;
+    uint64_t v = 0;
+    for (k = 5; addr && k < 17; k++) {
+        const char ch = nm[k];
+        addr = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        v = (v << 4) | (uint64_t)(ch >= 'a' ? ch - 'a' + 10 : ch - '0');
+    }
+    if (addr) {
+        static int32_t (*const fns[3])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c};
+        for (int i = 0; i < 3; i++) {
+            if (v > (uint64_t)fns[i] && v - (uint64_t)fns[i] < 0x100) {
+                l.c((char)('a' + i));
+                return;
+            }
+        }
+        l.s("\"anon:<12x>\"");
+        l.lay().c(' ').s(nm).beh();
+        return;
+    }
+    l.c('"');
+    for (k = 0; k < 32 && nm[k]; k++)
+        l.c(nm[k] >= 0x20 && nm[k] < 0x7F ? nm[k] : '?');
+    l.c('"');
+}
 #pragma pop_macro("sceKernelMmap")
 #pragma pop_macro("sceKernelMapDirectMemory")
 
@@ -9505,30 +9894,30 @@ static void run_fw_tl_tf() {
         int32_t r = sceKernelMmap(0, PG, 0x3, 0x1012, -1, 0, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0x10);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         int32_t rr = 0;
         const long pa = alloc(1, 0, &rr);
         m = 0;
         r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x10, pa, PG) : -1;
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         release_all(pa, 1);
         m = 0;
         r = sceKernelMemoryPoolReserve(0, 0x200000, 0, 0x10, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, 0x200000);
+            HF(sceKernelMunmap(m, 0x200000));
         m = 0;
         r = sceKernelReserveVirtualRange(&m, 0x200000, 0x10, 0);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, 0x200000);
+            HF(sceKernelMunmap(m, 0x200000));
         unk(l).end();
     }
     {
@@ -9554,12 +9943,12 @@ static void run_fw_tl_tf() {
             co_scan(l, b, 4 * PG);
             l.s(" | ").c(ncode(sceKernelMtypeprotect((void*)(b + PG), PG, 0, 0x3))).c(' ');
             co_scan(l, b, 4 * PG);
-            sceKernelMunmap(m, 4 * PG);
+            HF(sceKernelMunmap(m, 4 * PG));
         } else {
             l.s("SKIP");
         }
         if (p >= 0)
-            sceKernelReleaseDirectMemory(p, 4 * PG);
+            HF(sceKernelReleaseDirectMemory(p, 4 * PG));
         unk(l).end();
     }
     {
@@ -9578,9 +9967,9 @@ static void run_fw_tl_tf() {
             for (int i = 0; i < 4; i++) {
                 l.c(ncode(r[i]));
                 if (r[i] == 0)
-                    sceKernelMunmap(m[i], PG);
+                    HF(sceKernelMunmap(m[i], PG));
             }
-            sceKernelMunmap(first, PG);
+            HF(sceKernelMunmap(first, PG));
         } else {
             l.s("SKIP");
         }
@@ -9594,12 +9983,12 @@ static void run_fw_tl_tf() {
         int32_t r = sceKernelMmap(m, 2 * PG, 0x3, 0x1012, -1, 0, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, 2 * PG);
+            HF(sceKernelMunmap(m, 2 * PG));
         m = 0;
         r = sceKernelMmap((void*)0xFC00000000ull, PG, 0x3, 0x1002, -1, 0, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         int32_t rr = 0;
         const long pa = alloc(2, 0, &rr);
         if (pa >= 0) {
@@ -9607,12 +9996,12 @@ static void run_fw_tl_tf() {
             r = sceKernelMapDirectMemory(&m, 2 * PG, 0x3, 0x10, pa, PG);
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, 2 * PG);
+                HF(sceKernelMunmap(m, 2 * PG));
             m = (void*)0xFC00000000ull;
             r = sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG);
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 2);
         unk(l).end();
@@ -9627,12 +10016,12 @@ static void run_fw_tl_tf() {
         int32_t r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         m = 0;
         r = sceKernelMmap(0, PG, 0x3, 0x1002, -1, 0, &m);
         l.c(ncode(r));
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         char path[64];
         mf_make_10k(path);
         const int fd = sceKernelOpen(path, 0, 0);
@@ -9641,11 +10030,11 @@ static void run_fw_tl_tf() {
             r = sceKernelMmap(0, PG, 0x1, 0x1, fd, 0, &m);
             l.c(ncode(r));
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             sceKernelClose(fd);
         }
         for (int i = 0; i < n; i++)
-            sceKernelMunmap(maps[i], lens[i]);
+            HF(sceKernelMunmap(maps[i], lens[i]));
         unk(l).end();
     }
     {
@@ -9659,7 +10048,7 @@ static void run_fw_tl_tf() {
             co_scan(l, (uint64_t)b, 5 * PG);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 5 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 5 * PG);
-            sceKernelMunmap(b, 5 * PG);
+            HF(sceKernelMunmap(b, 5 * PG));
         }
         unk(l).end();
     }
@@ -9678,7 +10067,7 @@ static void run_fw_tl_tf() {
             co_scan(l, (uint64_t)b, 2 * PG);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 2 * PG);
-            sceKernelMunmap(b, 2 * PG);
+            HF(sceKernelMunmap(b, 2 * PG));
         }
         release_all(pa, 2);
         unk(l).end();
@@ -9695,7 +10084,7 @@ static void run_fw_tl_tf() {
             co_scan(l, (uint64_t)b, 2 * PG);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 2 * PG);
-            sceKernelMunmap(b, 2 * PG);
+            HF(sceKernelMunmap(b, 2 * PG));
         }
         release_all(pa, 2);
         unk(l).end();
@@ -9710,7 +10099,7 @@ static void run_fw_tl_tf() {
             co_scan(l, (uint64_t)b, 2 * PG);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 2 * PG);
-            sceKernelMunmap(b, 2 * PG);
+            HF(sceKernelMunmap(b, 2 * PG));
         }
         unk(l).end();
     }
@@ -9727,7 +10116,7 @@ static void run_fw_tl_tf() {
             co_scan(l, (uint64_t)b, 2 * PG);
             l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
             co_scan(l, (uint64_t)b, 2 * PG);
-            sceKernelMunmap(b, 2 * PG);
+            HF(sceKernelMunmap(b, 2 * PG));
         }
         unk(l).end();
     }
@@ -9739,7 +10128,9 @@ static void run_fw_tl_tf() {
         // anonymous rw (0x1012 prot 3) | void reservation (0x110); call sites: one (fr_a twice) | two
         // (fr_a, fr_b); order: left page first | right page first. Each line: areas after creation |
         // after a rename of both || a fresh pair: areas after creation | after mprotect of both to
-        // the same protection.
+        // the same protection. Round 128: after each areas list " n=" and the name of the left and
+        // the right page (fr_name: a, b the call site, M the new name), so that what kept two pages
+        // apart, or let them merge, is on the line.
         struct Kind {
             int32_t prot, flags;
         };
@@ -9777,10 +10168,17 @@ static void run_fw_tl_tf() {
                     l.s("SKIP").end();
                     continue;
                 }
+                auto names2 = [&](uint8_t* at) {
+                    l.s(" n=");
+                    fr_name(l, at);
+                    fr_name(l, at + PG);
+                };
                 co_scan(l, (uint64_t)b, 2 * PG);
+                names2(b);
                 l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping"))).c(' ');
                 co_scan(l, (uint64_t)b, 2 * PG);
-                sceKernelMunmap(b, 2 * PG);
+                names2(b);
+                HF(sceKernelMunmap(b, 2 * PG));
                 l.s(" || ");
                 b = pair();
                 if (!b) {
@@ -9788,11 +10186,91 @@ static void run_fw_tl_tf() {
                     continue;
                 }
                 co_scan(l, (uint64_t)b, 2 * PG);
+                names2(b);
                 l.s(" | ").c(ncode(sceKernelMprotect(b, 2 * PG, kd.prot))).c(' ');
                 co_scan(l, (uint64_t)b, 2 * PG);
-                sceKernelMunmap(b, 2 * PG);
+                names2(b);
+                HF(sceKernelMunmap(b, 2 * PG));
                 l.end();
             }
+        }
+    }
+    {
+        // FR13-FR20 (round 128): the order rule of FR3/FR4 on three pages. Round 127: two no-access
+        // pages from two call sites stay apart at creation (their names differ); a rename of both
+        // merges them at every SDK when the left page was made first, and only from SDK 5.50 when
+        // the right page was made first. If that is "below 5.50 two neighbours merge only when the
+        // younger one is the right one", three pages L, M, R from three call sites (a, b, c), made
+        // in the order given and then renamed together, end as: LMR 0-C; RML below 5.50 0-4,4-8,8-C;
+        // MRL below 5.50 0-4,4-C; MLR below 5.50 0-4,4-C or 0-C; LRM, RLM to be seen; from 5.50
+        // every order 0-C. FR19, FR20: no-access pages renamed one at a time, right then left, and
+        // left then right (two pages, made left first | made right first).
+        // Each line: creation codes, areas, names | rename code, areas, names.
+        static const char* const ids3[6] = {"FR13", "FR14", "FR15", "FR16", "FR17", "FR18"};
+        static const char* const names3[6] = {"noacc 3 sites, order L M R", "noacc 3 sites, order R M L",
+                                              "noacc 3 sites, order M R L", "noacc 3 sites, order M L R",
+                                              "noacc 3 sites, order L R M", "noacc 3 sites, order R L M"};
+        // page index (0 L, 1 M, 2 R) in creation order
+        static const int order3[6][3] = {{0, 1, 2}, {2, 1, 0}, {1, 2, 0},
+                                         {1, 0, 2}, {0, 2, 1}, {2, 0, 1}};
+        static int32_t (*const site3[3])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c};
+        for (int t = 0; t < 6; t++) {
+            Line l = head(ids3[t], names3[t]);
+            void* a = 0;
+            if (sceKernelReserveVirtualRange(&a, 3 * PG, 0, 0) != 0) {
+                l.s("SKIP").end();
+                continue;
+            }
+            uint8_t* b = (uint8_t*)a;
+            // page i is always made from site i (L from fr_a, M from fr_b, R from fr_c)
+            for (int k = 0; k < 3; k++) {
+                const int pg = order3[t][k];
+                l.c(ncode(site3[pg](b + pg * PG, 0x0, 0x1012)));
+            }
+            auto names3p = [&]() {
+                l.s(" n=");
+                for (int k = 0; k < 3; k++)
+                    fr_name(l, b + k * PG);
+            };
+            l.c(' ');
+            co_scan(l, (uint64_t)b, 3 * PG);
+            names3p();
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 3 * PG, "Mapping"))).c(' ');
+            co_scan(l, (uint64_t)b, 3 * PG);
+            names3p();
+            HF(sceKernelMunmap(b, 3 * PG));
+            l.end();
+        }
+        for (int t = 0; t < 2; t++) {
+            Line l = head(t == 0 ? "FR19" : "FR20",
+                          t == 0 ? "noacc 2 sites, left first: rename R, L | rename L, R"
+                                 : "noacc 2 sites, right first: rename R, L | rename L, R");
+            for (int ord = 0; ord < 2; ord++) {
+                void* a = 0;
+                if (sceKernelReserveVirtualRange(&a, 2 * PG, 0, 0) != 0) {
+                    l.s("SKIP ");
+                    continue;
+                }
+                uint8_t* b = (uint8_t*)a;
+                if (t == 0) {
+                    l.c(ncode(fr_a(b, 0x0, 0x1012))).c(ncode(fr_b(b + PG, 0x0, 0x1012)));
+                } else {
+                    l.c(ncode(fr_b(b + PG, 0x0, 0x1012))).c(ncode(fr_a(b, 0x0, 0x1012)));
+                }
+                uint8_t* first = ord == 0 ? b + PG : b;
+                uint8_t* second = ord == 0 ? b : b + PG;
+                l.c(' ').c(ncode(sceKernelSetVirtualRangeName(first, PG, "Mapping"))).c(' ');
+                co_scan(l, (uint64_t)b, 2 * PG);
+                l.c(' ').c(ncode(sceKernelSetVirtualRangeName(second, PG, "Mapping"))).c(' ');
+                co_scan(l, (uint64_t)b, 2 * PG);
+                l.s(" n=");
+                fr_name(l, b);
+                fr_name(l, b + PG);
+                HF(sceKernelMunmap(b, 2 * PG));
+                if (ord == 0)
+                    l.s(" | ");
+            }
+            l.end();
         }
     }
     {
@@ -9804,22 +10282,24 @@ static void run_fw_tl_tf() {
         void* B = 0;
         if (sceKernelAllocateMainDirectMemory(0x4000000, 0x10000, 0, &p) == 0 &&
             sceKernelReserveVirtualRange(&B, 0x1000000, 0, 0x200000) == 0) {
-            sceKernelMunmap(B, 0x1000000);
+            HF(sceKernelMunmap(B, 0x1000000));
             const int32_t rm = sceKernelMapDirectMemory(&A, 0x4000000, 0x3, 0, p, 0x200000);
             l.c(ncode(rm)).c(' ');
             if (rm == 0) {
                 int ok = 0;
                 for (int i = 0; i < 16; i++) {
-                    sceKernelMunmap((uint8_t*)A + i * 0x100000, 0x100000);
+                    HF(sceKernelMunmap((uint8_t*)A + i * 0x100000, 0x100000));
                     void* t = (uint8_t*)B + i * 0x100000;
-                    ok += sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000, 0x100000) == 0;
+                    ok += okc(sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000,
+                                                       0x100000));
                 }
                 l.dec(ok).s("/16 | ");
                 l.c(ncode(sceKernelMunmap((uint8_t*)B + 12 * 0x100000, 4 * 0x100000))).c(' ');
                 ok = 0;
                 for (int i = 12; i < 16; i++) {
                     void* t = (uint8_t*)A + i * 0x100000;
-                    ok += sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000, 0x100000) == 0;
+                    ok += okc(sceKernelMapDirectMemory(&t, 0x100000, 0x3, 0x90, p + i * 0x100000,
+                                                       0x100000));
                 }
                 l.dec(ok).s("/4 | ");
             }
@@ -9832,7 +10312,7 @@ static void run_fw_tl_tf() {
         } else {
             l.s("SKIP");
             if (p >= 0)
-                sceKernelReleaseDirectMemory(p, 0x4000000);
+                HF(sceKernelReleaseDirectMemory(p, 0x4000000));
         }
         unk(l).end();
     }
@@ -9846,13 +10326,13 @@ static void run_fw_tl_tf() {
         int32_t pr = 0;
         if (sceKernelReserveVirtualRange(&r, PG, 0, 0) == 0) {
             l.c(ncode(sceKernelQueryMemoryProtection(r, &s0, &e0, &pr)));
-            sceKernelMunmap(r, PG);
+            HF(sceKernelMunmap(r, PG));
         }
         l.s(" | ");
         void* v = 0;
         if (sceKernelMmap(0, PG, 0, 0x110, -1, 0, &v) == 0 || sceKernelMmap(0, PG, 0, 0x102, -1, 0, &v) == 0) {
             l.c(ncode(sceKernelQueryMemoryProtection(v, &s0, &e0, &pr)));
-            sceKernelMunmap(v, PG);
+            HF(sceKernelMunmap(v, PG));
         }
         unk(l).end();
     }
@@ -9905,7 +10385,7 @@ static void run_fw_tl_tf() {
             l.s(" | ").c(file_is(fd, 2));
             file_write(fd, ones);
             l.s(" | ").c(mem_is(m, 1));
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         }
         if (fd >= 0)
             sceKernelClose(fd);
@@ -9924,7 +10404,7 @@ static void run_fw_tl_tf() {
             l.s(" | ").c(mem_is(m, 1));
             mem_write(m, 1);
             l.s(" | ").c(file_is(fd, 2));
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         }
         if (fd >= 0)
             sceKernelClose(fd);
@@ -9942,7 +10422,7 @@ static void run_fw_tl_tf() {
                 const int32_t r = sceKernelMmap(0, 0x4000, p, 0x1, fd, 0, &m);
                 l.c(ncode(r));
                 if (r == 0)
-                    sceKernelMunmap(m, 0x4000);
+                    HF(sceKernelMunmap(m, 0x4000));
             }
             void* m = 0;
             const int32_t r = sceKernelMmap(0, 0x4000, 0x0, 0x1, fd, 0, &m);
@@ -9955,7 +10435,7 @@ static void run_fw_tl_tf() {
                     file_write(fd, twos);
                     l.s(" | ").c(mem_is(m, 2));
                 }
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             m = 0;
             const int32_t r2 = sceKernelMmap(0, 0x4000, 0x0, 0x2, fd, 0, &m);
@@ -9965,7 +10445,7 @@ static void run_fw_tl_tf() {
                 l.c(ncode(rp));
                 if (rp == 0 && (sb_read_prot(m) & 0x1))
                     l.c(' ').c(mem_is(m, 2));
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             sceKernelClose(fd);
         }
@@ -9987,13 +10467,13 @@ static void run_fw_tl_tf() {
                 const int32_t r = sceKernelMmap(0, 0x4000, c.prot, c.flags, fd, 0, &m);
                 l.c(ncode(r));
                 if (r == 0)
-                    sceKernelMunmap(m, 0x4000);
+                    HF(sceKernelMunmap(m, 0x4000));
             }
             void* m = 0;
             if (sceKernelMmap(0, 0x4000, 0x1, 0x1, fd, 0, &m) == 0) {
                 l.s(" | ").c(ncode(sceKernelMprotect(m, 0x4000, 0x3))).s(" p=");
                 l.hex((uint32_t)sb_read_vprot(m));
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             m = 0;
             if (sceKernelMmap(0, 0x4000, 0x1, 0x2, fd, 0, &m) == 0) {
@@ -10003,7 +10483,7 @@ static void run_fw_tl_tf() {
                     mem_write(m, 2);
                     l.c(' ').c(file_is(fd, 1));
                 }
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             sceKernelClose(fd);
         }
@@ -10029,7 +10509,7 @@ static void run_fw_tl_tf() {
             }
             l.s(" | ").c(w == 1 ? 'y' : w == 0 ? 'n' : '-');
             l.s(" | ").c(file_is(fd, 1));
-            sceKernelMunmap(m, 0x4000);
+            HF(sceKernelMunmap(m, 0x4000));
         }
         if (fd >= 0)
             sceKernelClose(fd);
@@ -10060,6 +10540,191 @@ static void xr_write(uint8_t* m) {
         m[k] = g_xr_code[k];
 }
 
+// ---- round 128: what a query writes; the system library area rule of MapDirectMemory2 -------------
+
+// Which bytes of `n` a call wrote: the call is made on a buffer of FF and on a buffer of 00; a byte
+// that is the same after both was written (w), one that differs was left alone (-).
+static void written_mask(Line& l, const unsigned char* ff, const unsigned char* zz, int n) {
+    for (int i = 0; i < n; i++) {
+        if (i && i % 8 == 0)
+            l.c('.');
+        l.c(ff[i] == zz[i] ? 'w' : '-');
+    }
+}
+
+static void run_r128() {
+    say("== R128 bytes a query writes; MapDirectMemory2 and the system library area; search past a "
+        "taken address");
+    int32_t rr = 0;
+    {
+        // VQ18: sceKernelVirtualQuery of a named flexible page with size 0x48 on a 0x60 byte
+        // buffer: the written bytes (8 per group; 0x48 are the result), then the fields past the
+        // addresses: protection and memory type as 32-bit values, the flags byte, the name.
+        // Then a query of free memory: code, and how many bytes of the FF buffer changed.
+        Line l = head("VQ18", "VirtualQuery writes: mask | prot type flags name | free: code changed");
+        void* m = 0;
+        void* hole = 0;
+        if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
+            HF(sceKernelMunmap(hole, PG));
+        if (sceKernelMapNamedFlexibleMemory(&m, PG, 0x3, 0, "vq18") != 0) {
+            l.s("SKIP map");
+        } else {
+            static unsigned char ff[0x60], zz[0x60];
+            my_memset(ff, 0xFF, sizeof(ff));
+            my_memset(zz, 0x00, sizeof(zz));
+            const int32_t r1 = sceKernelVirtualQuery(m, 0, ff, 0x48);
+            const int32_t r2 = sceKernelVirtualQuery(m, 0, zz, 0x48);
+            l.c(code(r1)).c(code(r2)).c(' ');
+            written_mask(l, ff, zz, 0x60);
+            auto u32 = [&](int o) {
+                return (uint32_t)ff[o] | ((uint32_t)ff[o + 1] << 8) | ((uint32_t)ff[o + 2] << 16) |
+                       ((uint32_t)ff[o + 3] << 24);
+            };
+            l.s(" | ").hex(u32(0x18)).c(' ').hex(u32(0x1C)).c(' ').hex(ff[0x20]).s(" \"");
+            for (int k = 0; k < 32 && ff[0x21 + k] && ff[0x21 + k] != 0xFF; k++)
+                l.c(ff[0x21 + k] >= 0x20 && ff[0x21 + k] < 0x7F ? (char)ff[0x21 + k] : '?');
+            l.c('"');
+            HF(sceKernelMunmap(m, PG));
+        }
+        l.s(" | ");
+        if (hole) {
+            static unsigned char ff[0x60];
+            my_memset(ff, 0xFF, sizeof(ff));
+            l.c(code(sceKernelVirtualQuery(hole, 0, ff, 0x48))).c(' ');
+            int changed = 0;
+            for (int i = 0; i < 0x60; i++)
+                changed += ff[i] != 0xFF;
+            l.dec(changed);
+        } else {
+            l.s("SKIP");
+        }
+        l.end();
+    }
+    {
+        // DQ3: the same for sceKernelDirectMemoryQuery (size 0x18 on a 0x30 byte buffer) of an
+        // allocated page, and for a query that fails (an offset past the direct memory)
+        Line l = head("DQ3", "DirectMemoryQuery writes: mask | type | fails: code changed");
+        const long pa = alloc(1, 3, &rr);
+        if (pa < 0) {
+            l.s("SKIP alloc");
+        } else {
+            static unsigned char ff[0x30], zz[0x30];
+            my_memset(ff, 0xFF, sizeof(ff));
+            my_memset(zz, 0x00, sizeof(zz));
+            const int32_t r1 = sceKernelDirectMemoryQuery(pa, 0, ff, 0x18);
+            const int32_t r2 = sceKernelDirectMemoryQuery(pa, 0, zz, 0x18);
+            l.c(code(r1)).c(code(r2)).c(' ');
+            written_mask(l, ff, zz, 0x30);
+            l.s(" | ").hex((uint32_t)ff[0x10] | ((uint32_t)ff[0x11] << 8) |
+                           ((uint32_t)ff[0x12] << 16) | ((uint32_t)ff[0x13] << 24));
+            my_memset(ff, 0xFF, sizeof(ff));
+            l.s(" | ").c(code(sceKernelDirectMemoryQuery((long)g_dmem + 0x100000, 0, ff, 0x18)));
+            int changed = 0;
+            for (int i = 0; i < 0x30; i++)
+                changed += ff[i] != 0xFF;
+            l.c(' ').dec(changed);
+        }
+        release_all(pa, 1);
+        l.end();
+    }
+    {
+        // K1d: sceKernelMapDirectMemory2 (type 3) and the system library area 7F0000000-FF0000000,
+        // at every SDK version (K1c: MapDirectMemory moves a searched mapping that reaches the area
+        // to FF0000000 from SDK 2.50, when it maps through this function; Map2 itself moved its one
+        // case at every SDK). One page unless noted. Searched (flags 0), hint 7EFFF8000 | 7EFFFC000 |
+        // 7EFFFC000 two pages | 7F0000000 | 900000000 | FEFFFC000 | FF0000000; then fixed with
+        // no-overwrite (0x90) at 7EFFF8000 | 7EFFFC000 | 7F0000000 | 900000000 | FEFFFC000 |
+        // FF0000000 | 1000000000; then MapDirectMemory with MAP_STACK (0x400), which does not go
+        // through Map2: searched 900000000 | fixed no-overwrite 900000000.
+        // Per case: what is visible at the address before (occ), code, where it went.
+        const long pa = alloc(2, 3, &rr);
+        Line l = head("K1d", "Map2 search 7EFFF8 7EFFFC 7EFFFCx2 7F0000 900000 FEFFFC FF0000 | fixed "
+                             "7EFFF8 7EFFFC 7F0000 900000 FEFFFC FF0000 1000000 | stack flag 900000 "
+                             "search, fixed: occ code where");
+        struct Case {
+            uint64_t at;
+            int pages;
+            int32_t flags;
+            int kind; // 0 Map2, 1 MapDirectMemory
+        };
+        static const Case cases[] = {
+            {0x7EFFF8000ull, 1, 0, 0},     {0x7EFFFC000ull, 1, 0, 0},    {0x7EFFFC000ull, 2, 0, 0},
+            {0x7F0000000ull, 1, 0, 0},     {0x900000000ull, 1, 0, 0},    {0xFEFFFC000ull, 1, 0, 0},
+            {0xFF0000000ull, 1, 0, 0},     {0x7EFFF8000ull, 1, 0x90, 0}, {0x7EFFFC000ull, 1, 0x90, 0},
+            {0x7F0000000ull, 1, 0x90, 0},  {0x900000000ull, 1, 0x90, 0}, {0xFEFFFC000ull, 1, 0x90, 0},
+            {0xFF0000000ull, 1, 0x90, 0},  {0x1000000000ull, 1, 0x90, 0},
+            {0x900000000ull, 1, 0x400, 1}, {0x900000000ull, 1, 0x490, 1}};
+        l.s("FF0000000:@").c(occ(0xFF0000000ull, 2 * PG)).c(' ');
+        int k = 0;
+        for (const Case& c : cases) {
+            if (k == 7 || k == 14)
+                l.s("| ");
+            k++;
+            const size_t len = (size_t)c.pages * PG;
+            l.c('@').c(occ(c.at, len));
+            void* m = (void*)c.at;
+            int32_t r = -1;
+            if (pa >= 0 && c.kind == 0)
+                r = sceKernelMapDirectMemory2(&m, len, 3, 0x3, c.flags, pa, PG);
+            else if (pa >= 0)
+                r = sceKernelMapDirectMemory(&m, len, 0x3, c.flags, pa, PG);
+            l.c(code(r));
+            if (r == 0) {
+                where(l, "at", (uint64_t)m, c.at);
+                HF(sceKernelMunmap(m, len));
+            }
+            l.c(' ');
+        }
+        l.end();
+        release_all(pa, 2);
+    }
+    {
+        // K1e: a search that starts below the system library area and reaches it because the
+        // address asked for is taken (not measured until round 128; K1c's hints were free). The
+        // three pages 7EFFF0000-7EFFFC000 are reserved by the test (fixed, no-overwrite; "rsv" is
+        // what was visible there before and the code), then with hint 7EFFF0000, one page each:
+        // MapDirectMemory | MapDirectMemory2 | flexible | a reservation. Per mapping: code, where.
+        // The next free page is 7EFFFC000, the one ending exactly at 7F0000000.
+        Line l = head("K1e", "hint 7EFFF0000 taken: rsv | dmem | map2 | flex | rsv: code where");
+        const long pa = alloc(1, 3, &rr);
+        const uint64_t at = 0x7EFFF0000ull;
+        const char pre = occ(at, 4 * PG);
+        void* held = (void*)at;
+        const int32_t rh = sceKernelReserveVirtualRange(&held, 3 * PG, 0x90, 0);
+        l.s("rsv=@").c(pre).c(code(rh));
+        l.s(" FF0000000:@").c(occ(0xFF0000000ull, PG));
+        if (rh != 0 || pa < 0) {
+            l.s(" SKIP");
+        } else {
+            for (int kind = 0; kind < 4; kind++) {
+                void* m = (void*)at;
+                int32_t r = -1;
+                if (kind == 0)
+                    r = sceKernelMapDirectMemory(&m, PG, 0x3, 0, pa, PG);
+                else if (kind == 1)
+                    r = sceKernelMapDirectMemory2(&m, PG, 3, 0x3, 0, pa, PG);
+                else if (kind == 2)
+                    r = sceKernelMapFlexibleMemory(&m, PG, 0x3, 0);
+                else
+                    r = sceKernelReserveVirtualRange(&m, PG, 0, 0);
+                l.s(" | ").c(code(r));
+                if (r == 0) {
+                    if ((uint64_t)m == at + 3 * PG)
+                        l.s("next"); // 7EFFFC000, directly after the reserved pages
+                    else
+                        where(l, kind == 0 ? "dmem" : kind == 1 ? "map2" : kind == 2 ? "flex" : "rsv",
+                              (uint64_t)m, at);
+                    HF(sceKernelMunmap(m, PG));
+                }
+            }
+        }
+        if (rh == 0)
+            HF(sceKernelMunmap(held, 3 * PG));
+        release_all(pa, 1);
+        l.end();
+    }
+}
+
 static void run_xr() {
     say("== XR does code run (cases known to run)");
     int32_t rr = 0;
@@ -10071,7 +10736,7 @@ static void run_xr() {
             xr_write((uint8_t*)m);
             l.c(ncode(sceKernelMprotect(m, PG, 0x7)));
             xr_run(l, "XR1", (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         l.end();
     }
@@ -10084,7 +10749,7 @@ static void run_xr() {
             xr_write((uint8_t*)m);
             l.c(ncode(sceKernelMprotect(m, PG, 0x37)));
             xr_run(l, "XR2", (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
         l.end();
@@ -10098,7 +10763,7 @@ static void run_xr() {
             xr_write((uint8_t*)m);
             l.c(ncode(sceKernelMprotect(m, PG, 0x7)));
             xr_run(l, "XR3", (uint8_t*)m);
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
         l.end();
@@ -10136,7 +10801,7 @@ static void run_pt3() {
                 run();
                 l.s(" | ").c(ncode(sceKernelMprotect(m, PG, 0x5)));
                 run();
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             }
             sceKernelClose(fd);
         }
@@ -10165,8 +10830,13 @@ struct DmemInfo { // OrbisQueryInfo
 static bool allocated(long pa) {
     DmemInfo q;
     my_memset(&q, 0, sizeof(q));
-    if (sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q)) != 0)
+    // as the main test's: free memory is EACCES; another failure's code goes to ?=
+    const int32_t r = sceKernelDirectMemoryQuery(pa, 0, &q, sizeof(q));
+    if (r != 0) {
+        if ((uint32_t)r != 0x8002000D && g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return false;
+    }
     return q.start <= (uint64_t)pa && (uint64_t)pa < q.end;
 }
 
@@ -10174,8 +10844,12 @@ static bool mapped(const void* va, int32_t* prot) {
     void* s = 0;
     void* e = 0;
     int32_t p = 0;
-    if (sceKernelQueryMemoryProtection((void*)va, &s, &e, &p) != 0)
+    const int32_t r = sceKernelQueryMemoryProtection((void*)va, &s, &e, &p);
+    if (r != 0) {
+        if ((uint32_t)r != 0x8002000D && g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return false;
+    }
     if (prot)
         *prot = p;
     return true;
@@ -10191,11 +10865,17 @@ static uint64_t le64(const unsigned char* b) {
 // VirtualQuery of one page: physical address it reports for va (-1 if none), memory type (-1)
 static void vq_page(const void* va, long* phys, int32_t* type) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     *phys = -1;
     *type = -1;
-    if (sceKernelVirtualQuery(va, 0, vi, 0x48) != 0)
+    // called for pages QueryMemoryProtection reports mapped: a failure here is not "no physical
+    // address", so its code goes to ?= (round 128)
+    const int32_t r = sceKernelVirtualQuery(va, 0, vi, 0x48);
+    if (r != 0) {
+        if (g_nunk < 16)
+            g_unk[g_nunk++] = (uint32_t)r;
         return;
+    }
     *type = (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) | ((uint32_t)vi[0x1E] << 16) |
                       ((uint32_t)vi[0x1F] << 24));
     if (vi[0x20] & 0x0A) // direct or pooled
@@ -10217,7 +10897,7 @@ static void unmap_pages(uint8_t* va, int pages) {
         return;
     for (int i = 0; i < pages; i++)
         if (mapped(va + i * PG, nullptr))
-            sceKernelMunmap(va + i * PG, PG);
+            HF(sceKernelMunmap(va + i * PG, PG));
 }
 
 static void release_pages(long pa, int pages) {
@@ -10225,7 +10905,7 @@ static void release_pages(long pa, int pages) {
         return;
     for (int i = 0; i < pages; i++)
         if (allocated(pa + (long)i * (long)PG))
-            sceKernelReleaseDirectMemory(pa + (long)i * (long)PG, PG);
+            HF(sceKernelReleaseDirectMemory(pa + (long)i * (long)PG, PG));
 }
 
 // ---- readback strings -------------------------------------------------------------------------
@@ -10373,6 +11053,7 @@ enum Creator {
     C_POOL_RELALL,  // pool: release the whole committed block
     C_KEEP_UNMAP_A, // alias mapped and left mapped, then all of A unmapped
     C_DISJOINT,     // A pages 4-7 unmapped, B maps those pages: two mappings, no page shared
+    C_MAP2_UNMAP,   // alias mapped with MapDirectMemory2 (type b_type), then unmapped
 };
 
 enum Op { O_NONE, O_MTYPE, O_MUNMAP, O_RELEASE, O_CHECKED, O_MPROTECT, O_SPAN, O_DECOMMIT };
@@ -10438,6 +11119,13 @@ static const Spec SPECS[] = {
      3, -1, 3, 3},
     {"CV62", "two allocs 0-3 type 3 + 4-7 type 0; none", K_DIRECT, C_NONE, 0, 0, O_NONE, 0, 0, 0, 3,
      -1, 3, 0},
+    // round 128: a release while the alias is still mapped (CV32, CV33 release after the alias is
+    // unmapped), and a Map2 alias of type 0 unmapped again (CV54 keeps it): does the type stay
+    {"CV63", "alias 3-4 kept; rel 0-7", K_DIRECT, C_KEEP, 3, 2, O_RELEASE, 0, 8},
+    {"CV64", "alias 3-4 kept; chk 0-7", K_DIRECT, C_KEEP, 3, 2, O_CHECKED, 0, 8},
+    {"CV65", "alias 3-4 kept; rel 2-4", K_DIRECT, C_KEEP, 3, 2, O_RELEASE, 2, 3},
+    {"CV66", "map2 alias 3-4 type 0 unmapped; none", K_DIRECT, C_MAP2_UNMAP, 3, 2, O_NONE, 0, 0, 0,
+     3, -1, 0},
     {"CV70", "pool commit type 0, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 0, 3},
     {"CV71", "pool commit type 1, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 1, 3},
     {"CV72", "pool commit type 2, prot 3", K_PCOMMIT, 0, 0, 0, 0, 0, 0, 0, 2, 3},
@@ -10622,7 +11310,7 @@ static void run_direct(int idx) {
         unmap_pages(a, NP);
         unmap_pages(c, 4);
         if (rsv)
-            sceKernelMunmap(rsv, (NP + 4) * PG);
+            HF(sceKernelMunmap(rsv, (NP + 4) * PG));
         release_pages(blk.pa, NP);
         release_pages(cpa, 4);
         return;
@@ -10681,7 +11369,8 @@ static void run_direct(int idx) {
             stamp(al[0].va, s.b_pages, tag + (uint32_t)s.b_first);
         break;
     }
-    case C_MAP2: {
+    case C_MAP2:
+    case C_MAP2_UNMAP: {
         void* v = nullptr;
         const int32_t r = sceKernelMapDirectMemory2(&v, s.b_pages * PG, s.b_type, 0x3, 0, bpa, PG);
         al[0].va = r == 0 ? (uint8_t*)v : nullptr;
@@ -10689,6 +11378,8 @@ static void run_direct(int idx) {
         al[0].pages = s.b_pages;
         nal = 1;
         pre.ret("map2B", r);
+        if (al[0].va && s.creator == C_MAP2_UNMAP)
+            pre.ret("unmapB", sceKernelMunmap(al[0].va, s.b_pages * PG));
         break;
     }
     case C_NAMED_UNMAP: {
@@ -10753,7 +11444,7 @@ static void run_direct(int idx) {
         unmap_pages(al[k].va, al[k].pages);
     unmap_pages(c, 4);
     if (rsv)
-        sceKernelMunmap(rsv, (NP + 4) * PG);
+        HF(sceKernelMunmap(rsv, (NP + 4) * PG));
     release_pages(blk.pa, NP);
     release_pages(cpa, 4);
 }
@@ -10828,9 +11519,9 @@ static void run_pool(int idx) {
         Line l = head(s.id, s.name);
         l.s("SKIP ").ret("expand", re).ret("reserve", rr).ret("commit", rc).end();
         if (rr == 0)
-            sceKernelMunmap(v, rsv);
+            HF(sceKernelMunmap(v, rsv));
         if (re == 0)
-            sceKernelReleaseDirectMemory((long)pp, 2 * blk);
+            HF(sceKernelReleaseDirectMemory((long)pp, 2 * blk));
         return;
     }
     stamp(va, pages, tag);
@@ -10895,9 +11586,9 @@ static void run_pool(int idx) {
     va_part(post, "V", va, blk_pa, pages, tag, false, released).end();
 
     if (s.op == O_MTYPE)
-        sceKernelMemoryPoolDecommit(va, blk, 0);
-    sceKernelMunmap(va, rsv);
-    sceKernelReleaseDirectMemory(pa, 2 * blk);
+        HF(sceKernelMemoryPoolDecommit(va, blk, 0));
+    HF(sceKernelMunmap(va, rsv));
+    HF(sceKernelReleaseDirectMemory(pa, 2 * blk));
 }
 
 // ---- C70-C103: pool sweeps, one mtypeprotect over a mapping and its alias, VirtualQuery regions
@@ -10912,6 +11603,7 @@ static Line& hex2(Line& l, uint32_t v) {
 // itself is never read.
 static Line& pool_va(Line& l, const char* tag, uint8_t* va, int pages) {
     unsigned char vi[0x60];
+    out_prefill(vi, sizeof(vi));
     for (int pass = 0; pass < 4; pass++) {
         static const char* const field[4] = {"f=[", "t=[", "v=[", "p=["};
         l.s(pass ? "] " : "").s(tag).s(field[pass]);
@@ -10924,8 +11616,12 @@ static Line& pool_va(Line& l, const char* tag, uint8_t* va, int pages) {
                     l.s("--");
                 continue;
             }
-            my_memset(vi, 0, sizeof(vi));
-            if (sceKernelVirtualQuery(va + i * PG, 0, vi, 0x48) != 0) {
+            out_prefill(vi, sizeof(vi));
+            // a page that is not mapped is EACCES; another failure's code goes to ?=
+            const int32_t rq = sceKernelVirtualQuery(va + i * PG, 0, vi, 0x48);
+            if (rq != 0) {
+                if ((uint32_t)rq != 0x8002000D && g_nunk < 16)
+                    g_unk[g_nunk++] = (uint32_t)rq;
                 l.s(pass == 1 ? "-" : "--");
                 continue;
             }
@@ -10956,11 +11652,11 @@ static bool pool_reserve(Pool& p) {
 
 static void pool_drop(Pool& p) {
     if (p.va) {
-        sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0);
-        sceKernelMunmap(p.va, POOL_RSV);
+        HF(sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0));
+        HF(sceKernelMunmap(p.va, POOL_RSV));
     }
     if (p.re == 0)
-        sceKernelReleaseDirectMemory((long)p.pp, 2 * POOL_BLK);
+        HF(sceKernelReleaseDirectMemory((long)p.pp, 2 * POOL_BLK));
 }
 
 static void run_pcommit(int idx) {
@@ -10976,7 +11672,13 @@ static void run_pcommit(int idx) {
     pre.s("pre ").ret("commit", rc).s("| ");
     pool_va(pre, "V", p.va, 8).end();
     Line post = head(s.id, s.name);
-    post.ret("op", rc == 0 ? sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0) : 0).s("| ");
+    // round 128: when the commit failed there is nothing to decommit; until round 127 that printed
+    // op=0, as a decommit that succeeded
+    if (rc == 0)
+        post.ret("op", sceKernelMemoryPoolDecommit(p.va, POOL_BLK, 0));
+    else
+        post.s("op=none ");
+    post.s("| ");
     pool_va(post, "V", p.va, 8).end();
     pool_drop(p);
 }
@@ -11045,9 +11747,9 @@ static void run_prel(int idx) {
     }
     post.s(" | ");
     phys_part(post, (long)pp, pages).end();
-    sceKernelReleaseDirectMemory((long)pp, 2 * POOL_BLK);
+    HF(sceKernelReleaseDirectMemory((long)pp, 2 * POOL_BLK));
     if (re2 == 0)
-        sceKernelReleaseDirectMemory((long)pp2, 2 * POOL_BLK);
+        HF(sceKernelReleaseDirectMemory((long)pp2, 2 * POOL_BLK));
 }
 
 static Line& dq_next(Line& l, const char* tag, long at, long base) {
@@ -11098,7 +11800,7 @@ static void run_bq() {
     if (re != 0 || ra != 0 || d != (long)(p + blk)) {
         l.s("SKIP ").ret("expand", re).ret("alloc", ra).end();
         if (ra == 0)
-            sceKernelReleaseDirectMemory(d, blk);
+            HF(sceKernelReleaseDirectMemory(d, blk));
         return;
     }
     dq_next(l, "P", (long)p, (long)p).s("| ");
@@ -11112,7 +11814,7 @@ static void run_bq() {
     if (rq == 0)
         rel_page(l, (long)q.end, (long)p);
     l.end();
-    sceKernelReleaseDirectMemory(d, blk);
+    HF(sceKernelReleaseDirectMemory(d, blk));
 }
 
 static void run_span_alias(int idx) {
@@ -11137,7 +11839,7 @@ static void run_span_alias(int idx) {
         l.s("SKIP ").ret("rsv", r_rsv).ret("mapA", r_a).ret("mapB", r_b).end();
         unmap_pages(a, NP);
         if (rsv)
-            sceKernelMunmap(rsv, (NP + 2) * PG);
+            HF(sceKernelMunmap(rsv, (NP + 2) * PG));
         release_pages(blk.pa, NP);
         return;
     }
@@ -11154,7 +11856,7 @@ static void run_span_alias(int idx) {
     va_part(post, "B", b, blk.pa + 3 * (long)PG, 2, tag + 3, true, 0).end();
     unmap_pages(a, NP);
     unmap_pages(b, 2);
-    sceKernelMunmap(rsv, (NP + 2) * PG);
+    HF(sceKernelMunmap(rsv, (NP + 2) * PG));
     release_pages(blk.pa, NP);
 }
 
@@ -11163,13 +11865,17 @@ static void run_span_alias(int idx) {
 static Line& vq_region_str(Line& l, const char* tag, uint8_t* va, int pages) {
     l.s(tag).c('[');
     unsigned char vi[0x60];
+    out_prefill(vi, sizeof(vi));
     uint64_t ps = 0, pe = 0;
     int32_t pr = 0, pt = 0;
     for (int i = 0; i < pages; i++) {
-        my_memset(vi, 0, sizeof(vi));
+        out_prefill(vi, sizeof(vi));
         const int32_t r = sceKernelVirtualQuery(va + i * PG, 0, vi, 0x48);
         const uint64_t st = r == 0 ? le64(vi) : 0, en = r == 0 ? le64(vi + 8) : 0;
-        const int32_t t = r == 0 ? (int32_t)vi[0x1C] : 0;
+        // the whole 32-bit memory type (until round 127 its low byte)
+        const int32_t t = r == 0 ? (int32_t)((uint32_t)vi[0x1C] | ((uint32_t)vi[0x1D] << 8) |
+                                             ((uint32_t)vi[0x1E] << 16) | ((uint32_t)vi[0x1F] << 24))
+                                 : 0;
         if (i > 0 && r == pr && st == ps && en == pe && t == pt)
             continue;
         if (i > 0)
@@ -11293,16 +11999,19 @@ static void run_carve() {
 // ---- XV: cross-verification probes. Rules taken from fpPS4's kern branch (reconstructed from the PS4
 //      kernel) and widened versions of rules measured before; each line names its source. Runs after
 //      CV (dmem aliasing is on). Areas print as in CO (0x1000 units). ---------------------------------
-static void xv_vq(Line& l, uint64_t at, int32_t flags) {
+// code, then where the reported area starts: '=' at `own` (the page the probe mapped), otherwise
+// the region letter: another mapping was found (its address is in the notes)
+static void xv_vq(Line& l, uint64_t at, int32_t flags, uint64_t own) {
     unsigned char vi[0x60];
-    my_memset(vi, 0, sizeof(vi));
+    out_prefill(vi, sizeof(vi));
     const int32_t r = sceKernelVirtualQuery((void*)at, flags, vi, 0x48);
     l.c(ncode(r));
     if (r == 0) {
         uint64_t st = 0;
         for (int k = 7; k >= 0; k--)
             st = (st << 8) | vi[k];
-        l.c(':').hex(st);
+        l.c(':');
+        where(l, "start", st, own);
     }
 }
 
@@ -11313,16 +12022,19 @@ static void run_xv() {
         // fpPS4 sys_virtual_query: find-next skips entries inside 7F0000000-FF0000000 and reports the
         // first one after them
         say("VQ16 starting");
+        // before the map: what is visible from FF0000000 up to the page (@f: the probe's page is
+        // the first area after the system library area)
         Line l = head("VQ16", "page at 1000000000; vq1 from 7EFFFC000 | from FD0000000 (free)");
         const long pa = alloc(1, 3, &rr);
+        l.c('@').c(occ(0xFF0000000ull, 0x1000000000ull - 0xFF0000000ull)).c(' ');
         void* m = (void*)0x1000000000ull;
         const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, PG, 0x3, 0x90, pa, PG) : -1;
         l.c(ncode(r)).s(" | ");
         if (r == 0) {
-            xv_vq(l, 0x7EFFFC000ull, 1);
+            xv_vq(l, 0x7EFFFC000ull, 1, 0x1000000000ull);
             l.s(" | ");
-            xv_vq(l, 0xFD0000000ull, 1);
-            sceKernelMunmap(m, PG);
+            xv_vq(l, 0xFD0000000ull, 1, 0x1000000000ull);
+            HF(sceKernelMunmap(m, PG));
         }
         release_all(pa, 1);
         unk(l).end();
@@ -11336,10 +12048,10 @@ static void run_xv() {
         const int32_t r = pa >= 0 ? sceKernelMapDirectMemory(&m, 4 * PG, 0x3, 0x90, pa, PG) : -1;
         l.c(ncode(r)).s(" | ");
         if (r == 0) {
-            xv_vq(l, 0x7F0000000ull, 0);
+            xv_vq(l, 0x7F0000000ull, 0, 0x7EFFF8000ull);
             l.s(" | ");
-            xv_vq(l, 0x7EFFF8000ull, 0);
-            sceKernelMunmap(m, 4 * PG);
+            xv_vq(l, 0x7EFFF8000ull, 0, 0x7EFFF8000ull);
+            HF(sceKernelMunmap(m, 4 * PG));
         }
         release_all(pa, 4);
         unk(l).end();
@@ -11349,7 +12061,7 @@ static void run_xv() {
         say("PG4 starting");
         Line l = head("PG4", "qprot on a committed block (2nd of 2M): start-end rel reservation, prot");
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             uint8_t* R = (uint8_t*)rv;
@@ -11363,7 +12075,7 @@ static void run_xv() {
                     l.c(' ').shex((long long)((uint64_t)s0 - (uint64_t)R)).c('-').shex(
                         (long long)((uint64_t)e0 - (uint64_t)R)).s(" p=").hex((uint32_t)p);
             }
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         }
         unk(l).end();
     }
@@ -11386,7 +12098,7 @@ static void run_xv() {
             void* m = 0;
             if (sceKernelMmap(0, 0x4000, 0x0, 0x1, fd, 0, &m) == 0) {
                 l.c(ncode(sceKernelMprotect(m, 0x4000, 0x33))).c(' ').hex((uint32_t)sb_read_vprot(m));
-                sceKernelMunmap(m, 0x4000);
+                HF(sceKernelMunmap(m, 0x4000));
             }
             sceKernelClose(fd);
         }
@@ -11401,7 +12113,7 @@ static void run_xv() {
                 const int32_t r = sceKernelMmap(0, 0x4000, c.prot, c.flags, fd, 0, &m);
                 l.s(" | ").c(ncode(r));
                 if (r == 0)
-                    sceKernelMunmap(m, 0x4000);
+                    HF(sceKernelMunmap(m, 0x4000));
             }
             sceKernelClose(fd);
         }
@@ -11421,7 +12133,7 @@ static void run_xv() {
         say("TP4 starting");
         Line l = head("TP4", "pool mtype: +4000 len 10000 | two reservations | one, aligned");
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px));
         void* a = 0;
         void* b = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &a) == 0 &&
@@ -11430,8 +12142,8 @@ static void run_xv() {
             l.c(ncode(sceKernelMtypeprotect(A + 0x4000, 0x10000, 3, 0x3))).s(" | ");
             l.c(ncode(sceKernelMtypeprotect(A + 0x1F0000, 0x20000, 3, 0x3))).s(" | ");
             l.c(ncode(sceKernelMtypeprotect(A + 0x10000, 0x10000, 3, 0x3)));
-            sceKernelMunmap(b, 0x200000);
-            sceKernelMunmap(a, 0x200000);
+            HF(sceKernelMunmap(b, 0x200000));
+            HF(sceKernelMunmap(a, 0x200000));
         } else {
             l.s("SKIP");
         }
@@ -11450,20 +12162,20 @@ static void run_xv() {
             dt_area(l, G, G);
             l.c(',');
             dt_area(l, G, G + PG);
-            sceKernelReleaseDirectMemory(G, 2 * PG);
+            HF(sceKernelReleaseDirectMemory(G, 2 * PG));
             a = dt_alloc_at(G, 3);
             b = dt_alloc_at(G + PG, 3);
             l.s(" | ");
             dt_area(l, G, G);
-            sceKernelReleaseDirectMemory(G, 2 * PG);
+            HF(sceKernelReleaseDirectMemory(G, 2 * PG));
             long p = -1;
             if (sceKernelAllocateDirectMemory(G, G + 3 * PG, 3 * PG, PG, 3, &p) == 0) {
-                sceKernelReleaseDirectMemory(G + PG, PG);
+                HF(sceKernelReleaseDirectMemory(G + PG, PG));
                 l.s(" | ");
                 dt_area(l, G, G);
                 l.c(',');
                 dt_area(l, G, G + 2 * PG);
-                sceKernelReleaseDirectMemory(G, 3 * PG);
+                HF(sceKernelReleaseDirectMemory(G, 3 * PG));
             }
             (void)a;
             (void)b;
@@ -11485,7 +12197,7 @@ static void run_xv() {
             if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, pr, 0, pa, PG) == 0) {
                 l.c(ncode(sceKernelMlock(m, PG)));
                 sceKernelMunlock(m, PG);
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
             } else {
                 l.c('-');
             }
@@ -11508,9 +12220,9 @@ static void run_xv() {
             uint8_t* a = (uint8_t*)A;
             l.c(ncode(sceKernelMtypeprotect(a + 2 * PG, 3 * PG, 3, 0x3))).s(" | ");
             l.c(ncode(sceKernelMtypeprotect(a, 4 * PG, 3, 0x3))).s(" | ");
-            sceKernelMunmap(B, 2 * PG);
+            HF(sceKernelMunmap(B, 2 * PG));
             l.c(ncode(sceKernelMtypeprotect(a + 2 * PG, 3 * PG, 3, 0x3)));
-            sceKernelMunmap(A, 8 * PG);
+            HF(sceKernelMunmap(A, 8 * PG));
         } else {
             l.s("SKIP");
         }
@@ -11532,7 +12244,7 @@ static void ex_try(Line& l, uint8_t* m, int32_t r, const char* id) {
     void* st = 0;
     void* en = 0;
     int32_t prot = 0;
-    sceKernelQueryMemoryProtection(m, &st, &en, &prot);
+    HF(sceKernelQueryMemoryProtection(m, &st, &en, &prot));
     l.s(" prot=").hex((uint32_t)prot);
     if ((prot & 0x4) == 0 || (prot & 0x2) == 0) {
         l.s(" no-run");
@@ -11557,7 +12269,7 @@ static void run_ex() {
         void* m = 0;
         if (pa >= 0 && sceKernelMapDirectMemory(&m, PG, 0x33, 0, pa, PG) == 0) {
             ex_try(l, (uint8_t*)m, sceKernelMprotect(m, PG, 0x37), "EX1");
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -11573,7 +12285,7 @@ static void run_ex() {
             const int32_t r = sceKernelMapDirectMemory(&m, PG, 0x37, 0, pa, PG);
             ex_try(l, (uint8_t*)m, r, "EX2");
             if (r == 0)
-                sceKernelMunmap(m, PG);
+                HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -11586,7 +12298,7 @@ static void run_ex() {
         void* m = 0;
         if (sceKernelMapFlexibleMemory(&m, PG, 0x3, 0) == 0) {
             ex_try(l, (uint8_t*)m, sceKernelMprotect(m, PG, 0x7), "EX3");
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         } else {
             l.s("SKIP");
         }
@@ -11599,14 +12311,14 @@ static void run_ex() {
         const int32_t r = sceKernelMapFlexibleMemory(&m, PG, 0x7, 0);
         ex_try(l, (uint8_t*)m, r, "EX4");
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         unk(l).end();
     }
     {
         say("EX5 starting");
         Line l = head("EX5", "pool: commit 0x7 | commit 0x3 then mprotect 0x7");
         uint64_t px = 0;
-        sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px);
+        HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x20000, 0x10000, &px));
         void* rv = 0;
         if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) == 0) {
             uint8_t* R = (uint8_t*)rv;
@@ -11614,7 +12326,7 @@ static void run_ex() {
             l.c(ncode(rc)).s(" | ");
             if (sceKernelMemoryPoolCommit(R + 0x10000, 0x10000, 0, 0x3, 0) == 0)
                 ex_try(l, R + 0x10000, sceKernelMprotect(R + 0x10000, 0x10000, 0x7), "EX5");
-            sceKernelMunmap(rv, 0x200000);
+            HF(sceKernelMunmap(rv, 0x200000));
         } else {
             l.s("SKIP");
         }
@@ -11627,7 +12339,7 @@ static void run_ex() {
         const int32_t r = sceKernelMmap(0, PG, 0x7, 0x1002, -1, 0, &m);
         ex_try(l, (uint8_t*)m, r, "EX6");
         if (r == 0)
-            sceKernelMunmap(m, PG);
+            HF(sceKernelMunmap(m, PG));
         unk(l).end();
     }
 }
@@ -11682,7 +12394,7 @@ static void run_p54() {
     const long c = alloc_al(0, g_dmem, 12, blk, 3, &r);
     if (c < 0)
         return setup_failed("P54", "expand window", "alloc", r);
-    sceKernelReleaseDirectMemory(c + (long)PG, 11 * PG);
+    HF(sceKernelReleaseDirectMemory(c + (long)PG, 11 * PG));
     uint64_t px = 0;
     const int32_t rx =
         sceKernelMemoryPoolExpand((uint64_t)c, (uint64_t)c + 0x14000, blk, blk, &px);
@@ -11977,12 +12689,12 @@ static void nx_pb7() {
     Line l = head("PB7", "pool batch: commit entry, null processed count");
     void* rv = 0;
     uint64_t px = 0;
-    sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px);
+    HF(sceKernelMemoryPoolExpand(0, g_dmem, 0x10000, 0x10000, &px));
     if (sceKernelMemoryPoolReserve(0, 0x200000, 0, 0, &rv) != 0)
         return l.s("SKIP reserve").end();
     PbEntry c = pb(1, rv, 0x10000, 0x3, 0);
     l.c(code(sceKernelMemoryPoolBatch(&c, 1, nullptr, 0))).end();
-    sceKernelMunmap(rv, 0x200000);
+    HF(sceKernelMunmap(rv, 0x200000));
 }
 static void nx_bm1() {
     Line l = head("BM5", "BatchMap2: null entries | protect entry, null count out");
@@ -11997,7 +12709,7 @@ static void nx_bm1() {
         e.protection = 0x1;
         e.operation = 2;
         l.c(code(sceKernelBatchMap2(&e, 1, nullptr, 0)));
-        sceKernelMunmap(fm, PG);
+        HF(sceKernelMunmap(fm, PG));
     } else {
         l.c('-');
     }
@@ -12017,7 +12729,7 @@ static void nx_qp2() {
     l.s(" | ").c(code(sceKernelIsStack(&local, nullptr, &e0)));
     l.c(code(sceKernelIsStack(&local, &s0, nullptr)));
     l.end();
-    sceKernelMunmap(f, PG);
+    HF(sceKernelMunmap(f, PG));
 }
 static void nx_cf2() {
     Line l = head("CF2", "ConfiguredFlexibleMemorySize: null out");
@@ -12138,6 +12850,8 @@ int main(void) {
         }
     }
     say("===== DMEM RELEASE TEST =====");
+    // The round of the test: two results files compare only when this line is the same.
+    say("ROUND 128");
     {
         uint32_t sdk = 0;
         Line l;
@@ -12292,6 +13006,8 @@ int main(void) {
         run_last();
         g_section = "pt3";
         run_pt3();
+        g_section = "r128";
+        run_r128();
         g_section = "xr";
         run_xr();
         // the cross-check scratch file, kept open until here (not part of UL1's list)
@@ -12302,6 +13018,13 @@ int main(void) {
             mf_named(xc_path, "dmem_xc.bin");
             sceKernelUnlink(xc_path);
         }
+    }
+    {
+        // counted before this line is written; the comparison script checks both numbers against
+        // the file
+        Line l;
+        const int nr = g_n_result, nl = g_n_layout;
+        l.s("COUNT result lines=").dec(nr).s(" layout lines=").dec(nl).end();
     }
     say("===== DONE =====");
     if (own >= 0) {
