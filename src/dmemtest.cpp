@@ -1398,6 +1398,239 @@ static void b_alias(const char* id, const char* name, uint32_t tag) {
     release_all(pa, 2);
 }
 
+// ---- AL: a second mapping of direct memory that is mapped (round 129) -----------------------------
+// For shadPS4 PR 5736 ("Preserve DMEM mapping state while aliases remain"): the emulator refuses a
+// second mapping with EBUSY when aliasing is not enabled, from what it records as "mapped". B10 has
+// one case of it (plain MapDirectMemory twice: allowed up to SDK 2.00, EBUSY from 2.50). Not
+// measured until now: which mapping functions make the check, whether memory still counts as
+// mapped after one of two mappings is removed, and what else ends "mapped".
+// AL1-AL5 run between B10 and B11, with aliasing never enabled in this process; AL6 after B11.
+
+static char code(int32_t r); // the code letter (defined with the H probes)
+
+// One mapping attempt of `pages` pages at pa by one function; unmapped again when it succeeds.
+//   p MapDirectMemory   n MapNamedDirectMemory   2 MapDirectMemory2 (type 3)
+//   s MapDirectMemory with MAP_STACK (0x400)   b BatchMap   B BatchMap2 with flags 0x10
+// (the two batch calls map at a reservation made for the attempt)
+static int32_t al_try(char kind, long pa, int pages) {
+    struct {
+        void* start;
+        uint64_t offset;
+        uint64_t length;
+        char protection;
+        char type;
+        int16_t reserved;
+        int32_t operation;
+    } e = {nullptr, (uint64_t)pa, (uint64_t)pages * PG, 0x3, 0, 0, 0};
+    const size_t len = (size_t)pages * PG;
+    void* m = 0;
+    int32_t r = -1;
+    if (kind == 'b' || kind == 'B') {
+        void* rv = 0;
+        const int32_t rs = sceKernelReserveVirtualRange(&rv, len, 0, 0);
+        if (rs != 0)
+            return HF(rs);
+        e.start = rv;
+        int32_t n = -1;
+        r = kind == 'b' ? sceKernelBatchMap(&e, 1, &n) : sceKernelBatchMap2(&e, 1, &n, 0x10);
+        HF(sceKernelMunmap(rv, len));
+        return r;
+    }
+    if (kind == 'p')
+        r = sceKernelMapDirectMemory(&m, len, 0x3, 0, pa, PG);
+    else if (kind == 'n')
+        r = sceKernelMapNamedDirectMemory(&m, len, 0x3, 0, pa, PG, "al");
+    else if (kind == '2')
+        r = sceKernelMapDirectMemory2(&m, len, 3, 0x3, 0, pa, PG);
+    else
+        r = sceKernelMapDirectMemory(&m, len, 0x3, 0x400, pa, PG);
+    if (r == 0)
+        HF(sceKernelMunmap(m, len));
+    return r;
+}
+
+// " <label>=" and the code of each kind in `kinds`
+static void al_row(Line& l, const char* label, const char* kinds, long pa, int pages) {
+    l.c(' ').s(label).c('=');
+    for (const char* k = kinds; *k; k++)
+        l.c(code(al_try(*k, pa, pages)));
+}
+
+// The functions an alias can be made with here, tried in this order: plain MapDirectMemory (works
+// below SDK 2.50, B10), then MAP_STACK. Returns the mapping and which one made it ('-' none).
+static uint8_t* al_alias(long pa, int pages, char* how, int32_t* codes) {
+    void* m = 0;
+    codes[0] = sceKernelMapDirectMemory(&m, (size_t)pages * PG, 0x3, 0, pa, PG);
+    codes[1] = 1; // MAP_STACK not tried
+    *how = 'p';
+    if (codes[0] != 0) {
+        m = 0;
+        codes[1] = sceKernelMapDirectMemory(&m, (size_t)pages * PG, 0x3, 0x400, pa, PG);
+        *how = codes[1] == 0 ? 's' : '-';
+    }
+    return *how == '-' ? nullptr : (uint8_t*)m;
+}
+
+static void run_al_off() {
+    say("== AL second mapping of mapped direct memory, aliasing not enabled (shadPS4 PR 5736)");
+    static const char* const kinds = "pn2sbB";
+    int32_t rr = 0;
+    {
+        // AL1: which function refuses. A maps pages 0-3 of a 6-page allocation; every function
+        // maps 0-3 again ("same"), before that the same attempts with nothing mapped ("free":
+        // every one must work, or its code under "same" says nothing about aliasing).
+        // Then plain MapDirectMemory of pages 1-2 (inside A), 3-4 (one page of A, one not),
+        // 4-5 (none of A).
+        Line l = head("AL1", "p n 2 s b B: nothing mapped | pages 0-3 mapped | plain 1-2, 3-4, 4-5");
+        const long pa = alloc(6, 3, &rr);
+        if (pa < 0) {
+            l.s("SKIP").ret("alloc", rr).end();
+        } else {
+            al_row(l, "free", kinds, pa, 4);
+            int32_t ra = 0;
+            uint8_t* a = map((uint64_t)pa, 4, &ra);
+            if (!a) {
+                l.ret(" mapA", ra);
+            } else {
+                al_row(l, "| same", kinds, pa, 4);
+                l.s(" | ").c(code(al_try('p', pa + (long)PG, 2)));
+                l.c(code(al_try('p', pa + 3 * (long)PG, 2)));
+                l.c(code(al_try('p', pa + 4 * (long)PG, 2)));
+            }
+            unmap_all(a, 4);
+            release_all(pa, 6);
+            l.end();
+        }
+    }
+    for (int t = 0; t < 2; t++) {
+        // AL2, AL3: is memory still "mapped" after one of two mappings is removed. A maps 4 pages;
+        // an alias S of the same pages is made with the first function that allows one (alias=p
+        // plain, s MAP_STACK, - none: then the rest cannot be measured this way; "by" has the two
+        // codes). The checks at each step are a plain MapDirectMemory and a MapDirectMemory2 of the
+        // same pages (p2), each unmapped again when it works.
+        //   both: A and S mapped
+        //   AL2: S unmapped ("A left"), then A unmapped ("none")
+        //   AL3: A unmapped ("S left"), then S unmapped ("none")
+        // PR 5736 is the middle step of AL2: before it shadPS4 took the memory as not mapped once
+        // S was gone.
+        Line l = head(t == 0 ? "AL2" : "AL3",
+                      t == 0 ? "A + alias S, p 2: both | S unmapped | A unmapped too"
+                             : "A + alias S, p 2: both | A unmapped | S unmapped too");
+        const long pa = alloc(4, 3, &rr);
+        int32_t ra = 0;
+        uint8_t* a = pa >= 0 ? map((uint64_t)pa, 4, &ra) : nullptr;
+        if (!a) {
+            l.s("SKIP").ret("alloc", rr).ret("mapA", ra).end();
+            release_all(pa, 4);
+            continue;
+        }
+        char how = '-';
+        int32_t by[2] = {0, 0};
+        uint8_t* s = al_alias(pa, 4, &how, by);
+        // by: the code of the plain attempt, then of the MAP_STACK attempt ('-' not tried)
+        l.s("alias=").c(how).s(" by=").c(code(by[0])).c(by[1] == 1 ? '-' : code(by[1]));
+        if (s) {
+            al_row(l, "| both", "p2", pa, 4);
+            uint8_t* first = t == 0 ? s : a;
+            uint8_t* second = t == 0 ? a : s;
+            l.s(" | unmap=").c(code(sceKernelMunmap(first, 4 * PG)));
+            al_row(l, t == 0 ? "A left" : "S left", "p2", pa, 4);
+            l.s(" | unmap=").c(code(sceKernelMunmap(second, 4 * PG)));
+            al_row(l, "none", "p2", pa, 4);
+        } else {
+            HF(sceKernelMunmap(a, 4 * PG));
+        }
+        release_all(pa, 4);
+        l.end();
+    }
+    {
+        // AL4: what ends "mapped", with one mapping A of 4 pages and plain MapDirectMemory as the
+        // check. Each case on its own allocation; first the check with A untouched ("ctl").
+        //   part:   pages 1-2 of A unmapped: check pages 1-2 | check pages 0-3
+        //   over:   a flexible mapping put over all of A (fixed): check 0-3
+        //   prot:   A made no-access: check 0-3
+        //   rel:    the allocation released (which unmaps A) and allocated again at the same
+        //           place: check 0-3 ("moved" when the allocation did not come back there)
+        Line l = head("AL4", "what ends mapped: ctl | part 1-2, 0-3 | flex over | no access | "
+                             "released + allocated");
+        for (int c = 0; c < 5; c++) {
+            static const char* const tag[5] = {"ctl=", " | part=", " | over=", " | prot=", " | rel="};
+            l.s(tag[c]);
+            long pa = alloc(4, 3, &rr);
+            int32_t ra = 0;
+            uint8_t* a = pa >= 0 ? map((uint64_t)pa, 4, &ra) : nullptr;
+            if (!a) {
+                l.s("SKIP");
+                release_all(pa, 4);
+                continue;
+            }
+            if (c == 0) {
+                l.c(code(al_try('p', pa, 4)));
+            } else if (c == 1) {
+                l.c(code(sceKernelMunmap(a + PG, 2 * PG))).c(':');
+                l.c(code(al_try('p', pa + (long)PG, 2))).c(code(al_try('p', pa, 4)));
+            } else if (c == 2) {
+                void* f = a;
+                l.c(code(sceKernelMapFlexibleMemory(&f, 4 * PG, 0x3, 0x10))).c(':');
+                l.c(code(al_try('p', pa, 4)));
+            } else if (c == 3) {
+                l.c(code(sceKernelMprotect(a, 4 * PG, 0x0))).c(':');
+                l.c(code(al_try('p', pa, 4)));
+            } else {
+                l.c(code(sceKernelReleaseDirectMemory(pa, 4 * PG))).c(':');
+                const long again = alloc_in((uint64_t)pa, (uint64_t)pa + 4 * PG, 4, 3, &rr);
+                if (again != pa) {
+                    l.s("moved");
+                    release_all(again, 4);
+                    pa = -1;
+                } else {
+                    l.c(code(al_try('p', pa, 4)));
+                }
+            }
+            // whatever is mapped at A's address now (A, its rest, or the flexible mapping) goes
+            unmap_all(a, 4);
+            release_all(pa, 4);
+        }
+        l.end();
+    }
+    {
+        // AL5: the same memory mapped twice by one call each way round is B10; here two mappings
+        // that share no page but lie in one allocation, then a third over both: A pages 0-1, B
+        // pages 2-3 (must work: nothing shared), then plain and Map2 of pages 0-3.
+        Line l = head("AL5", "A 0-1, B 2-3 (no page shared): map B | p 2 of 0-3");
+        const long pa = alloc(4, 3, &rr);
+        int32_t ra = 0, rb = 0;
+        uint8_t* a = pa >= 0 ? map((uint64_t)pa, 2, &ra) : nullptr;
+        uint8_t* b = a ? map((uint64_t)pa + 2 * PG, 2, &rb) : nullptr;
+        if (!a) {
+            l.s("SKIP").ret("alloc", rr).ret("mapA", ra);
+        } else {
+            l.c(code(rb));
+            al_row(l, "|", "p2", pa, 4);
+        }
+        unmap_all(a, 2);
+        unmap_all(b, 2);
+        release_all(pa, 4);
+        l.end();
+    }
+}
+
+// AL6, after B11: the row of AL1 with aliasing enabled
+static void run_al_on() {
+    int32_t rr = 0;
+    Line l = head("AL6", "aliasing enabled, p n 2 s b B: pages 0-3 mapped");
+    const long pa = alloc(4, 3, &rr);
+    int32_t ra = 0;
+    uint8_t* a = pa >= 0 ? map((uint64_t)pa, 4, &ra) : nullptr;
+    if (!a)
+        l.s("SKIP").ret("alloc", rr).ret("mapA", ra);
+    else
+        al_row(l, "same", "pn2sbB", pa, 4);
+    unmap_all(a, 4);
+    release_all(pa, 4);
+    l.end();
+}
+
 static void run_b() {
     say("== B  release of mapped memory (va: one char per mapped page)");
     b_case("B1", "rel  all 4, mapped all 4", REL, 4, 0, 4, 0, 4 * PG, 0x5A010000);
@@ -1410,11 +1643,14 @@ static void run_b() {
     b_split("B8", "rel  2-5, 1 map, types 0+3", 0, 3, 0x5A080000);
     b_split("B9", "rel  2-5, 1 map, types 3+3", 3, 3, 0x5A090000);
     b_alias("B10", "map twice, rel", 0x5A0A0000);
+    run_al_off();
+    say("== B  (continued)");
     {
         Line l = head("B11", "enable dmem aliasing");
         l.ret("ret", sceKernelEnableDmemAliasing()).end();
     }
     b_alias("B12", "map twice after enable, rel", 0x5A0C0000);
+    run_al_on();
 }
 
 // ---- D: release edges -----------------------------------------------------------------------
@@ -11070,7 +11306,9 @@ struct Spec {
 };
 
 static const Spec SPECS[] = {
-    {"CV0", "alias before / after EnableDmemAliasing", K_ALIAS_GATE, 0, 0, 0, 0, 0, 0},
+    // In this test aliasing is already on when CV0 runs (B11): "before" is not a mapping without
+    // aliasing. B10, B12 and AL1-AL6 measure that.
+    {"CV0", "alias (aliasing on since B11); enable again", K_ALIAS_GATE, 0, 0, 0, 0, 0, 0},
     {"CV1", "no alias; mtype A 0-7", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 0, 8},
     {"CV2", "no alias; munmap A 0-7", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 0, 8},
     {"CV3", "no alias; munmap A 2-4", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 2, 3},
@@ -12851,7 +13089,7 @@ int main(void) {
     }
     say("===== DMEM RELEASE TEST =====");
     // The round of the test: two results files compare only when this line is the same.
-    say("ROUND 128");
+    say("ROUND 129");
     {
         uint32_t sdk = 0;
         Line l;

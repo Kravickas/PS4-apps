@@ -601,6 +601,42 @@ for the SDK 12.00 package. Whether the "@f/@u" check sees everything that can ma
 fail is open: it uses VirtualQuery, which does not report system library area mappings (those print
 "@s").
 
+## Round 129: shadPS4 PR 5736 (mapped state of direct memory while aliases remain)
+
+Round 129 is round 128 with the AL probes added and CV0 renamed. I have no results of round 128.
+
+The PR (upstream, against 9ac8b23): a count of live direct mappings per physical range, so that
+unmapping one of two mappings leaves the range "mapped"; it becomes "allocated" when the last
+mapping is gone. Upstream reads "mapped" in one place: MapMemory refuses a mapping of mapped memory
+with EBUSY when the caller asks for the check (MapNamedDirectMemory from SDK 2.50 without
+MAP_STACK and with aliasing not enabled; MapDirectMemory2 whenever aliasing is not enabled, at
+every SDK). Queries, GetDirectMemoryType and release treat mapped and allocated alike.
+
+What the PS4 results of round 127 say:
+
+- B10 (plain MapDirectMemory twice, aliasing not enabled): allowed at SDK 1.00, 1.70, 2.00; EBUSY at
+  2.50 and every later one. Agrees with the SDK 2.50 condition of MapNamedDirectMemory upstream.
+- mtypeprotect over pages another mapping also maps is EBUSY (CV21, CV22, CV50, CV51, CV56, CV99),
+  and is not once that mapping is unmapped (CV30, CV53) or for pages no other mapping has (CV52,
+  CV57, CV58): the PS4 knows per page whether another mapping exists and forgets it with the
+  unmap. Another function than the PR touches; the same model.
+- The regions DirectMemoryQuery and GetDirectMemoryType report do not change with mappings or
+  aliases (every CV line: gt[0-8:3] dq[0-8:3]); a checked release of mapped memory succeeds (CV5,
+  CV33). Agrees with treating mapped and allocated alike there.
+
+Not measured until round 129, and what measures it:
+
+| Question | Probe |
+|---|---|
+| Which functions refuse a second mapping, at each SDK: MapDirectMemory, MapNamedDirectMemory, MapDirectMemory2, MapDirectMemory with MAP_STACK, BatchMap, BatchMap2. Upstream has no SDK condition on Map2 and none of the check for MAP_STACK. | AL1 ("same" row; the "free" row is the control that each call works at all) |
+| Is the check per page: a mapping inside the mapped pages, one sharing one page, one sharing none | AL1 (last three), AL5 |
+| The PR's case: two mappings, one removed, is the memory still mapped. Needs an alias made with aliasing not enabled: plain below SDK 2.50, MAP_STACK from 2.50 if the PS4 allows it there ("alias=", "by="). If no function allows an alias, the state cannot be reached on the PS4 this way and the PR changes nothing an application can see. | AL2 (alias removed first), AL3 (first mapping removed first); checks by MapDirectMemory and MapDirectMemory2 |
+| What ends "mapped": a partial unmap, a flexible mapping put over it, no-access protection, release and allocation again | AL4 |
+| The same row once aliasing is enabled | AL6 |
+
+CV0 ("alias before / after EnableDmemAliasing") runs after B11 has enabled aliasing, so its "before"
+never was a mapping without aliasing; renamed. B10, B12 and AL1-AL6 are the measurements.
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after
