@@ -637,6 +637,114 @@ Not measured until round 129, and what measures it:
 CV0 ("alias before / after EnableDmemAliasing") runs after B11 has enabled aliasing, so its "before"
 never was a mapping without aliasing; renamed. B10, B12 and AL1-AL6 are the measurements.
 
+## Round 129 results (PS4 FW 12.02 and shadPS4, all 12 SDKs)
+
+Both runs complete: ROUND 129, DONE and COUNT (985 result lines) in all 24 files. shadPS4 was a
+build with batch 3: "SceGnmDriver" is at 0xFF0000000 from SDK 2.50 (LY K4, K6), which batch 3b
+undoes, so K1b, K1c, K1d, K1e, VQ10-VQ12, VQ15, VQ16 of that run are the batch 3 regression again.
+
+Second mapping of mapped direct memory (run as AL1-AL6; TW1-TW6 from round 130). PS4:
+
+| | SDK 1.00, 1.70, 2.00 | SDK 2.50 and later |
+|---|---|---|
+| MapDirectMemory, MapNamedDirectMemory | allowed | EBUSY |
+| MapDirectMemory2 | EBUSY | EBUSY |
+| MapDirectMemory with MAP_STACK | allowed | allowed |
+| BatchMap, BatchMap2 | allowed | EBUSY |
+| plain mapping of pages 1-2 / 3-4 / 4-5 with 0-3 mapped | allowed | EBUSY / EBUSY / allowed: per page |
+| Two mappings, one unmapped (either one): Map2, and plain from 2.50 | still EBUSY | still EBUSY |
+| Both unmapped | allowed | allowed |
+| A partly unmapped: its unmapped pages / all four | (allowed) | allowed / EBUSY |
+| A flexible mapping put over A (fixed) | (allowed) | allowed: no longer mapped |
+| A made no-access | (allowed) | EBUSY: still mapped |
+| Released and allocated again | (allowed) | allowed |
+| A pages 0-1, B pages 2-3 (nothing shared): map B / then 0-3 by plain, Map2 | o / o, EBUSY | o / EBUSY, EBUSY |
+| After EnableDmemAliasing, all six functions | allowed | allowed |
+
+So: an alias can exist without aliasing enabled at every SDK (plain below 2.50, MAP_STACK from
+2.50), a MAP_STACK mapping counts as mapped, and memory stays "mapped" until its last mapping is
+gone. That is what shadPS4 PR 5736 does; its conditions upstream (MapNamedDirectMemory from SDK
+2.50 and not with MAP_STACK, MapDirectMemory2 at every SDK) are the PS4's. The fork fails AL1 (from
+the MAP_STACK attempt on), AL2, AL3 and AL5 below 2.50 through the one fault the PR fixes: after one
+of two mappings is unmapped it takes the memory as not mapped. AL4 and AL6 match.
+
+Other results:
+
+- K1d, the same at every SDK: MapDirectMemory2 searched with hint 7EFFF8000 maps there; 7EFFFC000
+  (one or two pages), 7F0000000, 900000000, FEFFFC000 go to FF0000000; FF0000000 maps there. Fixed
+  (no-overwrite): 7EFFF8000 ok; 7EFFFC000, 7F0000000, 900000000, FEFFFC000 EINVAL; FF0000000 and
+  1000000000 ok. MapDirectMemory with MAP_STACK at 900000000, searched and fixed: maps there, at
+  every SDK. The system library area rules are MapDirectMemory2's own, with no SDK condition.
+- K1e, every SDK: with 7EFFF0000-7EFFFC000 taken, MapDirectMemory, Map2, flexible and a reservation
+  with hint 7EFFF0000 all land on 7EFFFC000, the page ending at 7F0000000. The move to FF0000000
+  depends on the address given, not on where the search ends.
+- VQ18: the PS4 writes all 0x48 bytes; flags 0x11. shadPS4 leaves the upper three bits of the flags
+  byte and the seven bytes after the name (64 of the about 100 differing result lines per SDK
+  differ only by those three bits: F8/E8/F1/F2/E0).
+  What the PS4 writes after the name was not printed; round 130 prints it.
+- DQ3: DirectMemoryQuery writes its 0x18 bytes on both; a failing query writes nothing on both.
+- HF: three on the PS4, none on shadPS4, at every SDK: sceKernelMemoryPoolDecommit of a block of a
+  reservation that was unmapped (clean-up of CV90, CV92, CV94) is EINVAL on the PS4, 0 on shadPS4.
+  shadPS4 checked only the areas ending inside the range; the block lies inside a larger free area.
+- PX1, PX3, every SDK: site=P on the PS4 (the name of a POSIX mmap mapping is the return address
+  of the function that called mmap), site=C on shadPS4 (the mmap call's). sceKernelMmap: C on both.
+- FR13-FR18 (three no-access pages L, M, R from three call sites, renamed together), PS4:
+
+  | order made | SDK 1.00-5.05 | 5.50 | 12.00 |
+  |---|---|---|---|
+  | L M R | 0-C | 0-C | 0-C |
+  | R M L | apart | 0-C | 0-C |
+  | M R L | apart | apart | 0-4,4-C |
+  | M L R | apart | apart | 0-4,4-C |
+  | L R M | 0-8,8-C | 0-8,8-C | 0-8,8-C |
+  | R L M | 0-8,8-C | 0-8,8-C | 0-8,8-C |
+
+  The rule put up in round 127 ("below 5.50 two neighbours merge only when the younger is the
+  right one") is wrong: it gives 0-4,4-C for M R L and M L R below 5.50. What fits below 5.50: the
+  rename merges from the left end and stops at the first pair that does not merge (a pair merges
+  when its right page is the younger). It does not explain 5.50 (R M L merges, M R L does not) or
+  12.00. shadPS4 merges all six to 0-C. FR19, FR20: renaming one page at a time gives the result of
+  renaming both.
+  The names printed for the call sites (n=aaa) are wrong: see the faults below.
+- CV63-CV66 (same on both): a release with the alias still mapped unmaps both mappings; a partial
+  release unmaps the released pages of A and all of the alias; the type a Map2 alias set stays
+  after the alias is unmapped.
+- LA1, LA2 with codes, SY1 (apart from the flags), M4, K1e: same on both.
+- Null-pointer cases as round 127: E18, RV8, CF2 end the app on the PS4.
+- Still different and known: N3, N6, SH1, MP2 (low and high addresses the host cannot map), K2, Y2,
+  HB2, HB4 (layout), CF1, CL1, VQ14 (module list, Dlsym of handle 0x2001), DF1-DF4 (/dev/dmem1,
+  /dev/gc), CO3, CO16, FR4, FR9-FR12, FW10 (merging and void names).
+
+Faults of the test found in this round, fixed in round 130:
+
+- AL1, AL2, AL3 were already the IDs of allocation probes: each named two lines. Now TW1-TW6.
+- fr_name printed 'a' for every call site: it took the first of fr_a, fr_b, fr_c within 0x100
+  bytes, and the three lie one after another. It takes the nearest now. The "n=" letters of round
+  129 say nothing about which site named a page; M, 0 and quoted names are right.
+- vq_rel tested "inside the function" before "the parent's return address"; now the exact test
+  first.
+- A state file of the may-end-the-app cases left by an earlier run made a new run skip them; the
+  first executable of a run resets it.
+
+## shadPS4 batch 4 (on batch 3b)
+
+- sceKernelMapDirectMemory2: the system library area rules for application callers, at every SDK
+  (K1d): fixed reaching the area EINVAL, searched from an address reaching it moved to FF0000000.
+  Registered with its caller; calls by the emulator and from the system library area keep their
+  address, as in batch 3b.
+- VirtualQuery writes the upper three bits of the flags byte as 0 (VQ18). The seven bytes after
+  the name are left as they were until their value is measured.
+- PoolDecommit: EINVAL when any area in the range is not pool memory, also when the range lies
+  inside a larger area (HF of CV90, CV92, CV94; PD1, NU5).
+- Not in it: PR 5736's mapping count (take the PR), the POSIX mmap name (PX4 first), the rename
+  merge rules (not understood).
+
+## Round 130
+
+Round 129 with the four faults above fixed, VQ18 printing the bytes from 0x26 to 0x47, and PX4
+among the cases that may end the app: mmap called with rbp pointing at a made-up frame, to see
+whether the name is the word at rbp+8.
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after

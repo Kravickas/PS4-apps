@@ -1398,13 +1398,15 @@ static void b_alias(const char* id, const char* name, uint32_t tag) {
     release_all(pa, 2);
 }
 
-// ---- AL: a second mapping of direct memory that is mapped (round 129) -----------------------------
+// ---- TW: a second mapping of direct memory that is mapped (round 129) -----------------------------
+// (TW1-TW6 were AL1-AL6 in round 129: those IDs were already taken by the allocation probes of the
+// firmware test list, so each of AL1-AL3 was the ID of two different lines.)
 // For shadPS4 PR 5736 ("Preserve DMEM mapping state while aliases remain"): the emulator refuses a
 // second mapping with EBUSY when aliasing is not enabled, from what it records as "mapped". B10 has
 // one case of it (plain MapDirectMemory twice: allowed up to SDK 2.00, EBUSY from 2.50). Not
 // measured until now: which mapping functions make the check, whether memory still counts as
 // mapped after one of two mappings is removed, and what else ends "mapped".
-// AL1-AL5 run between B10 and B11, with aliasing never enabled in this process; AL6 after B11.
+// TW1-TW5 run between B10 and B11, with aliasing never enabled in this process; TW6 after B11.
 
 static char code(int32_t r); // the code letter (defined with the H probes)
 
@@ -1472,16 +1474,16 @@ static uint8_t* al_alias(long pa, int pages, char* how, int32_t* codes) {
 }
 
 static void run_al_off() {
-    say("== AL second mapping of mapped direct memory, aliasing not enabled (shadPS4 PR 5736)");
+    say("== TW second mapping of mapped direct memory, aliasing not enabled (shadPS4 PR 5736)");
     static const char* const kinds = "pn2sbB";
     int32_t rr = 0;
     {
-        // AL1: which function refuses. A maps pages 0-3 of a 6-page allocation; every function
+        // TW1: which function refuses. A maps pages 0-3 of a 6-page allocation; every function
         // maps 0-3 again ("same"), before that the same attempts with nothing mapped ("free":
         // every one must work, or its code under "same" says nothing about aliasing).
         // Then plain MapDirectMemory of pages 1-2 (inside A), 3-4 (one page of A, one not),
         // 4-5 (none of A).
-        Line l = head("AL1", "p n 2 s b B: nothing mapped | pages 0-3 mapped | plain 1-2, 3-4, 4-5");
+        Line l = head("TW1", "p n 2 s b B: nothing mapped | pages 0-3 mapped | plain 1-2, 3-4, 4-5");
         const long pa = alloc(6, 3, &rr);
         if (pa < 0) {
             l.s("SKIP").ret("alloc", rr).end();
@@ -1503,17 +1505,17 @@ static void run_al_off() {
         }
     }
     for (int t = 0; t < 2; t++) {
-        // AL2, AL3: is memory still "mapped" after one of two mappings is removed. A maps 4 pages;
+        // TW2, TW3: is memory still "mapped" after one of two mappings is removed. A maps 4 pages;
         // an alias S of the same pages is made with the first function that allows one (alias=p
         // plain, s MAP_STACK, - none: then the rest cannot be measured this way; "by" has the two
         // codes). The checks at each step are a plain MapDirectMemory and a MapDirectMemory2 of the
         // same pages (p2), each unmapped again when it works.
         //   both: A and S mapped
-        //   AL2: S unmapped ("A left"), then A unmapped ("none")
-        //   AL3: A unmapped ("S left"), then S unmapped ("none")
-        // PR 5736 is the middle step of AL2: before it shadPS4 took the memory as not mapped once
+        //   TW2: S unmapped ("A left"), then A unmapped ("none")
+        //   TW3: A unmapped ("S left"), then S unmapped ("none")
+        // PR 5736 is the middle step of TW2: before it shadPS4 took the memory as not mapped once
         // S was gone.
-        Line l = head(t == 0 ? "AL2" : "AL3",
+        Line l = head(t == 0 ? "TW2" : "TW3",
                       t == 0 ? "A + alias S, p 2: both | S unmapped | A unmapped too"
                              : "A + alias S, p 2: both | A unmapped | S unmapped too");
         const long pa = alloc(4, 3, &rr);
@@ -1544,14 +1546,14 @@ static void run_al_off() {
         l.end();
     }
     {
-        // AL4: what ends "mapped", with one mapping A of 4 pages and plain MapDirectMemory as the
+        // TW4: what ends "mapped", with one mapping A of 4 pages and plain MapDirectMemory as the
         // check. Each case on its own allocation; first the check with A untouched ("ctl").
         //   part:   pages 1-2 of A unmapped: check pages 1-2 | check pages 0-3
         //   over:   a flexible mapping put over all of A (fixed): check 0-3
         //   prot:   A made no-access: check 0-3
         //   rel:    the allocation released (which unmaps A) and allocated again at the same
         //           place: check 0-3 ("moved" when the allocation did not come back there)
-        Line l = head("AL4", "what ends mapped: ctl | part 1-2, 0-3 | flex over | no access | "
+        Line l = head("TW4", "what ends mapped: ctl | part 1-2, 0-3 | flex over | no access | "
                              "released + allocated");
         for (int c = 0; c < 5; c++) {
             static const char* const tag[5] = {"ctl=", " | part=", " | over=", " | prot=", " | rel="};
@@ -1594,10 +1596,10 @@ static void run_al_off() {
         l.end();
     }
     {
-        // AL5: the same memory mapped twice by one call each way round is B10; here two mappings
+        // TW5: the same memory mapped twice by one call each way round is B10; here two mappings
         // that share no page but lie in one allocation, then a third over both: A pages 0-1, B
         // pages 2-3 (must work: nothing shared), then plain and Map2 of pages 0-3.
-        Line l = head("AL5", "A 0-1, B 2-3 (no page shared): map B | p 2 of 0-3");
+        Line l = head("TW5", "A 0-1, B 2-3 (no page shared): map B | p 2 of 0-3");
         const long pa = alloc(4, 3, &rr);
         int32_t ra = 0, rb = 0;
         uint8_t* a = pa >= 0 ? map((uint64_t)pa, 2, &ra) : nullptr;
@@ -1615,10 +1617,10 @@ static void run_al_off() {
     }
 }
 
-// AL6, after B11: the row of AL1 with aliasing enabled
+// TW6, after B11: the row of TW1 with aliasing enabled
 static void run_al_on() {
     int32_t rr = 0;
-    Line l = head("AL6", "aliasing enabled, p n 2 s b B: pages 0-3 mapped");
+    Line l = head("TW6", "aliasing enabled, p n 2 s b B: pages 0-3 mapped");
     const long pa = alloc(4, 3, &rr);
     int32_t ra = 0;
     uint8_t* a = pa >= 0 ? map((uint64_t)pa, 4, &ra) : nullptr;
@@ -5294,7 +5296,8 @@ static void vq_rel(Line& l, uint64_t at, uint64_t fn, uint64_t parent_ret = 0) {
         v = (v << 4) | (uint64_t)(c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0');
     }
     l.shex((long long)(v - fn));
-    l.s(" site=").c(v > fn && v - fn < 0x100 ? 'C' : parent_ret && v == parent_ret ? 'P' : '?');
+    // P is an exact address and is tested first; C is "within 0x100 bytes after fn's start"
+    l.s(" site=").c(parent_ret && v == parent_ret ? 'P' : v > fn && v - fn < 0x100 ? 'C' : '?');
 }
 
 // one creator per kind of mapping for VQ7 (they call the real functions, so the names are their own)
@@ -10086,12 +10089,19 @@ static void fr_name(Line& l, const void* at) {
         v = (v << 4) | (uint64_t)(ch >= 'a' ? ch - 'a' + 10 : ch - '0');
     }
     if (addr) {
+        // The function whose start is the nearest below the address. (Round 129 took the first
+        // of the three within 0x100 bytes: they are small and lie one after another, so every
+        // call site printed as 'a'.)
         static int32_t (*const fns[3])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c};
+        int best = -1;
         for (int i = 0; i < 3; i++) {
-            if (v > (uint64_t)fns[i] && v - (uint64_t)fns[i] < 0x100) {
-                l.c((char)('a' + i));
-                return;
-            }
+            const uint64_t f = (uint64_t)fns[i];
+            if (v > f && v - f < 0x100 && (best < 0 || f > (uint64_t)fns[best]))
+                best = i;
+        }
+        if (best >= 0) {
+            l.c((char)('a' + best));
+            return;
         }
         l.s("\"anon:<12x>\"");
         l.lay().c(' ').s(nm).beh();
@@ -10797,7 +10807,8 @@ static void run_r128() {
         // buffer: the written bytes (8 per group; 0x48 are the result), then the fields past the
         // addresses: protection and memory type as 32-bit values, the flags byte, the name.
         // Then a query of free memory: code, and how many bytes of the FF buffer changed.
-        Line l = head("VQ18", "VirtualQuery writes: mask | prot type flags name | free: code changed");
+        Line l = head("VQ18", "VirtualQuery writes: mask | prot type flags name tail | free: code "
+                              "changed");
         void* m = 0;
         void* hole = 0;
         if (sceKernelReserveVirtualRange(&hole, PG, 0, 0) == 0)
@@ -10820,6 +10831,14 @@ static void run_r128() {
             for (int k = 0; k < 32 && ff[0x21 + k] && ff[0x21 + k] != 0xFF; k++)
                 l.c(ff[0x21 + k] >= 0x20 && ff[0x21 + k] < 0x7F ? (char)ff[0x21 + k] : '?');
             l.c('"');
+            // round 130: the bytes 0x26-0x47 of the FF buffer (the name after "vq18" and its end,
+            // and the seven bytes after the name), two hex digits each: round 129 showed the PS4
+            // writes them, not what it writes
+            l.s(" tail=");
+            for (int k = 0x26; k < 0x48; k++) {
+                static const char hx[] = "0123456789ABCDEF";
+                l.c(hx[ff[k] >> 4]).c(hx[ff[k] & 15]);
+            }
             HF(sceKernelMunmap(m, PG));
         }
         l.s(" | ");
@@ -11307,7 +11326,7 @@ struct Spec {
 
 static const Spec SPECS[] = {
     // In this test aliasing is already on when CV0 runs (B11): "before" is not a mapping without
-    // aliasing. B10, B12 and AL1-AL6 measure that.
+    // aliasing. B10, B12 and TW1-TW6 measure that.
     {"CV0", "alias (aliasing on since B11); enable again", K_ALIAS_GATE, 0, 0, 0, 0, 0, 0},
     {"CV1", "no alias; mtype A 0-7", K_DIRECT, C_NONE, 0, 0, O_MTYPE, 0, 8},
     {"CV2", "no alias; munmap A 0-7", K_DIRECT, C_NONE, 0, 0, O_MUNMAP, 0, 8},
@@ -12976,17 +12995,84 @@ static void nx_cf2() {
         return l.s("SKIP dlsym").end();
     l.c(code(((int32_t(*)(uint64_t*))fn)(nullptr))).end();
 }
-static const int g_null_cases = 8;
+// PX4 (round 130): which address the name of a POSIX mmap mapping is. PX1 and PX3 (round 129, every
+// SDK): on the PS4 it is the return address of the function that called mmap, not the return
+// address of the mmap call. Functions here have frame pointers, so that address is also the word
+// at rbp+8 when mmap is entered. PX4 tells the two apart: mmap is called with rbp pointing at a
+// made-up frame {next frame, 0x111111111110}, the next one being {0, 0x222222222220}.
+//   frame   the name is the word at rbp+8 (libkernel reads it through the frame pointer)
+//   frame2  the word one frame further up
+//   call    the return address of the mmap call itself (inside px4_call)
+//   ?       none of them (the name is in the notes)
+// Among the cases that may end the app: what libkernel does with a frame that is not on the
+// stack is not known.
+extern "C" {
+__attribute__((used)) uint64_t g_px4_frame[2];
+__attribute__((used)) uint64_t g_px4_frame2[2];
+}
+__attribute__((naked, noinline)) static void* px4_call() {
+    __asm__("push %rbp\n"
+            "lea g_px4_frame(%rip), %rbp\n"
+            "xor %edi, %edi\n"
+            "mov $0x4000, %esi\n"
+            "mov $3, %edx\n"
+            "mov $0x1002, %ecx\n"
+            "mov $-1, %r8d\n"
+            "xor %r9d, %r9d\n"
+            "call mmap@PLT\n"
+            "pop %rbp\n"
+            "ret\n");
+}
+static void nx_px4() {
+    Line l = head("PX4", "POSIX mmap, rbp at a made-up frame: the name is");
+    g_px4_frame2[0] = 0;
+    g_px4_frame2[1] = 0x222222222220ull;
+    g_px4_frame[0] = (uint64_t)g_px4_frame2;
+    g_px4_frame[1] = 0x111111111110ull;
+    void* m = px4_call();
+    if (m == (void*)-1 || m == nullptr)
+        return l.s("SKIP mmap failed").end();
+    unsigned char vi[0x60];
+    out_prefill(vi, sizeof(vi));
+    const int32_t r = sceKernelVirtualQuery(m, 0, vi, 0x48);
+    const char* nm = (const char*)vi + 0x21;
+    bool addr = r == 0 && nm[0] == 'a' && nm[1] == 'n' && nm[2] == 'o' && nm[3] == 'n' &&
+                nm[4] == ':' && nm[17] == 0;
+    uint64_t v = 0;
+    for (int k = 5; addr && k < 17; k++) {
+        const char ch = nm[k];
+        addr = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        v = (v << 4) | (uint64_t)(ch >= 'a' ? ch - 'a' + 10 : ch - '0');
+    }
+    const uint64_t fn = (uint64_t)&px4_call;
+    if (r != 0)
+        l.s("vq ").c(code(r));
+    else if (!addr)
+        l.s("not an address name");
+    else if (v == 0x111111111110ull)
+        l.s("frame");
+    else if (v == 0x222222222220ull)
+        l.s("frame2");
+    else if (v > fn && v - fn < 0x40)
+        l.s("call");
+    else
+        l.c('?');
+    if (r == 0)
+        l.lay().s("name=").s(nm).beh();
+    l.end();
+    HF(sceKernelMunmap(m, 0x4000));
+}
+static const int g_null_cases = 9;
 // State values: k (0..g_null_cases) = case k is next, written before case k-1 is called, so a state
 // of k with k >= 1 after the app ended names case k-1; g_null_done = all ran to the end. Before
 // round 127 the state after the last case was g_null_cases either way, so a last case that ended
 // the app (CF2 on the PS4, round 126) was not recorded.
 static const int g_null_done = g_null_cases + 1;
-static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8",
-                                                     "PB7", "BM5", "QP2", "CF2"};
+static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8", "PB7",
+                                                     "BM5", "QP2", "CF2", "PX4"};
 static void run_null_last() {
-    static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4,
-                                                   nx_pb7, nx_bm1, nx_qp2, nx_cf2};
+    static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4, nx_pb7,
+                                                   nx_bm1, nx_qp2, nx_cf2, nx_px4};
     const char* const* ids = g_null_ids;
     const int n = g_null_cases;
     int next = null_state_read();
@@ -13077,6 +13163,11 @@ int main(void) {
         chain_state_write(&chain);
     }
     log_init();
+    // The first executable of a run starts over: the cases that may end the app run again at the
+    // end of this run (round 130). Until round 129 a state file left by an earlier run said "all
+    // run", and they were skipped unless the file had been deleted by hand.
+    if (own == 0)
+        null_state_write(0);
     g_dmem = (uint64_t)sceKernelGetDirectMemorySize();
     {
         char xc_path[64];
@@ -13089,7 +13180,7 @@ int main(void) {
     }
     say("===== DMEM RELEASE TEST =====");
     // The round of the test: two results files compare only when this line is the same.
-    say("ROUND 129");
+    say("ROUND 130");
     {
         uint32_t sdk = 0;
         Line l;
