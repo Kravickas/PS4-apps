@@ -84,14 +84,15 @@
  * neither, and the runs. Cases: WAIT_REG_MEM ENGINE ME / PFP, DRAW_INDEX_OFFSET_2
  * (sceGnmDrawIndexOffset, INDEX_BASE) / DRAW_INDEX_2, ranges 26622+6144 (the app's), 32763+3,
  * 24574+8192, 16382+16384, 0+6144, delay 0 / 2 ms; I_RP: the app's case, only the last index
- * changed; I_P*: ME, DRAW_INDEX_OFFSET_2, start addresses 0x8000 / 0x8800 / 0x8FFE (16-bit) and
+ * changed; I_R*: start addresses 0x8040 / 0x8080 / 0x8100 / 0x8200 / 0x8300 / 0x83C0 (16-bit);
+ * I_P*: ME, DRAW_INDEX_OFFSET_2, start addresses 0x8000 / 0x8800 / 0x8FFE (16-bit) and
  * 0x4000 / 0x3FFC (32-bit indices); I_A*: start addresses 0x8002 / 0x8402 (16-bit), 0x8004
  * (32-bit); I_2DRAW / I_2DRAW_U / I_3DRAW: two or three draws after the wait. Budget model (the
- * PS4, triangle-3 and -4: every ME case): with the wait in the ME, 12 KiB of index data past the
- * draw's start rounded up to A bytes are read before the wait ends (old), shared by the draws
- * after the wait in order; the rest after (new); with the wait in the PFP all new. A is between
- * 8 and 2048 bytes: both ends are predicted, and the start rounded up as the PS4 read it
- * (old end - budget) is logged. RP       the app's frame: its command buffer
+ * PS4, triangle-3 to -5: every ME case): with the wait in the ME, 12 KiB of index data past the
+ * draw's start rounded to the nearest multiple of A bytes are read before the wait ends (old),
+ * shared by the draws after the wait in order; the rest after (new); with the wait in the PFP
+ * all new. A is between 16 and 1024 bytes: the A that match are listed, and the start as the PS4
+ * read it (old end - budget left) is logged. RP       the app's frame: its command buffer
  * (sceGnmDrawInitDefaultHardwareState350, its render target - here linear, the display buffer fb 0
  * -, viewport, scissors, window offset, hardware screen offset, guard band, the embedded rect
  * shaders, its triangle shaders and fetch shader byte for byte, the reversed-halves index buffer,
@@ -101,6 +102,15 @@
  *            The colours: its CB format (8_8_8_8 SRGB, COMP_SWAP ALT) on ShadCube4's A8R8G8B8
  *            display shows red as red (its own app used A8B8G8R8, which shows it blue).
  *
+ * RPB      the app's frame again, with its index buffer's first half mapped over the frame's first
+ *          16 KiB as in shadPS4 (reserved range, fixed maps, the frame registered and filled
+ *          before the index buffer is mapped, as the app does), shown 10 s: what the PS4 displays
+ *          there. Rows 0..3 as read through the frame's address are logged.
+ * GB       guard band: viewport 64,32-192,96, the full-viewport triangle (it reaches past the
+ *          viewport to the right and up), PA_CL_GB_* 1 / 2 / (1.5, 1.25), with and without a
+ *          vertex window offset; every pixel against two models: clipped to the guard band, then
+ *          offset (MODEL), or offset, then clipped (OFFSET FIRST).
+ *
  * After a crash or a GPU hang close the app and launch it again: the step that was running is
  * logged as CRASHED / HUNG and skipped. TRIANGLE_BUILD changes restart the run (log truncated).
  * When all steps are done the run does not repeat until triangle.state is deleted; the RP frame
@@ -108,7 +118,7 @@
  * linear image readbacks (the CPU reads GPU results). */
 #include "ps_triangle.h"
 
-#define TRIANGLE_BUILD "triangle-5"
+#define TRIANGLE_BUILD "triangle-6"
 #define TRIANGLE_TIMEOUT_US 2000000u
 #define TRIANGLE_SHOW_S 10
 #define TRIANGLE_DCB_DW 0x4000u
@@ -126,6 +136,8 @@ extern int munmap(void* addr, unsigned long len);
 extern int sceKernelVirtualQuery(const void* addr, int flags, void* info, unsigned long size);
 extern int sceKernelGetModuleList(int* handles, unsigned long size, unsigned long* available);
 extern int sceKernelGetModuleInfo(int handle, void* info);
+extern int sceKernelReserveVirtualRange(void** addr, unsigned long len, int flags,
+                                        unsigned long align);
 extern int sceKernelAllocateMainDirectMemory(unsigned long len, unsigned long align, int type,
                                              long* phys);
 extern int sceKernelIsNeoMode(void);
@@ -1637,6 +1649,120 @@ static int tri_scissor_case(struct TriangleContext* c, int k) {
     return 0;
 }
 
+/* ==== GB: guard band and window offset ==========================================================
+ */
+#define TRI_NG 12
+static const struct {
+    float gbx, gby;
+    int16_t ox, oy;
+} k_tri_gb[TRI_NG] = {
+    {1.0f, 1.0f, 0, 0},  {1.0f, 1.0f, 16, 8},  {1.0f, 1.0f, -16, -8},  {1.0f, 1.0f, 40, -20},
+    {2.0f, 2.0f, 0, 0},  {2.0f, 2.0f, 16, 8},  {2.0f, 2.0f, -16, -8},  {2.0f, 2.0f, 40, -20},
+    {1.5f, 1.25f, 0, 0}, {1.5f, 1.25f, 16, 8}, {1.5f, 1.25f, -16, -8}, {1.5f, 1.25f, 40, -20},
+};
+/* Viewport of the GB cases: x 128 +- 64, y 64 -+ 32 (y flipped). The triangle of tri_vs_full is
+   x >= -1, y >= -1, x + y <= 2 in normalized coordinates. order 0: clipped to the guard band, then
+   offset; order 1: offset, then clipped. */
+static int tri_gb_model(int k, int px, int py, int order) {
+    const float x = (float)px + 0.5f - (float)k_tri_gb[k].ox * (order == 0);
+    const float y = (float)py + 0.5f - (float)k_tri_gb[k].oy * (order == 0);
+    const float nx = (x - 128.0f) / 64.0f, ny = (64.0f - y) / 32.0f;
+    const float cx = ((float)px + 0.5f - (float)k_tri_gb[k].ox - 128.0f) / 64.0f;
+    const float cy = (64.0f - ((float)py + 0.5f - (float)k_tri_gb[k].oy)) / 32.0f;
+    if (order == 0)
+        return nx >= -1.0f && ny >= -1.0f && nx + ny <= 2.0f && nx <= k_tri_gb[k].gbx &&
+               nx >= -k_tri_gb[k].gbx && ny <= k_tri_gb[k].gby && ny >= -k_tri_gb[k].gby;
+    const float vx = ((float)px + 0.5f - 128.0f) / 64.0f, vy = (64.0f - ((float)py + 0.5f)) / 32.0f;
+    return cx >= -1.0f && cy >= -1.0f && cx + cy <= 2.0f && vx <= k_tri_gb[k].gbx &&
+           vx >= -k_tri_gb[k].gbx && vy <= k_tri_gb[k].gby && vy >= -k_tri_gb[k].gby;
+}
+static int tri_gb_case(struct TriangleContext* c, int k) {
+    my_memset(c->map, 0, TRIANGLE_RT_PX * 4);
+    uint32_t* ttst = c->tab + 0x3D00;
+    const uint32_t value = 0x200u + (uint32_t)k;
+    tri_cov_table(ttst, c->map, TRIANGLE_RT_W, TRIANGLE_RT_PX, value, 1, 1, 1, 1);
+    struct PM4Builder b;
+    tri_begin(&b, c);
+    tri_common(&b, c);
+    pm4_emit(&b, pm4_type3(PM4_SET_CONTEXT_REG, 7));
+    pm4_emit(&b, CTX_VIEWPORT0);
+    pm4_emit_f(&b, 64.0f);
+    pm4_emit_f(&b, 128.0f);
+    pm4_emit_f(&b, -32.0f);
+    pm4_emit_f(&b, 64.0f);
+    pm4_emit_f(&b, 1.0f);
+    pm4_emit_f(&b, 0.0f);
+    {
+        union {
+            float f;
+            uint32_t u;
+        } vc = {k_tri_gb[k].gby}, hc = {k_tri_gb[k].gbx};
+        /* PA_CL_GB_VERT_CLIP_ADJ, VERT_DISC_ADJ, HORZ_CLIP_ADJ, HORZ_DISC_ADJ */
+        const uint32_t gb[4] = {vc.u, vc.u, hc.u, hc.u};
+        pm4_set_context_regs(&b, 0x2FA, gb, 4);
+    }
+    pm4_set_context_reg(&b, 0x08D, 0); /* PA_SU_HARDWARE_SCREEN_OFFSET */
+    pm4_set_context_reg(&b, CTX_WINDOW_OFFSET,
+                        ((uint32_t)(uint16_t)k_tri_gb[k].oy << 16) |
+                            (uint32_t)(uint16_t)k_tri_gb[k].ox);
+    tri_scissor(&b, CTX_SCREEN_SCISSOR, 0, 0, TRIANGLE_RT_W, TRIANGLE_RT_H, 0);
+    tri_scissor(&b, CTX_WINDOW_SCISSOR, 0, 0, TRIANGLE_OPEN, TRIANGLE_OPEN, 1);
+    tri_scissor(&b, CTX_GENERIC_SCISSOR, 0, 0, TRIANGLE_OPEN, TRIANGLE_OPEN, 1);
+    tri_scissor(&b, CTX_VIEWPORT_SCISSOR0, 0, 0, TRIANGLE_OPEN, TRIANGLE_OPEN, 1);
+    pm4_set_context_reg(&b, CTX_MODE_CONTROL, 0);
+    pm4_set_context_reg(&b, CTX_POLYGON_CONTROL,
+                        (k_tri_gb[k].ox != 0 || k_tri_gb[k].oy != 0) ? (1u << 16) : 0u);
+    tri_vs(&b, c->vs_full, TRI_VS_FULL_RSRC1, 0);
+    pm4_set_uconfig_reg(&b, UCFG_PRIMITIVE_TYPE, 4);
+    tri_ps(&b, c, ttst);
+    pm4_draw_index_auto(&b, 3);
+    tri_end(&b, c);
+    int r = tri_kick(c, &b);
+    if (r == 0)
+        r = tri_wait(c);
+    if (r < 0)
+        return r;
+    uint32_t n_map = 0, n_model[2] = {0, 0}, miss[2] = {0, 0};
+    for (int y = 0; y < TRIANGLE_RT_H; y++)
+        for (int x = 0; x < TRIANGLE_RT_W; x++) {
+            const int got = c->map[y * TRIANGLE_RT_W + x] == value;
+            n_map += (uint32_t)got;
+            for (int o = 0; o < 2; o++) {
+                const int want = tri_gb_model(k, x, y, o);
+                n_model[o] += (uint32_t)want;
+                miss[o] += (uint32_t)(got != want);
+            }
+        }
+    int bb[4];
+    tri_bbox(c->map, value, bb);
+    tri_s("GB_");
+    tri_u((unsigned)k);
+    tri_s(": guard band x ");
+    tri_u((unsigned)(k_tri_gb[k].gbx * 100.0f));
+    tri_s("% y ");
+    tri_u((unsigned)(k_tri_gb[k].gby * 100.0f));
+    tri_s("% vertex window offset ");
+    tri_i(k_tri_gb[k].ox);
+    tri_s(",");
+    tri_i(k_tri_gb[k].oy);
+    tri_s("\n  pixels ");
+    tri_u(n_map);
+    tri_s(" bbox ");
+    tri_rect(bb);
+    tri_s("\n  clipped then offset: ");
+    tri_u(n_model[0]);
+    tri_s(" px, ");
+    tri_u(miss[0]);
+    tri_s(" differ; offset then clipped: ");
+    tri_u(n_model[1]);
+    tri_s(" px, ");
+    tri_u(miss[1]);
+    tri_s(" differ\n  summary ");
+    tri_s(miss[0] == 0 ? "MODEL" : miss[1] == 0 ? "OFFSET FIRST" : "DIFF");
+    tri_s("\n");
+    return 0;
+}
+
 /* ==== I: index fetch against a write after the submit ===========================================
  */
 #define TRI_DRAWS 3
@@ -1646,7 +1772,7 @@ struct TriIndexCase {
     uint32_t delay_us;
     uint32_t offset[TRI_DRAWS], count[TRI_DRAWS]; /* the draws after the wait, count 0: none */
 };
-#define TRI_NI 52
+#define TRI_NI 58
 #define TRI_INDEX_BUDGET 0x3000u
 static struct TriIndexCase g_tri_ic[TRI_NI];
 static void tri_index_cases(void) {
@@ -1692,6 +1818,12 @@ static void tri_index_cases(void) {
         {"I_A32_8004", 4, {8193}, {6144}},
         {"I_2DRAW_U", 2, {1, 16384}, {1023, 12288}},
         {"I_3DRAW", 2, {0, 4096, 16384}, {1024, 1024, 12288}},
+        {"I_R16_8040", 2, {16416}, {12288}},
+        {"I_R16_8080", 2, {16448}, {12288}},
+        {"I_R16_8100", 2, {16512}, {12288}},
+        {"I_R16_8200", 2, {16640}, {12288}},
+        {"I_R16_8300", 2, {16768}, {12288}},
+        {"I_R16_83C0", 2, {16864}, {12288}},
     };
     for (unsigned m = 0; m < sizeof(k_more) / sizeof(k_more[0]); m++, n++) {
         struct TriIndexCase* s = &g_tri_ic[n];
@@ -1707,8 +1839,8 @@ static void tri_index_cases(void) {
         s->only_last = m == 0;
     }
 }
-/* Budget model (doc at the top) with the start rounded up to align bytes: how many indices of each
-   draw are old. */
+/* Budget model (doc at the top) with the start rounded to the nearest multiple of align bytes: how
+   many indices of each draw are old. */
 static void tri_budget_model(const struct TriIndexCase* s, uint32_t align,
                              uint32_t old[TRI_DRAWS]) {
     uint32_t left = TRI_INDEX_BUDGET;
@@ -1718,7 +1850,7 @@ static void tri_budget_model(const struct TriIndexCase* s, uint32_t align,
             continue;
         uint32_t start = s->offset[d] * s->isize;
         uint32_t end = start + s->count[d] * s->isize;
-        uint32_t up = (start + align - 1) & ~(align - 1);
+        uint32_t up = (start + align / 2) & ~(align - 1);
         uint32_t old_end = up + left < end ? up + left : end;
         old[d] = (old_end - start + s->isize - 1) / s->isize;
         left -= old_end > up ? old_end - up : 0;
@@ -1794,9 +1926,10 @@ static void tri_index_report(struct TriangleContext* c, const struct TriIndexCas
     tri_i(first_new);
     tri_s(" last_old ");
     tri_i(last_old);
-    uint32_t m8[TRI_DRAWS], m2048[TRI_DRAWS];
-    tri_budget_model(s, 8, m8);
-    tri_budget_model(s, 2048, m2048);
+    static const uint32_t k_align[4] = {16, 64, 256, 1024};
+    uint32_t pm[4][TRI_DRAWS];
+    for (int k = 0; k < 4; k++)
+        tri_budget_model(s, k_align[k], pm[k]);
     const uint32_t start = offset * s->isize;
     const uint32_t old_end = start + n_old * s->isize;
     tri_s("\n  old up to byte ");
@@ -1807,24 +1940,25 @@ static void tri_index_report(struct TriangleContext* c, const struct TriIndexCas
         tri_s(") ");
         tri_x(old_end - left, 4);
     }
-    tri_s("\n  budget model old: A 8 ");
-    tri_u(s->only_last ? count : m8[d]);
-    tri_s(", A 2048 ");
-    tri_u(s->only_last ? count : m2048[d]);
+    tri_s("\n  budget model old, start to the nearest A:");
+    for (int k = 0; k < 4; k++) {
+        tri_s(" A ");
+        tri_u(k_align[k]);
+        tri_s(" ");
+        tri_u(s->only_last ? count : pm[k][d]);
+    }
     tri_s("\n  summary ");
     tri_s(n_none ? "MISSING" : n_new == 0 ? "ALL OLD" : n_old == 0 ? "ALL NEW" : "SPLIT");
-    int ok8 = 1, ok2048 = 1;
-    for (int k = 0; k < 2; k++) {
-        const uint32_t pm = s->only_last ? count : (k ? m2048[d] : m8[d]);
-        const int ok =
-            n_none == 0 && n_both == 0 && n_old == pm && n_new == (s->only_last ? 0 : count - pm);
-        if (k)
-            ok2048 = ok;
-        else
-            ok8 = ok;
+    int any = 0;
+    for (int k = 0; k < 4; k++) {
+        const uint32_t m = s->only_last ? count : pm[k][d];
+        if (n_none == 0 && n_both == 0 && n_old == m && n_new == (s->only_last ? 0 : count - m)) {
+            tri_s(any ? " " : " MODEL A ");
+            tri_u(k_align[k]);
+            any = 1;
+        }
     }
-    tri_s(ok8 && ok2048 ? " MODEL" : ok8 ? " MODEL (A 8)" : ok2048 ? " MODEL (A 2048)" : " DIFF");
-    tri_s("\n");
+    tri_s(any ? "\n" : " DIFF\n");
 }
 static int tri_index_case(struct TriangleContext* c, int k) {
     const struct TriIndexCase* s = &g_tri_ic[k];
@@ -2103,9 +2237,9 @@ static void tri_rp_setup(struct TriangleContext* c) {
     *c->rp_wait = 0;
 }
 /* Draws the frame into fb; 0 done, -1 timeout, -2 not submitted. */
-static int tri_rp_draw(struct TriangleContext* c, void* fb) {
+static int tri_rp_draw(struct TriangleContext* c, void* fb, int fill) {
     uint32_t* p = (uint32_t*)fb;
-    for (long i = 0; i < (long)DISPLAY_W * DISPLAY_H; i++)
+    for (long i = 0; fill && i < (long)DISPLAY_W * DISPLAY_H; i++)
         p[i] = 0xFFFFFFFFu;
     tri_rp_setup(c);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -2241,6 +2375,97 @@ static void tri_show(int video) {
         sceKernelUsleep(100000);
 }
 
+/* ==== RPB: the app's frame with its index buffer over the frame's first 16 KiB ===================
+ */
+/* In a reserved range: frame at +0x10000 (registered, then filled white, as the app does), the
+   index buffer's second half mapped at +0x4000 and its first half fixed at +0xC000, over the
+   frame's first 16 KiB - the layout shadPS4 gives the app. Then the app's frame, shown 10 s. */
+static int tri_rp_break(struct TriangleContext* c, int video) {
+    tri_s("### RPB: the app's frame with its index buffer over the frame's first 16 KiB\n");
+    void* range = 0;
+    int r_res = sceKernelReserveVirtualRange(&range, 0x810000, 0, 0x10000);
+    long fp = 0, ip = 0;
+    int r_fa = -1, r_fm = -1, r_ia = -1, r_im = -1, r_fix = -1, set = -1;
+    void *f = 0, *iv = 0, *t = 0;
+    if (r_res == 0) {
+        r_fa = sceKernelAllocateMainDirectMemory(0x7F8000, 0x10000, 3, &fp);
+        if (r_fa == 0) {
+            f = (uint8_t*)range + 0x10000;
+            r_fm = sceKernelMapDirectMemory(&f, 0x7F8000, 0x33, 0x10, fp, 0x10000);
+        }
+    }
+    if (r_fm == 0) {
+        uint8_t attr[48];
+        my_memset(attr, 0, sizeof(attr));
+        sceVideoOutSetBufferAttribute(attr, 0x80000000, 1, 0, DISPLAY_W, DISPLAY_H, DISPLAY_W);
+        set = sceVideoOutRegisterBuffers(video, 3, &f, 1, attr);
+        uint32_t* p = (uint32_t*)f;
+        for (long i = 0; i < (long)DISPLAY_W * DISPLAY_H; i++)
+            p[i] = 0xFFFFFFFFu;
+        r_ia = sceKernelAllocateMainDirectMemory(0x10000, 0x4000, 0, &ip);
+    }
+    if (r_ia == 0) {
+        iv = (uint8_t*)range + 0x4000;
+        r_im = sceKernelMapDirectMemory(&iv, 0x8000, 0x33, 0x10, ip + 0x8000, 0x4000);
+        t = (uint8_t*)range + 0xC000;
+        if (r_im == 0)
+            r_fix = sceKernelMapDirectMemory(&t, 0x8000, 0x33, 0x10, ip, 0x4000);
+    }
+    tri_kd("reserve", r_res);
+    tri_kv("at", (uint64_t)(uintptr_t)range);
+    tri_kd("frame", r_fm);
+    tri_kv("at", (uint64_t)(uintptr_t)f);
+    tri_kd("register", set);
+    tri_kd("index_second_half", r_im);
+    tri_kv("at", (uint64_t)(uintptr_t)iv);
+    tri_kd("first_half_fixed", r_fix);
+    tri_kv("at", (uint64_t)(uintptr_t)t);
+    tri_s("\n");
+    int r = 0;
+    if (set >= 0 && r_fix == 0) {
+        uint16_t* saved = c->rp_index;
+        c->rp_index = (uint16_t*)iv;
+        r = tri_rp_draw(c, f, 0);
+        c->rp_index = saved;
+        if (r == 0) {
+            const uint32_t* p = (const uint32_t*)f;
+            for (int row = 0; row < 4; row++) {
+                tri_s("  row ");
+                tri_u((unsigned)row);
+                tri_s(" through the frame's address:");
+                for (int i = 0; i < 4; i++) {
+                    tri_s(" ");
+                    tri_x(p[row * DISPLAY_W + i], 8);
+                }
+                tri_s("\n");
+            }
+            tri_rp_report(p);
+            tri_flush();
+            sceVideoOutSubmitFlip(video, set, 1, 0);
+            for (int i = 0; i < TRIANGLE_SHOW_S * 10; i++)
+                sceKernelUsleep(100000);
+            sceVideoOutSubmitFlip(video, 0, 1, 0);
+            sceKernelUsleep(200000);
+        }
+    } else {
+        tri_s("summary RPB: NOT SET UP\n");
+    }
+    if (set >= 0)
+        sceVideoOutUnregisterBuffers(video, set);
+    if (r_fix == 0)
+        sceKernelMunmap(t, 0x8000);
+    if (r_im == 0)
+        sceKernelMunmap(iv, 0x8000);
+    if (r_fm == 0)
+        sceKernelMunmap(f, 0x7F8000);
+    if (r_ia == 0)
+        sceKernelReleaseDirectMemory(ip, 0x10000);
+    if (r_fa == 0)
+        sceKernelReleaseDirectMemory(fp, 0x7F8000);
+    tri_s("\n");
+    return r;
+}
+
 /* ==== run ======================================================================================
  */
 #define TRI_STEP_MEM 0
@@ -2248,9 +2473,11 @@ static void tri_show(int video) {
 #define TRI_STEP_MC (TRI_STEP_F0 + TRI_NFMT + 1)
 #define TRI_STEP_RAW (TRI_STEP_MC + 1)
 #define TRI_STEP_S0 (TRI_STEP_RAW + 1)
-#define TRI_STEP_I0 (TRI_STEP_S0 + TRI_NS)
+#define TRI_STEP_GB0 (TRI_STEP_S0 + TRI_NS)
+#define TRI_STEP_I0 (TRI_STEP_GB0 + TRI_NG)
 #define TRI_STEP_RP (TRI_STEP_I0 + TRI_NI)
-#define TRI_STEPS (TRI_STEP_RP + 1)
+#define TRI_STEP_RPB (TRI_STEP_RP + 1)
+#define TRI_STEPS (TRI_STEP_RPB + 1)
 static void tri_step_name(int k) {
     if (k == TRI_STEP_MEM)
         tri_s("MEM");
@@ -2261,12 +2488,17 @@ static void tri_step_name(int k) {
     else if (k < TRI_STEP_MC) {
         tri_s("F_");
         tri_s(k - TRI_STEP_F0 < TRI_NFMT ? k_tri_fmt[k - TRI_STEP_F0].name : "RP");
-    } else if (k < TRI_STEP_I0)
+    } else if (k < TRI_STEP_GB0)
         tri_s(g_tri_sc[k - TRI_STEP_S0].id);
-    else if (k < TRI_STEP_RP)
+    else if (k < TRI_STEP_I0) {
+        tri_s("GB_");
+        tri_u((unsigned)(k - TRI_STEP_GB0));
+    } else if (k < TRI_STEP_RP)
         tri_s(g_tri_ic[k - TRI_STEP_I0].id);
-    else
+    else if (k == TRI_STEP_RP)
         tri_s("RP");
+    else
+        tri_s("RPB");
 }
 /* Returns 0, or -1 when the GPU hung (the caller stops the app). */
 static int triangle_run(int video, void* fb0) {
@@ -2324,19 +2556,26 @@ static int triangle_run(int video, void* fb0) {
                 if (k == TRI_STEP_F0)
                     tri_s("### F: vertex fetch with a V# base 0..3 bytes past a dword\n\n");
                 r = tri_fetch_group(c, k - TRI_STEP_F0);
-            } else if (k < TRI_STEP_I0) {
+            } else if (k < TRI_STEP_GB0) {
                 if (k == TRI_STEP_S0)
                     tri_s("### S: scissors and window offset (256 x 128)\n\n");
                 r = tri_scissor_case(c, k - TRI_STEP_S0);
+            } else if (k < TRI_STEP_I0) {
+                if (k == TRI_STEP_GB0)
+                    tri_s("### GB: guard band and vertex window offset (viewport 64,32-192,96)"
+                          "\n\n");
+                r = tri_gb_case(c, k - TRI_STEP_GB0);
             } else if (k < TRI_STEP_RP) {
                 if (k == TRI_STEP_I0)
                     tri_s("### I: index fetch against a CPU write after the submit\n\n");
                 r = tri_index_case(c, k - TRI_STEP_I0);
-            } else {
+            } else if (k == TRI_STEP_RP) {
                 tri_s("### RP: the app's frame in fb 0\n");
-                r = tri_rp_draw(c, fb0);
+                r = tri_rp_draw(c, fb0, 1);
                 if (r == 0)
                     tri_rp_report((const uint32_t*)fb0);
+            } else {
+                r = tri_rp_break(c, video);
             }
             if (r < 0) {
                 tri_s(r == -1 ? "TIMEOUT: no fence after 2 s - GPU hung; close the app and launch "
@@ -2372,7 +2611,7 @@ static int triangle_run(int video, void* fb0) {
         return 0;
     st.inflight = TRI_STEP_RP;
     tri_state_save(&st);
-    int r = tri_rp_draw(c, fb0);
+    int r = tri_rp_draw(c, fb0, 1);
     st.inflight = -1;
     if (r == -1) {
         st.rp_bad = 1;
