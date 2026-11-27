@@ -33,13 +33,20 @@
 #define DISPLAY_POLL 1
 /* FLIP_PROBE: replace the renderer with the VideoOut label probe (src/flipprobe.h), logged to
    /user/data/ShadCube4/flipprobe.log; the app exits when it is done. */
-#define FLIP_PROBE 1
+#define FLIP_PROBE 0
 
 #define WAITFREE_SUBMIT 0 /* GNM wait-free submit mode (§15.1): off */
 
 #define MAP_COMPUTE_QUEUES 1 /* map two compute queues at init, as the game does (doc above) */
 
 #define SET_AFFINITY 1 /* pin the threads' cores, as the game does (doc above) */
+
+/* TRIANGLE_TEST: red_prig's OpenOrbis Gnm Triangle app rebuilt with probes (src/triangle_test.h):
+   its memory sequence at the start of main(), the rest before the main loop; results in
+   ShadCube4 triangle.log next to the trace log. 0: off. */
+#ifndef TRIANGLE_TEST
+#define TRIANGLE_TEST 1
+#endif
 
 #include "atmosphere.h"
 #include "bgm.h"
@@ -1739,6 +1746,10 @@ static void post_pass(struct PM4Builder* b, void* dst, uint32_t pitch, uint32_t 
     pm4_draw_index_auto(b, BG_VERTS);
 }
 
+#if TRIANGLE_TEST
+#include "triangle_test.h"
+#endif
+
 /* PGM_RSRC1 of the post shaders: VGPRs v38 / v51 / v15, SGPRs s20 / s19 / s31,
    each + VCC (the header token writes vcc_hi). */
 #define PS_POST_DOWN_RSRC1 ((2u << 6) | 9u)
@@ -2405,6 +2416,9 @@ int main(void) {
     int video = sceVideoOutOpen(0xFF,0,0,0);
     if (video < 0) return 1;
     sceVideoOutSetFlipRate(video,0);
+#if TRIANGLE_TEST
+    triangle_mem_probe(); /* before ShadCube4 maps anything */
+#endif
 
     unsigned long fb_size = (unsigned long)DISPLAY_W*DISPLAY_H*4;
     void *fb[NUM_FRAMES];
@@ -3357,6 +3371,14 @@ int main(void) {
 
     ls_mark("final_setup");
     ls_finish(); /* the full bar; the splash went when the loading screen came up */
+#if TRIANGLE_TEST
+    if (triangle_run(video, fb[0]) < 0) {
+        trace_msg("triangle: fence timeout, GPU hung - close the app\n");
+        for (;;)
+            sceKernelUsleep(1000000);
+    }
+    trace_msg("triangle: run finished\n");
+#endif
     int splash_ret = g_ls.splash_ret;
     { char L[96]; int p=0;
       const char *m = "HideSplashScreen ret=";
