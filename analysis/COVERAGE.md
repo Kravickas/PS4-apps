@@ -745,6 +745,51 @@ Round 129 with the four faults above fixed, VQ18 printing the bytes from 0x26 to
 among the cases that may end the app: mmap called with rbp pointing at a made-up frame, to see
 whether the name is the word at rbp+8.
 
+## Round 130 results (PS4 FW 12.02 and shadPS4 with batches 3b and 4, all 12 SDKs)
+
+949 to 957 of 985 result lines per SDK the same; 36 probe IDs differ (round 129: 88), none of them
+new. Everything batch 3b and 4 changed matches now.
+
+- PX4 (PS4, SDK 5.50 and 12.00): the name is "anon:111111111110", the word at rbp+8 of the made-up
+  frame. A POSIX mmap is named through the caller's frame pointer; that is why PX1 and PX3 give
+  the return address of the function calling mmap. shadPS4: the return address of the mmap call.
+  Not measured: rbp not readable (PX6, PX7 in round 131).
+- VQ18 (PS4, every SDK): all 0x48 bytes written, every byte from the name's end to 0x47 is 0.
+  shadPS4 left the last 7.
+- FR9-FR12 (PS4, every SDK): a void reservation (0x110) made by sceKernelMmap is named by its call
+  site. FR11: two of them from two call sites, left first, merge once renamed, although the right
+  one ends at the end of the reserved range.
+- FR13-FR20 with the right call-site letters: the table of round 129 stands (three behaviours: up
+  to 5.05, 5.50, 12.00). One rule that gives every line is in the comment of FR21-FR33; round 131
+  tests it.
+- TW1-TW3, TW5: the mapping count (PR 5736) is all that differs; which function refuses at which
+  SDK is already right in shadPS4. In TW1 the MAP_STACK attempt succeeds and is unmapped again,
+  after which shadPS4 took the memory as not mapped: the two batch columns and the partial
+  mappings after it followed from that.
+- May-end-the-app cases: E18, RV8, CF2 end the app on the PS4 (shadPS4: E18 EINVAL, RV8 ends it,
+  CF2 not comparable). PE2 o d=1, PB8 F, BM5 F, PB7, QP2 the same on both.
+- Still different and not rules: N3, N6, SH1, MP2 (host address limits), K2, Y2, HB2, HB4
+  (layout), CF1, CL1, VQ14 (libkernel is not a module in shadPS4), DF1-DF4 (devices).
+
+## shadPS4 batch 5 (on batch 4)
+
+- The count of live direct mappings per range of direct memory, as upstream PR 5736: memory stays
+  "mapped" until its last mapping is gone (TW1-TW3, TW5).
+- VirtualQuery writes the seven bytes after the name as 0 (VQ18).
+- A void reservation made by sceKernelMmap without MAP_SHARED is named by its call site
+  (FR9-FR12); with MAP_SHARED not measured, left "anon" (FR30, FR31 in round 131).
+- The "never merged into from the left" mark of a void reservation at the end of its reserved
+  range is not set when its left neighbour is a void reservation without MAP_SHARED (FR11).
+- Not in it: the POSIX mmap name (PX6, PX7 first), the rename merge rule (FR21-FR33 first).
+
+## Round 131
+
+- PX6, PX7 (may end the app): POSIX mmap with rbp 0, and with rbp at a reserved page.
+- FR21-FR33: the rename merge rule (see the comment in the source for what each line separates);
+  FR30, FR31 a void reservation with MAP_SHARED; FR32, FR33 the three-page orders for void
+  reservations.
+- VQ19: VQ18's written bytes and tail for a direct mapping, a reserved range, the stack and code.
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after

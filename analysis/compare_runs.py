@@ -15,6 +15,10 @@ Kinds of line in a results file:
   SB TR PS  read-back, pool trace and pool state lines. Compared as sets (as compare_results.py).
   ==      section headers.
 
+The cases that may end the app run after DONE, one at a time ("<ID> starting (null-pointer case"
+...). Their outcome is compared too: the result line, or "the app ended" when the next start of
+the app wrote that instead.
+
 Nothing is interpreted: for every result line that is not identical, both lines are printed and
 the blank-separated fields that differ are marked. "@f", "@u", "@s" in a line is what the probe
 saw at its address before it ran (free, used, in the system library area); when those differ the
@@ -72,6 +76,28 @@ def parse(lines):
         seen[key] += 1
         results[(key, seen[key])] = l
     return info, results, layout
+
+
+def parse_after(lines):
+    """The cases run after DONE: ID -> its result line, or that the app ended during it."""
+    out = collections.OrderedDict()
+    cur = None
+    after = False
+    for l in lines:
+        if l == "===== DONE =====":
+            after = True
+            continue
+        if not after:
+            continue
+        m = re.match(r"(\S+) starting \(null-pointer case", l)
+        if m:
+            cur = m.group(1)
+            out[cur] = "(no line after the start: the file ends there)"
+        elif cur and l.startswith(cur + ": the app ended"):
+            out[cur] = "the app ended during this case"
+        elif cur and is_result(l) and l.split()[0] == cur:
+            out[cur] = l
+    return out
 
 
 def mark(a, b):
@@ -162,6 +188,15 @@ def compare(pa, pb, show_layout):
                     print(f"     LY 1: {l}")
                 for l in lb.get(k[0], []):
                     print(f"     LY 2: {l}")
+    na, nb = parse_after(A), parse_after(B)
+    null_diffs = [k for k in list(na) + [k for k in nb if k not in na]
+                  if na.get(k) != nb.get(k)]
+    print(f"\n  -- cases that may end the app (after DONE): {len(na)} | {len(nb)}, "
+          f"{len(null_diffs)} differ")
+    for k in null_diffs:
+        print(f"  {k}")
+        print(f"    1: {na.get(k, '(not run)')}")
+        print(f"    2: {nb.get(k, '(not run)')}")
     hf_a = collections.Counter(l for l in A if l.startswith("HF "))
     hf_b = collections.Counter(l for l in B if l.startswith("HF "))
     hf_differs = hf_a != hf_b
@@ -190,9 +225,9 @@ def compare(pa, pb, show_layout):
                     print(f"  LY 1 {key}: {l}")
                 for l in lb.get(key, []):
                     print(f"  LY 2 {key}: {l}")
-    ok = not problems and not diffs and not cases and not hf_differs
+    ok = not problems and not diffs and not cases and not hf_differs and not null_diffs
     print(f"\n  VERDICT: {'same behaviour' if ok else 'NOT the same'}")
-    return ok, {k[0] for k, _, _ in diffs}, {k[0] for k, _, _ in cases}
+    return ok, {k[0] for k, _, _ in diffs} | set(null_diffs), {k[0] for k, _, _ in cases}
 
 
 def main():

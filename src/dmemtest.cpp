@@ -10056,8 +10056,12 @@ __attribute__((noinline)) static int32_t fr_c(void* at, int32_t prot, int32_t fl
     void* o = 0;
     return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
 }
-// The name of the page at `at`, as one of: a, b, c the call site name ("anon:" and an address
-// inside fr_a, fr_b, fr_c), M "Mapping" (what the FR probes rename to), 0 no name, - not reported
+__attribute__((noinline)) static int32_t fr_d(void* at, int32_t prot, int32_t flags) {
+    void* o = 0;
+    return sceKernelMmap(at, PG, prot, flags, -1, 0, &o);
+}
+// The name of the page at `at`, as one of: a, b, c, d the call site name ("anon:" and an address
+// inside fr_a, fr_b, fr_c, fr_d), M "Mapping" (what the FR probes rename to), 0 no name, - not reported
 // by VirtualQuery, otherwise the name in quotes (a call site name of another function as
 // "anon:<12x>").
 static void fr_name(Line& l, const void* at) {
@@ -10092,9 +10096,9 @@ static void fr_name(Line& l, const void* at) {
         // The function whose start is the nearest below the address. (Round 129 took the first
         // of the three within 0x100 bytes: they are small and lie one after another, so every
         // call site printed as 'a'.)
-        static int32_t (*const fns[3])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c};
+        static int32_t (*const fns[4])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c, fr_d};
         int best = -1;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             const uint64_t f = (uint64_t)fns[i];
             if (v > f && v - f < 0x100 && (best < 0 || f > (uint64_t)fns[best]))
                 best = i;
@@ -10518,6 +10522,110 @@ static void run_fw_tl_tf() {
             }
             l.end();
         }
+        // FR21-FR33 (round 131). Round 130 on the PS4, no-access pages from one call site each,
+        // renamed together (areas after the rename; pages L M R, creation order given):
+        //   order      SDK up to 5.05   5.50          12.00
+        //   L R        0-8              0-8           0-8          (FR3)
+        //   R L        0-4,4-8          0-8           0-8          (FR4)
+        //   L M R      0-C              0-C           0-C          (FR13)
+        //   R M L      0-4,4-8,8-C      0-C           0-C          (FR14)
+        //   M R L      0-4,4-8,8-C      0-4,4-8,8-C   0-4,4-C      (FR15)
+        //   M L R      0-4,4-8,8-C      0-4,4-8,8-C   0-4,4-C      (FR16)
+        //   L R M      0-8,8-C          0-8,8-C       0-8,8-C      (FR17)
+        //   R L M      0-8,8-C          0-8,8-C       0-8,8-C      (FR18)
+        // One rule that gives all of these, not confirmed: (1) a page made right after an existing
+        // page (its left neighbour) belongs with it, any other page stands alone; pages that
+        // belong together merge once they have one name; pages standing alone merge with each
+        // other only from 5.50. (2) A rename of a range merges, up to 5.50, only into the run
+        // that starts at the first page of the range; at 12.00 each page with the one before it.
+        // What each line separates (areas after each rename):
+        //   FR21 B C D A, rename all: (2) "first page of the range" gives 4 areas up to 5.50; a
+        //        rule that only skips one pair after a failed merge gives 0-4,4-8,8-10
+        //   FR22 the same, rename B-D only: (1) and (2) give 0-4,4-10 at every SDK
+        //   FR23 B C D with A never mapped, rename B-D: as FR22 if the page made last on the left
+        //        plays no part
+        //   FR24 A C B D, rename all: A-B and C-D belong together: 0-8,8-C,C-10 up to 5.50,
+        //        0-8,8-10 at 12.00
+        //   FR25-FR27 M R L (as FR15) renamed in steps: R, M, L | L, M, R | M-R, then L
+        //   FR28 M R L with one reserved page left on each side of the three, rename all: whether
+        //        FR15 depends on the pages touching the ends of the reserved range
+        //   FR29 R L (as FR4) with one reserved page on each side, rename both: the same for FR4
+        //   FR30, FR31 void reservation with MAP_SHARED (0x111), two call sites, left first |
+        //        right first, rename both: FR11, FR12 with MAP_SHARED, and what such a reservation
+        //        is named
+        //   FR32, FR33 void reservation (0x110): M R L | R M L, rename all: FR15, FR14 for
+        //        reservations
+        // Each line: creation codes, areas, names | per rename: code, areas, names.
+        // Page i is made from call site i (a, b, c, d); -1 in the order: no further page.
+        struct FrCase {
+            const char* id;
+            const char* name;
+            int32_t prot, flags;
+            int margin; // reserved pages kept on each side of the pages
+            int n;
+            int order[4];
+            int nren;
+            int ren[3][2]; // first page, pages
+        };
+        static const FrCase fr2[13] = {
+            {"FR21", "noacc 4 sites, order B C D A, rename all", 0x0, 0x1012, 0, 4, {1, 2, 3, 0}, 1,
+             {{0, 4}}},
+            {"FR22", "noacc 4 sites, order B C D A, rename B-D", 0x0, 0x1012, 0, 4, {1, 2, 3, 0}, 1,
+             {{1, 3}}},
+            {"FR23", "noacc 3 sites, order B C D (A not mapped), rename B-D", 0x0, 0x1012, 0, 4,
+             {1, 2, 3, -1}, 1, {{1, 3}}},
+            {"FR24", "noacc 4 sites, order A C B D, rename all", 0x0, 0x1012, 0, 4, {0, 2, 1, 3}, 1,
+             {{0, 4}}},
+            {"FR25", "noacc order M R L, rename R, then M, then L", 0x0, 0x1012, 0, 3,
+             {1, 2, 0, -1}, 3, {{2, 1}, {1, 1}, {0, 1}}},
+            {"FR26", "noacc order M R L, rename L, then M, then R", 0x0, 0x1012, 0, 3,
+             {1, 2, 0, -1}, 3, {{0, 1}, {1, 1}, {2, 1}}},
+            {"FR27", "noacc order M R L, rename M-R, then L", 0x0, 0x1012, 0, 3, {1, 2, 0, -1}, 2,
+             {{1, 2}, {0, 1}}},
+            {"FR28", "noacc order M R L, a reserved page on each side, rename all", 0x0, 0x1012, 1,
+             3, {1, 2, 0, -1}, 1, {{0, 3}}},
+            {"FR29", "noacc order R L, a reserved page on each side, rename both", 0x0, 0x1012, 1, 2,
+             {1, 0, -1, -1}, 1, {{0, 2}}},
+            {"FR30", "void+shared 2 sites, left first, rename both", 0x0, 0x111, 0, 2,
+             {0, 1, -1, -1}, 1, {{0, 2}}},
+            {"FR31", "void+shared 2 sites, right first, rename both", 0x0, 0x111, 0, 2,
+             {1, 0, -1, -1}, 1, {{0, 2}}},
+            {"FR32", "void 3 sites, order M R L, rename all", 0x0, 0x110, 0, 3, {1, 2, 0, -1}, 1,
+             {{0, 3}}},
+            {"FR33", "void 3 sites, order R M L, rename all", 0x0, 0x110, 0, 3, {2, 1, 0, -1}, 1,
+             {{0, 3}}},
+        };
+        static int32_t (*const site4[4])(void*, int32_t, int32_t) = {fr_a, fr_b, fr_c, fr_d};
+        for (const FrCase& fc : fr2) {
+            Line l = head(fc.id, fc.name);
+            const int total = fc.n + 2 * fc.margin;
+            void* a = 0;
+            if (sceKernelReserveVirtualRange(&a, (size_t)total * PG, 0, 0) != 0) {
+                l.s("SKIP").end();
+                continue;
+            }
+            uint8_t* b = (uint8_t*)a + (size_t)fc.margin * PG;
+            for (int k = 0; k < 4 && fc.order[k] >= 0; k++) {
+                const int pg = fc.order[k];
+                l.c(ncode(site4[pg](b + (size_t)pg * PG, fc.prot, fc.flags)));
+            }
+            auto state = [&]() {
+                l.c(' ');
+                co_scan(l, (uint64_t)b, (uint64_t)fc.n * PG);
+                l.s(" n=");
+                for (int k = 0; k < fc.n; k++)
+                    fr_name(l, b + (size_t)k * PG);
+            };
+            state();
+            for (int k = 0; k < fc.nren; k++) {
+                l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b + (size_t)fc.ren[k][0] * PG,
+                                                                (size_t)fc.ren[k][1] * PG,
+                                                                "Mapping")));
+                state();
+            }
+            HF(sceKernelMunmap(a, (size_t)total * PG));
+            l.end();
+        }
     }
     {
         // test_550.cpp :148, 64 MiB and 16 pieces instead of 4 GiB and 48+10
@@ -10853,6 +10961,63 @@ static void run_r128() {
         } else {
             l.s("SKIP");
         }
+        l.end();
+    }
+    {
+        // VQ19 (round 131): VQ18 for other kinds of area. Round 130: for a named flexible page the
+        // PS4 writes all 0x48 bytes, the ones after the name's end as 0. Per kind: code, the
+        // number of bytes written (hex; the FF and the 00 buffer compared as in VQ18), and for the
+        // bytes from the name's end to 0x47: z all 0, or x and those bytes.
+        //   direct mapping | ReserveVirtualRange | the stack | this code
+        Line l = head("VQ19", "VirtualQuery writes, other kinds: direct | reserved | stack | code");
+        const long pa = alloc(1, 3, &rr);
+        int32_t rm = 0;
+        uint8_t* dm = pa >= 0 ? map((uint64_t)pa, 1, &rm) : nullptr;
+        void* rv = 0;
+        if (sceKernelReserveVirtualRange(&rv, PG, 0, 0) != 0)
+            rv = 0;
+        unsigned char on_stack = 0;
+        const void* const at[4] = {dm, rv, &on_stack, (const void*)&written_mask};
+        for (int k = 0; k < 4; k++) {
+            if (k)
+                l.s(" | ");
+            if (!at[k]) {
+                l.c('-');
+                continue;
+            }
+            static unsigned char ff[0x60], zz[0x60];
+            my_memset(ff, 0xFF, sizeof(ff));
+            my_memset(zz, 0x00, sizeof(zz));
+            const int32_t r1 = sceKernelVirtualQuery(at[k], 0, ff, 0x48);
+            const int32_t r2 = sceKernelVirtualQuery(at[k], 0, zz, 0x48);
+            l.c(code(r1)).c(code(r2));
+            if (r1 != 0 || r2 != 0)
+                continue;
+            int written = 0;
+            for (int i = 0; i < 0x60; i++)
+                written += ff[i] != 0xFF || zz[i] != 0x00;
+            l.c(' ').hex((uint64_t)written).c(' ');
+            // the name's end: the first 0 from 0x21 on (0x41 when the name fills its 32 bytes)
+            int e = 0x21;
+            while (e < 0x41 && ff[e] != 0)
+                e++;
+            bool zero = true;
+            for (int i = e; i < 0x48; i++)
+                zero = zero && ff[i] == 0;
+            if (zero) {
+                l.c('z');
+            } else {
+                l.c('x');
+                for (int i = e; i < 0x48; i++) {
+                    static const char hx[] = "0123456789ABCDEF";
+                    l.c(hx[ff[i] >> 4]).c(hx[ff[i] & 15]);
+                }
+            }
+        }
+        if (rv)
+            HF(sceKernelMunmap(rv, PG));
+        unmap_all(dm, 1);
+        release_all(pa, 1);
         l.end();
     }
     {
@@ -13062,17 +13227,83 @@ static void nx_px4() {
     l.end();
     HF(sceKernelMunmap(m, 0x4000));
 }
-static const int g_null_cases = 9;
+// PX6, PX7 (round 131). PX4 on the PS4 (round 130, SDK 5.50 and 12.00): the name of a POSIX mmap
+// is "anon:" and the word at rbp+8 when mmap is called (the made-up frame's 0x111111111110), so
+// libkernel reads it through the caller's frame pointer. Not known: what it does when rbp does not
+// point at readable memory (code built without frame pointers uses rbp for anything).
+//   PX6  rbp = 0
+//   PX7  rbp = the address of a reserved page (ReserveVirtualRange: no access; it stays reserved
+//        during the call, so the new mapping cannot be placed there)
+// Result when mmap returns: its code, then the name: call (the return address of the mmap call
+// itself), "not an address name" (the name in the notes), or ? (the address in the notes).
+__attribute__((naked, noinline)) static void* px_call_rbp(uint64_t) {
+    __asm__("push %rbp\n"
+            "mov %rdi, %rbp\n"
+            "xor %edi, %edi\n"
+            "mov $0x4000, %esi\n"
+            "mov $3, %edx\n"
+            "mov $0x1002, %ecx\n"
+            "mov $-1, %r8d\n"
+            "xor %r9d, %r9d\n"
+            "call mmap@PLT\n"
+            "pop %rbp\n"
+            "ret\n");
+}
+static void px_bad_rbp(const char* id, const char* name, uint64_t rbp) {
+    Line l = head(id, name);
+    void* m = px_call_rbp(rbp);
+    if (m == (void*)-1 || m == nullptr)
+        return l.s("mmap failed").end();
+    l.s("ok, the name is ");
+    unsigned char vi[0x60];
+    out_prefill(vi, sizeof(vi));
+    const int32_t r = sceKernelVirtualQuery(m, 0, vi, 0x48);
+    const char* nm = (const char*)vi + 0x21;
+    bool addr = r == 0 && nm[0] == 'a' && nm[1] == 'n' && nm[2] == 'o' && nm[3] == 'n' &&
+                nm[4] == ':' && nm[17] == 0;
+    uint64_t v = 0;
+    for (int k = 5; addr && k < 17; k++) {
+        const char ch = nm[k];
+        addr = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        v = (v << 4) | (uint64_t)(ch >= 'a' ? ch - 'a' + 10 : ch - '0');
+    }
+    const uint64_t fn = (uint64_t)&px_call_rbp;
+    if (r != 0)
+        l.s("vq ").c(code(r));
+    else if (!addr)
+        l.s("not an address name");
+    else if (v > fn && v - fn < 0x40)
+        l.s("call");
+    else
+        l.c('?');
+    if (r == 0)
+        l.lay().s("name=").s(nm).beh();
+    l.end();
+    HF(sceKernelMunmap(m, 0x4000));
+}
+static void nx_px6() {
+    px_bad_rbp("PX6", "POSIX mmap, rbp 0:", 0);
+}
+static void nx_px7() {
+    void* rv = 0;
+    if (sceKernelReserveVirtualRange(&rv, PG, 0, 0) != 0) {
+        Line l = head("PX7", "POSIX mmap, rbp at a reserved page:");
+        return l.s("SKIP reserve").end();
+    }
+    px_bad_rbp("PX7", "POSIX mmap, rbp at a reserved page:", (uint64_t)rv);
+    HF(sceKernelMunmap(rv, PG));
+}
+static const int g_null_cases = 11;
 // State values: k (0..g_null_cases) = case k is next, written before case k-1 is called, so a state
 // of k with k >= 1 after the app ended names case k-1; g_null_done = all ran to the end. Before
 // round 127 the state after the last case was g_null_cases either way, so a last case that ended
 // the app (CF2 on the PS4, round 126) was not recorded.
 static const int g_null_done = g_null_cases + 1;
 static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8", "PB7",
-                                                     "BM5", "QP2", "CF2", "PX4"};
+                                                     "BM5", "QP2", "CF2", "PX4", "PX6", "PX7"};
 static void run_null_last() {
     static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4, nx_pb7,
-                                                   nx_bm1, nx_qp2, nx_cf2, nx_px4};
+                                                   nx_bm1, nx_qp2, nx_cf2, nx_px4, nx_px6, nx_px7};
     const char* const* ids = g_null_ids;
     const int n = g_null_cases;
     int next = null_state_read();
@@ -13180,7 +13411,7 @@ int main(void) {
     }
     say("===== DMEM RELEASE TEST =====");
     // The round of the test: two results files compare only when this line is the same.
-    say("ROUND 130");
+    say("ROUND 131");
     {
         uint32_t sdk = 0;
         Line l;
