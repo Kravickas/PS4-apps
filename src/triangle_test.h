@@ -11,8 +11,17 @@
  *            before the fixed map, whether it lands on the frame, and the frame's first dwords
  *            through the frame's address before / after. The fixed map is only made when every
  *            page of its range is free or the frame's (never over ShadCube4's own memory).
+ *            The sequence runs three times: as the app does it, then after a 16 KiB and after a
+ *            32 KiB filler map, so the app's mmap no longer ends on a 64 KiB boundary and the frame
+ *            leaves a gap before it, as in shadPS4: whether the kernel puts the index half in that
+ *            gap and the fixed map lands on the frame on the PS4 too.
+ *            After it: three 16 KiB pages mapped together, the middle one unmapped, then a 16 KiB
+ *            flexible and a 16 KiB direct map at an address the kernel picks: do they land in the
+ *            hole (lowest free range first) or not.
  *            Before all of it: every mapped range from 0x200000000 up (VirtualQuery, find next),
- *            with its protection, type, flags and name.
+ *            with its protection, type, flags and name. In the log also every loaded module
+ *            (sceKernelGetModuleList / Info: name, segments), and for each "anon:<address>" range
+ *            the module and offset the address is in.
  *   F_*      vertex fetch of a V# whose base is 0..3 bytes past a dword: per data format, base
  *            offsets 0..3, strides 20 / 22 / 21, 4 vertices, UINT. tri_vs_fetch stores what the
  *            fetch shader returned (shadPS4: vertex input) and what its own buffer_load_format of
@@ -31,14 +40,19 @@
  *   F_RP     the app's two V#s exactly: position 32_32 FLOAT at vertices + 1 (dst X, Y, 0, 1),
  *            colour 32_32_32 FLOAT (dst X, Y, Z, 0), stride 20, 5 vertices.
  *   MC       components past the format per number format: 8, 16, 8_8, 32, 16_16, 32_32,
- *            32_32_32 with UNORM / SNORM / UINT / SINT / FLOAT (the valid ones), dst X Y Z W,
- *            base 0, stride 20. In-format components v (the value, not judged), past-format ones
- *            r / z / o / X as in F, judged on vertices 1..3 (vertex 0's bytes are 0).
+ *            32_32_32 with UNORM / SNORM / UINT / SINT / FLOAT (the valid ones), 10_11_11 and
+ *            11_11_10 FLOAT, dst X Y Z W, base 0, stride 20. In-format components v (the value, not
+ *            judged), past-format ones r / z / o / X as in F, judged on vertices 1..3 (vertex 0's
+ *            bytes are 0). Model (the PS4, triangle-4: all 27 plain-format cases): r.
  *   RAW      raw loads of a V# (stride 0) whose base is 0..3 bytes past a dword, at byte offset
- *            5 * vertex (tri_vs_raw): buffer_load_dword / ushort / ubyte / dwordx2 and
- *            s_buffer_load_dword at dword offset 1 and SGPR byte offset 6. The byte address each
- *            read came from (from the bytes it returned) against the exact one. Model, judged for
- *            dword and dwordx2 only (8.1.6): the two LSBs cleared.
+ *            5 * vertex: tri_vs_raw buffer_load_dword / ushort / ubyte / dwordx2 and
+ *            s_buffer_load_dword at dword offset 1 and SGPR byte offset 6; tri_vs_raw2 dword
+ *            with instruction offset 1 and with SGPR offset 3, ushort with instruction offset 1,
+ *            dwordx4, dwordx3, and dword through a V# of stride 5 with the vertex index (idxen).
+ *            The byte address each read came from (from the bytes it returned) against the exact
+ *            one, and against what the PS4 showed in triangle-4: dword (base & ~3) + (offset &
+ *            ~3), dwordx2 (base + offset) & ~3, ushort (base + offset) & ~1, ubyte exact,
+ *            s_buffer_load (base & ~3) + (offset & ~3). Judged against those where it applies.
  *   S_*      scissors and window offset on a 256 x 128 linear RGBA8 target: a clear draw, then one
  *            triangle over the viewport (tri_vs_full / tri_ps_cov) with the case's state. The
  *            pixel shader marks each pixel it runs for in a coverage map (POS_X / POS_Y), so
@@ -71,11 +85,13 @@
  * (sceGnmDrawIndexOffset, INDEX_BASE) / DRAW_INDEX_2, ranges 26622+6144 (the app's), 32763+3,
  * 24574+8192, 16382+16384, 0+6144, delay 0 / 2 ms; I_RP: the app's case, only the last index
  * changed; I_P*: ME, DRAW_INDEX_OFFSET_2, start addresses 0x8000 / 0x8800 / 0x8FFE (16-bit) and
- * 0x4000 / 0x3FFC (32-bit indices); I_2DRAW: two draws after the wait (0+1024, then
- * 16384+12288). Page model (the PS4, triangle-3: every ME case old up to the same boundary): with
- * the wait in the ME the indices from the draw's start up to the end of the 16 KiB from the 4 KiB
- * page of its start are read before the wait ends (old), the rest after (new); with the wait in
- * the PFP all new. RP       the app's frame: its command buffer
+ * 0x4000 / 0x3FFC (32-bit indices); I_A*: start addresses 0x8002 / 0x8402 (16-bit), 0x8004
+ * (32-bit); I_2DRAW / I_2DRAW_U / I_3DRAW: two or three draws after the wait. Budget model (the
+ * PS4, triangle-3 and -4: every ME case): with the wait in the ME, 12 KiB of index data past the
+ * draw's start rounded up to A bytes are read before the wait ends (old), shared by the draws
+ * after the wait in order; the rest after (new); with the wait in the PFP all new. A is between
+ * 8 and 2048 bytes: both ends are predicted, and the start rounded up as the PS4 read it
+ * (old end - budget) is logged. RP       the app's frame: its command buffer
  * (sceGnmDrawInitDefaultHardwareState350, its render target - here linear, the display buffer fb 0
  * -, viewport, scissors, window offset, hardware screen offset, guard band, the embedded rect
  * shaders, its triangle shaders and fetch shader byte for byte, the reversed-halves index buffer,
@@ -92,7 +108,7 @@
  * linear image readbacks (the CPU reads GPU results). */
 #include "ps_triangle.h"
 
-#define TRIANGLE_BUILD "triangle-4"
+#define TRIANGLE_BUILD "triangle-5"
 #define TRIANGLE_TIMEOUT_US 2000000u
 #define TRIANGLE_SHOW_S 10
 #define TRIANGLE_DCB_DW 0x4000u
@@ -108,6 +124,8 @@
 extern void* mmap(void* addr, unsigned long len, int prot, int flags, int fd, long offset);
 extern int munmap(void* addr, unsigned long len);
 extern int sceKernelVirtualQuery(const void* addr, int flags, void* info, unsigned long size);
+extern int sceKernelGetModuleList(int* handles, unsigned long size, unsigned long* available);
+extern int sceKernelGetModuleInfo(int handle, void* info);
 extern int sceKernelAllocateMainDirectMemory(unsigned long len, unsigned long align, int type,
                                              long* phys);
 extern int sceKernelIsNeoMode(void);
@@ -245,19 +263,27 @@ static void tri_state_load(struct TriangleState* st) {
  */
 #define TRI_VQ_MAX 24
 #define TRI_VQ_END 0x204000000ull
-struct TriangleMem {
-    char build[32];
-    int32_t r_mmap, r_fa, r_fm, r_ia, r_im, r_fix, fix_made;
+/* One run of the app's sequence, after a filler map of filler bytes (0: none). */
+struct TriangleMemRun {
+    uint64_t filler, a_filler;
+    int32_t r_filler, r_mmap, r_fa, r_fm, r_ia, r_im, r_fix, fix_made;
     uint64_t a_mmap, f_phys, f_va, i_phys, i_va, target, fix_va;
     int32_t q_ret[2];
     uint64_t q_start[2], q_end[2], q_off[2];
     uint32_t q_prot[2], q_type[2];
     char q_class[2]; /* f free, F the frame, o other */
     uint32_t f_before[2][4], f_after[2][4], i_val[4];
+};
+#define TRI_MEM_RUNS 3
+struct TriangleMem {
+    char build[32];
+    struct TriangleMemRun run[TRI_MEM_RUNS];
     int32_t vq_n, vq_ret;
     uint64_t vq_start[TRI_VQ_MAX], vq_end[TRI_VQ_MAX];
     uint32_t vq_prot[TRI_VQ_MAX], vq_type[TRI_VQ_MAX], vq_flags[TRI_VQ_MAX];
     char vq_name[TRI_VQ_MAX][32];
+    int32_t h_ret[4];
+    uint64_t h_three, h_flex, h_direct;
 };
 static struct TriangleMem g_tri_mem;
 /* Every mapped range from 0x200000000 up to TRI_VQ_END (VirtualQuery, SCE_KERNEL_VQ_FIND_NEXT). */
@@ -286,8 +312,7 @@ static void tri_mem_walk(void) {
         a = end;
     }
 }
-static void tri_mem_query(int k, uint64_t a) {
-    struct TriangleMem* m = &g_tri_mem;
+static void tri_mem_query(struct TriangleMemRun* m, int k, uint64_t a) {
     uint8_t info[0x48];
     my_memset(info, 0, sizeof(info));
     m->q_ret[k] = sceKernelVirtualQuery((const void*)(uintptr_t)a, 0, info, sizeof(info));
@@ -303,20 +328,44 @@ static void tri_mem_query(int k, uint64_t a) {
     else
         m->q_class[k] = 'o';
 }
-static void triangle_mem_probe(void) {
-    struct TriangleState st;
-    if (!tri_paths())
-        return; /* no folder takes a file: nothing could be logged */
-    tri_state_load(&st);
-    if (st.mem != 0)
-        return; /* done, or it crashed (1): the log step reports it */
-    st.mem = 1;
-    tri_state_save(&st);
+/* Three 16 KiB pages mapped together, the middle one unmapped: does a 16 KiB map at an address the
+   kernel picks (flexible, then direct) land in that hole? */
+static void tri_mem_hole(void) {
     struct TriangleMem* m = &g_tri_mem;
-    my_memset(m, 0, sizeof(*m));
-    for (int i = 0; TRIANGLE_BUILD[i]; i++)
-        m->build[i] = TRIANGLE_BUILD[i];
-    tri_mem_walk();
+    void* three = mmap(0, 0xC000, 3, 0x1002, -1, 0);
+    m->h_ret[0] = three == (void*)-1 ? -1 : 0;
+    if (m->h_ret[0] != 0)
+        return;
+    m->h_three = (uint64_t)(uintptr_t)three;
+    munmap((uint8_t*)three + 0x4000, 0x4000);
+    void* flex = mmap(0, 0x4000, 3, 0x1002, -1, 0);
+    m->h_ret[1] = flex == (void*)-1 ? -1 : 0;
+    if (m->h_ret[1] == 0) {
+        m->h_flex = (uint64_t)(uintptr_t)flex;
+        munmap(flex, 0x4000);
+    }
+    long phys = 0;
+    m->h_ret[2] = sceKernelAllocateMainDirectMemory(0x4000, 0x4000, 0, &phys);
+    if (m->h_ret[2] == 0) {
+        void* direct = 0;
+        m->h_ret[3] = sceKernelMapDirectMemory(&direct, 0x4000, 0x33, 0, phys, 0x4000);
+        if (m->h_ret[3] == 0) {
+            m->h_direct = (uint64_t)(uintptr_t)direct;
+            sceKernelMunmap(direct, 0x4000);
+        }
+        sceKernelReleaseDirectMemory(phys, 0x4000);
+    }
+    munmap(three, 0x4000);
+    munmap((uint8_t*)three + 0x8000, 0x4000);
+}
+/* The app's sequence; with a filler first, so its mmap ends filler bytes further on. */
+static void tri_mem_sequence(struct TriangleMemRun* m, uint64_t filler) {
+    m->filler = filler;
+    if (filler != 0) {
+        void* fl = mmap(0, filler, 3, 0x1002, -1, 0);
+        m->r_filler = fl == (void*)-1 ? -1 : 0;
+        m->a_filler = (uint64_t)(uintptr_t)fl;
+    }
     void* a = mmap(0, 0x4000, 3, 0x1002, -1, 0);
     m->a_mmap = (uint64_t)(uintptr_t)a;
     m->r_mmap = (a == (void*)-1) ? -1 : 0;
@@ -343,8 +392,8 @@ static void triangle_mem_probe(void) {
     if (m->r_ia == 0 && m->r_im == 0 && m->r_fa == 0 && m->r_fm == 0) {
         my_memset(iv, 0, 0x8000);
         m->target = m->i_va + 0x8000;
-        tri_mem_query(0, m->target);
-        tri_mem_query(1, m->target + 0x4000);
+        tri_mem_query(m, 0, m->target);
+        tri_mem_query(m, 1, m->target + 0x4000);
         if (m->q_class[0] != 'o' && m->q_class[1] != 'o') {
             void* t = (void*)(uintptr_t)m->target;
             m->r_fix = sceKernelMapDirectMemory(&t, 0x8000, 0x33, 0x10, ip, 0x4000);
@@ -373,6 +422,27 @@ static void triangle_mem_probe(void) {
         sceKernelReleaseDirectMemory(fp, 0x7F8000);
     if (m->r_ia == 0)
         sceKernelReleaseDirectMemory(ip, 0x10000);
+    if (m->r_filler == 0 && m->filler != 0)
+        munmap((void*)(uintptr_t)m->a_filler, m->filler);
+}
+static void triangle_mem_probe(void) {
+    struct TriangleState st;
+    if (!tri_paths())
+        return; /* no folder takes a file: nothing could be logged */
+    tri_state_load(&st);
+    if (st.mem != 0)
+        return; /* done, or it crashed (1): the log step reports it */
+    st.mem = 1;
+    tri_state_save(&st);
+    struct TriangleMem* m = &g_tri_mem;
+    my_memset(m, 0, sizeof(*m));
+    for (int i = 0; TRIANGLE_BUILD[i]; i++)
+        m->build[i] = TRIANGLE_BUILD[i];
+    tri_mem_walk();
+    static const uint64_t k_filler[TRI_MEM_RUNS] = {0, 0x4000, 0x8000};
+    for (int v = 0; v < TRI_MEM_RUNS; v++)
+        tri_mem_sequence(&m->run[v], k_filler[v]);
+    tri_mem_hole();
     int fd = sceKernelOpen(g_tri_mem_path, 0x601, 0x1FF);
     if (fd >= 0) {
         sceKernelWrite(fd, m, sizeof(*m));
@@ -393,6 +463,96 @@ static void tri_kd(const char* k, long long v) {
     tri_s("=");
     tri_i(v);
     tri_s(" ");
+}
+/* sceKernelGetModuleInfo: size, name[256], 4 segments (address, size, protection), count. */
+#define TRI_MODULE_INFO_SIZE 0x160
+static uint64_t tri_hex_value(const char* s) {
+    uint64_t v = 0;
+    for (; *s; s++) {
+        int d = *s >= '0' && *s <= '9'   ? *s - '0'
+                : *s >= 'a' && *s <= 'f' ? *s - 'a' + 10
+                : *s >= 'A' && *s <= 'F' ? *s - 'A' + 10
+                                         : -1;
+        if (d < 0)
+            break;
+        v = v * 16 + (uint64_t)d;
+    }
+    return v;
+}
+/* Every loaded module with its segments; each "anon:<address>" range from the walk with the module
+   and offset that address is in. */
+static void tri_mem_modules(void) {
+    static int handles[256];
+    static uint8_t infos[64][TRI_MODULE_INFO_SIZE];
+    unsigned long count = 0;
+    int r = sceKernelGetModuleList(handles, 256, &count);
+    tri_s("modules:");
+    tri_kd(" ret", r);
+    tri_kd("count", (long long)count);
+    tri_s("\n");
+    if (r != 0)
+        return;
+    if (count > 64)
+        count = 64;
+    for (unsigned long m = 0; m < count; m++) {
+        uint8_t* info = infos[m];
+        my_memset(info, 0, TRI_MODULE_INFO_SIZE);
+        uint64_t size = TRI_MODULE_INFO_SIZE;
+        my_memcpy(info, &size, 8);
+        int ri = sceKernelGetModuleInfo(handles[m], info);
+        info[8 + 255] = 0;
+        tri_s("  ");
+        tri_kd("handle", handles[m]);
+        tri_kd("ret", ri);
+        tri_s("name=\"");
+        tri_s((const char*)info + 8);
+        tri_s("\"");
+        uint32_t nseg;
+        my_memcpy(&nseg, info + 0x148, 4);
+        for (uint32_t k = 0; k < nseg && k < 4; k++) {
+            uint64_t a;
+            uint32_t sz;
+            my_memcpy(&a, info + 0x108 + 16 * k, 8);
+            my_memcpy(&sz, info + 0x110 + 16 * k, 4);
+            tri_s(" ");
+            tri_x(a, 12);
+            tri_s("+");
+            tri_x(sz, 8);
+        }
+        tri_s("\n");
+    }
+    struct TriangleMem* mm = &g_tri_mem;
+    for (int k = 0; k < mm->vq_n && k < TRI_VQ_MAX; k++) {
+        const char* n = mm->vq_name[k];
+        if (!(n[0] == 'a' && n[1] == 'n' && n[2] == 'o' && n[3] == 'n' && n[4] == ':'))
+            continue;
+        uint64_t a = tri_hex_value(n + 5);
+        tri_s("  ");
+        tri_s(n);
+        tri_s(" ->");
+        int found = 0;
+        for (unsigned long m = 0; m < count && !found; m++) {
+            uint32_t nseg;
+            my_memcpy(&nseg, infos[m] + 0x148, 4);
+            for (uint32_t s = 0; s < nseg && s < 4; s++) {
+                uint64_t base;
+                uint32_t sz;
+                my_memcpy(&base, infos[m] + 0x108 + 16 * s, 8);
+                my_memcpy(&sz, infos[m] + 0x110 + 16 * s, 4);
+                if (a >= base && a < base + sz) {
+                    tri_s(" ");
+                    tri_s((const char*)infos[m] + 8);
+                    tri_s(" segment ");
+                    tri_u(s);
+                    tri_s(" +");
+                    tri_x(a - base, 8);
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        tri_s(found ? "\n" : " no module\n");
+    }
 }
 static void tri_mem_report(int mem_state) {
     tri_s("### MEM: the app's memory sequence at the start of main()\n");
@@ -428,73 +588,107 @@ static void tri_mem_report(int mem_state) {
         tri_s(m->vq_name[k]);
         tri_s("\"\n");
     }
-    tri_kd("mmap_ret", m->r_mmap);
-    tri_kv("mmap", m->a_mmap);
+    tri_mem_modules();
+    tri_s("hole: three pages ");
+    tri_kd("ret", m->h_ret[0]);
+    tri_kv("at", m->h_three);
+    tri_s("hole ");
+    tri_kv("at", m->h_three + 0x4000);
+    tri_s("\n  next flexible 16 KiB ");
+    tri_kd("ret", m->h_ret[1]);
+    tri_kv("at", m->h_flex);
+    tri_s("\n  next direct 16 KiB ");
+    tri_kd("alloc", m->h_ret[2]);
+    tri_kd("map", m->h_ret[3]);
+    tri_kv("at", m->h_direct);
+    tri_s("\n  summary hole: ");
+    tri_s(m->h_ret[0] != 0 ? "NOT RUN"
+          : m->h_flex == m->h_three + 0x4000 && m->h_direct == m->h_three + 0x4000
+              ? "BOTH FILL THE HOLE"
+          : m->h_flex == m->h_three + 0x4000   ? "FLEXIBLE FILLS THE HOLE, DIRECT NOT"
+          : m->h_direct == m->h_three + 0x4000 ? "DIRECT FILLS THE HOLE, FLEXIBLE NOT"
+                                               : "NEITHER FILLS THE HOLE");
     tri_s("\n");
-    tri_kd("frame_alloc", m->r_fa);
-    tri_kv("phys", m->f_phys);
-    tri_kd("map", m->r_fm);
-    tri_kv("va", m->f_va);
-    tri_kv("end", m->f_va + 0x7F8000ull);
-    tri_s("\n");
-    tri_kd("index_alloc", m->r_ia);
-    tri_kv("phys", m->i_phys);
-    tri_kd("map_second_half", m->r_im);
-    tri_kv("va", m->i_va);
-    tri_s("\n");
-    tri_kv("fixed_target", m->target);
-    tri_s("\n");
-    for (int k = 0; k < 2; k++) {
-        tri_s("  query ");
-        tri_kv("at", m->target + 0x4000ull * (uint64_t)k);
-        tri_kd("ret", m->q_ret[k]);
-        tri_kv("start", m->q_start[k]);
-        tri_kv("end", m->q_end[k]);
-        tri_kv("offset", m->q_off[k]);
-        tri_kv("prot", m->q_prot[k]);
-        tri_kv("type", m->q_type[k]);
-        tri_s("class=");
-        char c[2] = {m->q_class[k], 0};
-        tri_s(c);
+    for (int v = 0; v < TRI_MEM_RUNS; v++) {
+        const struct TriangleMemRun* m = &g_tri_mem.run[v];
+        tri_s("run ");
+        tri_u((unsigned)v);
+        tri_s(": ");
+        tri_kv("filler", m->filler);
+        tri_kd("ret", m->r_filler);
+        tri_kv("at", m->a_filler);
         tri_s("\n");
-    }
-    tri_kd("fixed_made", m->fix_made);
-    tri_kd("fixed_ret", m->r_fix);
-    tri_kv("fixed_va", m->fix_va);
-    tri_s("\n");
-    tri_s("relative: mmap-0x200000000=");
-    tri_x(m->a_mmap - 0x200000000ull, 8);
-    tri_s(" frame-mmap=");
-    tri_x(m->f_va - m->a_mmap, 8);
-    tri_s(" index-mmap=");
-    tri_x(m->i_va - m->a_mmap, 8);
-    tri_s(" target_overlaps_frame=");
-    int ov = m->target < m->f_va + 0x7F8000ull && m->target + 0x8000ull > m->f_va;
-    tri_u((unsigned)ov);
-    tri_s("\n");
-    for (int k = 0; k < 2; k++) {
-        tri_s(k ? "frame+0x4000 before " : "frame+0 before ");
+        tri_kd("mmap_ret", m->r_mmap);
+        tri_kv("mmap", m->a_mmap);
+        tri_s("\n");
+        tri_kd("frame_alloc", m->r_fa);
+        tri_kv("phys", m->f_phys);
+        tri_kd("map", m->r_fm);
+        tri_kv("va", m->f_va);
+        tri_kv("end", m->f_va + 0x7F8000ull);
+        tri_s("\n");
+        tri_kd("index_alloc", m->r_ia);
+        tri_kv("phys", m->i_phys);
+        tri_kd("map_second_half", m->r_im);
+        tri_kv("va", m->i_va);
+        tri_s("\n");
+        tri_kv("fixed_target", m->target);
+        tri_s("\n");
+        for (int k = 0; k < 2; k++) {
+            tri_s("  query ");
+            tri_kv("at", m->target + 0x4000ull * (uint64_t)k);
+            tri_kd("ret", m->q_ret[k]);
+            tri_kv("start", m->q_start[k]);
+            tri_kv("end", m->q_end[k]);
+            tri_kv("offset", m->q_off[k]);
+            tri_kv("prot", m->q_prot[k]);
+            tri_kv("type", m->q_type[k]);
+            tri_s("class=");
+            char c[2] = {m->q_class[k], 0};
+            tri_s(c);
+            tri_s("\n");
+        }
+        tri_kd("fixed_made", m->fix_made);
+        tri_kd("fixed_ret", m->r_fix);
+        tri_kv("fixed_va", m->fix_va);
+        tri_s("\n");
+        tri_s("relative: mmap-0x200000000=");
+        tri_x(m->a_mmap - 0x200000000ull, 8);
+        tri_s(" frame-mmap=");
+        tri_x(m->f_va - m->a_mmap, 8);
+        tri_s(" index-mmap=");
+        tri_x(m->i_va - m->a_mmap, 8);
+        tri_s(" target_overlaps_frame=");
+        int ov = m->target < m->f_va + 0x7F8000ull && m->target + 0x8000ull > m->f_va;
+        tri_u((unsigned)ov);
+        tri_s("\n");
+        for (int k = 0; k < 2; k++) {
+            tri_s(k ? "frame+0x4000 before " : "frame+0 before ");
+            for (int j = 0; j < 4; j++) {
+                tri_x(m->f_before[k][j], 8);
+                tri_s(" ");
+            }
+            tri_s(" after ");
+            for (int j = 0; j < 4; j++) {
+                tri_x(m->f_after[k][j], 8);
+                tri_s(" ");
+            }
+            tri_s("\n");
+        }
+        tri_s("index first half (through its own address) ");
         for (int j = 0; j < 4; j++) {
-            tri_x(m->f_before[k][j], 8);
+            tri_x(m->i_val[j], 8);
             tri_s(" ");
         }
-        tri_s(" after ");
-        for (int j = 0; j < 4; j++) {
-            tri_x(m->f_after[k][j], 8);
-            tri_s(" ");
-        }
-        tri_s("\n");
+        tri_s("\nsummary MEM run ");
+        tri_u((unsigned)v);
+        tri_s(": ");
+        tri_s(!m->fix_made ? "NO FIXED MAP"
+              : ov         ? "FIXED MAP OVER THE FRAME"
+                           : "FIXED MAP NOT OVER THE FRAME");
+
+        tri_s("\n\n");
     }
-    tri_s("index first half (through its own address) ");
-    for (int j = 0; j < 4; j++) {
-        tri_x(m->i_val[j], 8);
-        tri_s(" ");
-    }
-    tri_s("\nsummary MEM: ");
-    tri_s(!m->fix_made ? "NO FIXED MAP"
-          : ov         ? "FIXED MAP OVER THE FRAME"
-                       : "FIXED MAP NOT OVER THE FRAME");
-    tri_s("\n\n");
 }
 
 /* ==== GPU context ==============================================================================
@@ -512,7 +706,7 @@ struct TriangleContext {
     uint32_t* scratch_map;
     uint16_t* ib;    /* 32768 indices */
     uint32_t* flags; /* 65536 */
-    void *vs_fetch, *vs_full, *vs_index, *vs_raw, *ps_cov, *fetch;
+    void *vs_fetch, *vs_full, *vs_index, *vs_raw, *vs_raw2, *ps_cov, *fetch;
     /* RP */
     void *rp_vs, *rp_ps, *rp_fetch;
     uint32_t* rp_vsharps; /* pos, clr */
@@ -583,6 +777,7 @@ static int triangle_alloc(struct TriangleContext* c) {
     c->vs_full = tri_alloc(sizeof(tri_vs_full_bin), 0x1000);
     c->vs_index = tri_alloc(sizeof(tri_vs_index_bin), 0x1000);
     c->vs_raw = tri_alloc(sizeof(tri_vs_raw_bin), 0x1000);
+    c->vs_raw2 = tri_alloc(sizeof(tri_vs_raw2_bin), 0x1000);
     c->ps_cov = tri_alloc(sizeof(tri_ps_cov_bin), 0x1000);
     c->fetch = tri_alloc(sizeof(tri_fetch_bin), 0x1000);
     c->rp_vs = tri_alloc(sizeof(k_rp_vs), 0x1000);
@@ -597,13 +792,14 @@ static int triangle_alloc(struct TriangleContext* c) {
     c->rp_index = tri_alloc_reversed();
     if (!(c->dcb && c->fence && c->data && c->rpdata && c->tab && c->out && c->rt && c->map &&
           c->scratch_map && c->ib && c->flags && c->vs_fetch && c->vs_full && c->vs_index &&
-          c->vs_raw && c->ps_cov && c->fetch && c->rp_vs && c->rp_ps && c->rp_fetch &&
+          c->vs_raw && c->vs_raw2 && c->ps_cov && c->fetch && c->rp_vs && c->rp_ps && c->rp_fetch &&
           c->rp_vsharps && c->rp_vertices && c->rp_vindex && c->rp_wait && c->rp_index))
         return 0;
     my_memcpy(c->vs_fetch, tri_vs_fetch_bin, sizeof(tri_vs_fetch_bin));
     my_memcpy(c->vs_full, tri_vs_full_bin, sizeof(tri_vs_full_bin));
     my_memcpy(c->vs_index, tri_vs_index_bin, sizeof(tri_vs_index_bin));
     my_memcpy(c->vs_raw, tri_vs_raw_bin, sizeof(tri_vs_raw_bin));
+    my_memcpy(c->vs_raw2, tri_vs_raw2_bin, sizeof(tri_vs_raw2_bin));
     my_memcpy(c->ps_cov, tri_ps_cov_bin, sizeof(tri_ps_cov_bin));
     my_memcpy(c->fetch, tri_fetch_bin, sizeof(tri_fetch_bin));
     my_memcpy(c->rp_vs, k_rp_vs, sizeof(k_rp_vs));
@@ -949,24 +1145,24 @@ static int tri_fetch_group(struct TriangleContext* c, int g) {
 /* ==== MC: components past the format, per number format =======================================
  */
 static const struct {
-    uint8_t fmt; /* index into k_tri_fmt */
-    uint8_t nfmt;
+    uint8_t dfmt, ncomp, nfmt;
+    const char* name;
 } k_tri_mc[] = {
-    {0, 0}, {0, 1}, {0, 4}, {0, 5},         /* 8 */
-    {1, 0}, {1, 1}, {1, 4}, {1, 5}, {1, 7}, /* 16 */
-    {2, 0}, {2, 1}, {2, 4}, {2, 5},         /* 8_8 */
-    {3, 4}, {3, 5}, {3, 7},                 /* 32 */
-    {4, 0}, {4, 1}, {4, 4}, {4, 5}, {4, 7}, /* 16_16 */
-    {6, 4}, {6, 5}, {6, 7},                 /* 32_32 */
-    {8, 4}, {8, 5}, {8, 7},                 /* 32_32_32 */
+    {1, 1, 0, "8"},         {1, 1, 1, "8"},         {1, 1, 4, "8"},         {1, 1, 5, "8"},
+    {2, 1, 0, "16"},        {2, 1, 1, "16"},        {2, 1, 4, "16"},        {2, 1, 5, "16"},
+    {2, 1, 7, "16"},        {3, 2, 0, "8_8"},       {3, 2, 1, "8_8"},       {3, 2, 4, "8_8"},
+    {3, 2, 5, "8_8"},       {4, 1, 4, "32"},        {4, 1, 5, "32"},        {4, 1, 7, "32"},
+    {5, 2, 0, "16_16"},     {5, 2, 1, "16_16"},     {5, 2, 4, "16_16"},     {5, 2, 5, "16_16"},
+    {5, 2, 7, "16_16"},     {11, 2, 4, "32_32"},    {11, 2, 5, "32_32"},    {11, 2, 7, "32_32"},
+    {13, 3, 4, "32_32_32"}, {13, 3, 5, "32_32_32"}, {13, 3, 7, "32_32_32"}, {6, 3, 7, "10_11_11"},
+    {7, 3, 7, "11_11_10"},
 };
 #define TRI_NMC ((int)(sizeof(k_tri_mc) / sizeof(k_tri_mc[0])))
 static const char* const k_tri_nfmt_name[8] = {"UNORM", "SNORM", "USCALED",  "SSCALED",
                                                "UINT",  "SINT",  "SNORM_NZ", "FLOAT"};
 static int tri_mc_step(struct TriangleContext* c) {
     struct TriFetchCase f[TRI_NMC];
-    for (int i = 0; i < TRI_NMC; i++) {
-        const int g = k_tri_mc[i].fmt;
+    for (int i = 0; i < TRI_NMC; i++)
         f[i] = (struct TriFetchCase){(uint64_t)(uintptr_t)c->data,
                                      c->data,
                                      0,
@@ -974,10 +1170,9 @@ static int tri_mc_step(struct TriangleContext* c) {
                                      4,
                                      TRI_DST_XYZW,
                                      k_tri_mc[i].nfmt,
-                                     k_tri_fmt[g].dfmt,
-                                     k_tri_fmt[g].ncomp,
-                                     k_tri_fmt[g].csize};
-    }
+                                     k_tri_mc[i].dfmt,
+                                     k_tri_mc[i].ncomp,
+                                     0};
     for (int i = 0; i < TRI_NMC * 128; i++)
         c->out[i] = TRIANGLE_UNWRITTEN;
     struct PM4Builder b;
@@ -1011,11 +1206,11 @@ static int tri_mc_step(struct TriangleContext* c) {
         const struct TriFetchCase* p = &f[i];
         const uint32_t* o = c->out + i * 128;
         tri_s("MC_");
-        tri_s(k_tri_fmt[k_tri_mc[i].fmt].name);
+        tri_s(k_tri_mc[i].name);
         tri_s(" ");
         tri_s(k_tri_nfmt_name[p->nfmt & 7]);
         tri_s("\n");
-        char sum[4] = {0, 0, 0, 0};
+        char sum[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
         for (int path = 0; path < 2; path++) {
             tri_s(path ? "  direct " : "  fetch  ");
             for (uint32_t k = 0; k < p->nvert; k++) {
@@ -1025,9 +1220,9 @@ static int tri_mc_step(struct TriangleContext* c) {
                     t[cc] = v[cc] == TRIANGLE_UNWRITTEN ? 'u'
                             : cc < p->ncomp             ? 'v'
                                                         : tri_classify_past(p, cc, v);
-                    if (path != 0 || k == 0 || cc < p->ncomp)
+                    if (k == 0 || cc < p->ncomp)
                         continue;
-                    char* q = &sum[cc - p->ncomp];
+                    char* q = &sum[path][cc - p->ncomp];
                     *q = *q == 0 ? t[cc] : *q == t[cc] ? *q : '?';
                 }
                 t[4] = 0;
@@ -1046,8 +1241,15 @@ static int tri_mc_step(struct TriangleContext* c) {
         for (uint32_t k = 0; k < p->nvert; k++)
             for (uint32_t cc = 0; cc < 4; cc++)
                 same &= o[k * 8 + cc] == o[k * 8 + 4 + cc];
-        tri_s("  summary past-format components (fetch, vertices 1..3) ");
-        tri_s(sum);
+        tri_s("  summary past-format components (vertices 1..3)");
+        for (int path = 0; path < 2; path++) {
+            int model = 1;
+            for (uint32_t cc = p->ncomp; cc < 4; cc++)
+                model &= sum[path][cc - p->ncomp] == 'r';
+            tri_s(path ? " direct " : " fetch ");
+            tri_s(sum[path]);
+            tri_s(model ? " MODEL" : " DIFF");
+        }
         tri_s(same ? " fetch==direct" : " fetch!=direct");
         tri_s("\n");
     }
@@ -1068,8 +1270,11 @@ static int tri_decode(uint32_t v, uint32_t size) {
     return (int)a;
 }
 static int tri_raw_step(struct TriangleContext* c) {
+    uint32_t* out2 = c->out + 1024;
     for (int i = 0; i < 4 * 128; i++)
         c->out[i] = TRIANGLE_UNWRITTEN;
+    for (int i = 0; i < 4 * 64; i++)
+        out2[i] = TRIANGLE_UNWRITTEN;
     struct PM4Builder b;
     tri_begin(&b, c);
     tri_common(&b, c);
@@ -1088,11 +1293,19 @@ static int tri_raw_step(struct TriangleContext* c) {
     pm4_set_context_reg(&b, CTX_POLYGON_CONTROL, 0);
     pm4_set_uconfig_reg(&b, UCFG_PRIMITIVE_TYPE, 1); /* point list */
     for (uint32_t off = 0; off < 4; off++) {
+        uint64_t base = (uint64_t)(uintptr_t)c->data + off;
         uint32_t* t = c->tab + off * 64;
-        tri_vsharp(t, (uint64_t)(uintptr_t)c->data + off, 0, 256, 0, 4, 4);
+        tri_vsharp(t, base, 0, 256, 0, 4, 4);
         tri_vsharp(t + 4, (uint64_t)(uintptr_t)(c->out + off * 128), 0, 512, 0, 4, 4);
         tri_vs(&b, c->vs_raw, TRI_VS_RAW_RSRC1, 2);
         tri_ptr_ud(&b, SH_VS_USER_DATA_0, t);
+        pm4_draw_index_auto(&b, 4);
+        uint32_t* t2 = c->tab + 0x400 + off * 64;
+        tri_vsharp(t2, base, 0, 256, 0, 4, 4);
+        tri_vsharp(t2 + 4, (uint64_t)(uintptr_t)(out2 + off * 64), 0, 256, 0, 4, 4);
+        tri_vsharp(t2 + 8, base, 5, 32, 0, 4, 4);
+        tri_vs(&b, c->vs_raw2, TRI_VS_RAW2_RSRC1, 2);
+        tri_ptr_ud(&b, SH_VS_USER_DATA_0, t2);
         pm4_draw_index_auto(&b, 4);
     }
     tri_end(&b, c);
@@ -1101,50 +1314,78 @@ static int tri_raw_step(struct TriangleContext* c) {
         r = tri_wait(c);
     if (r < 0)
         return r;
+    /* rule: 0 not judged, 1 exact, 2 (base + offset) & ~1, 3 (base + offset) & ~3,
+       4 (base & ~3) + (offset & ~3); offset: 5 * vertex (vector loads) + add */
     static const struct {
         const char* name;
-        uint8_t dw, size, judged;
-        uint8_t imm; /* s_buffer: byte offset of the load, 0 for the vector loads */
-    } k_loads[7] = {{"dword", 0, 4, 1, 0},          {"ushort", 1, 2, 0, 0},
-                    {"ubyte", 2, 1, 0, 0},          {"dwordx2.lo", 4, 4, 1, 0},
-                    {"dwordx2.hi", 5, 4, 1, 4},     {"s_buffer imm 1", 3, 4, 0, 4},
-                    {"s_buffer sgpr 6", 6, 4, 0, 6}};
+        uint8_t second, dw, size, scalar, add, rule;
+    } k_loads[] = {
+        {"dword", 0, 0, 4, 0, 0, 4},
+        {"ushort", 0, 1, 2, 0, 0, 2},
+        {"ubyte", 0, 2, 1, 0, 0, 1},
+        {"dwordx2.0", 0, 4, 4, 0, 0, 3},
+        {"dwordx2.1", 0, 5, 4, 0, 4, 3},
+        {"s_buffer_load_dword offset 1 (dwords)", 0, 3, 4, 1, 4, 4},
+        {"s_buffer_load_dword sgpr offset 6", 0, 6, 4, 1, 6, 4},
+        {"dword offset:1", 1, 0, 4, 0, 1, 0},
+        {"dword soffset 3", 1, 1, 4, 0, 3, 0},
+        {"dword idxen stride 5", 1, 2, 4, 0, 0, 0},
+        {"ushort offset:1", 1, 3, 2, 0, 1, 0},
+        {"dwordx4.0", 1, 4, 4, 0, 0, 0},
+        {"dwordx4.1", 1, 5, 4, 0, 4, 0},
+        {"dwordx4.2", 1, 6, 4, 0, 8, 0},
+        {"dwordx4.3", 1, 7, 4, 0, 12, 0},
+        {"dwordx3.0", 1, 8, 4, 0, 0, 0},
+        {"dwordx3.1", 1, 9, 4, 0, 4, 0},
+        {"dwordx3.2", 1, 10, 4, 0, 8, 0},
+    };
     tri_s("### RAW: raw loads with a V# base 0..3 bytes past a dword (offset 5 * vertex)\n\n");
     for (uint32_t off = 0; off < 4; off++) {
-        const uint32_t* o = c->out + off * 128;
         tri_s("RAW base+");
         tri_u(off);
         tri_s("\n");
         int ok = 1;
-        for (int l = 0; l < 7; l++) {
-            const int scalar = l >= 5;
+        for (unsigned l = 0; l < sizeof(k_loads) / sizeof(k_loads[0]); l++) {
+            const uint32_t* o = k_loads[l].second ? out2 + off * 64 : c->out + off * 128;
+            const uint32_t stride = k_loads[l].second ? 16 : 8;
             tri_s("  ");
             tri_s(k_loads[l].name);
             tri_s(": exact");
             for (uint32_t k = 0; k < 4; k++) {
                 tri_s(" ");
-                uint32_t e = off + (scalar ? 0 : 5 * k) + k_loads[l].imm;
-                tri_u(e);
+                tri_u(off + (k_loads[l].scalar ? 0 : 5 * k) + k_loads[l].add);
             }
             tri_s("  read");
             for (uint32_t k = 0; k < 4; k++) {
-                uint32_t v = o[k * 8 + k_loads[l].dw];
+                uint32_t v = o[k * stride + k_loads[l].dw];
                 int a = tri_decode(v, k_loads[l].size);
                 tri_s(" ");
                 if (a < 0)
                     tri_x(v, 8);
                 else
                     tri_u((unsigned)a);
-                if (k_loads[l].judged) {
-                    uint32_t e = off + 5 * k;
-                    uint32_t m = (e & ~3u) + k_loads[l].imm;
-                    if (a != (int)m)
-                        ok = 0;
+                const uint32_t offset = (k_loads[l].scalar ? 0 : 5 * k) + k_loads[l].add;
+                uint32_t m = 0;
+                switch (k_loads[l].rule) {
+                case 1:
+                    m = off + offset;
+                    break;
+                case 2:
+                    m = (off + offset) & ~1u;
+                    break;
+                case 3:
+                    m = ((off + offset - k_loads[l].add) & ~3u) + k_loads[l].add;
+                    break;
+                case 4:
+                    m = (off & ~3u) + (offset & ~3u);
+                    break;
                 }
+                if (k_loads[l].rule != 0 && a != (int)m)
+                    ok = 0;
             }
-            tri_s(k_loads[l].judged ? "  (model: LSBs cleared)\n" : "\n");
+            tri_s(k_loads[l].rule ? "  (judged)\n" : "\n");
         }
-        tri_s("  summary dword/dwordx2 ");
+        tri_s("  summary judged loads ");
         tri_s(ok ? "MODEL" : "DIFF");
         tri_s("\n");
     }
@@ -1398,13 +1639,15 @@ static int tri_scissor_case(struct TriangleContext* c, int k) {
 
 /* ==== I: index fetch against a write after the submit ===========================================
  */
+#define TRI_DRAWS 3
 struct TriIndexCase {
     char id[24];
     uint8_t pfp, packet, only_last, isize;
-    uint32_t offset, count, delay_us;
-    uint32_t offset2, count2; /* a second draw after the first, count2 0: none */
+    uint32_t delay_us;
+    uint32_t offset[TRI_DRAWS], count[TRI_DRAWS]; /* the draws after the wait, count 0: none */
 };
-#define TRI_NI 47
+#define TRI_NI 52
+#define TRI_INDEX_BUDGET 0x3000u
 static struct TriIndexCase g_tri_ic[TRI_NI];
 static void tri_index_cases(void) {
     static const uint32_t rg[5][2] = {
@@ -1427,41 +1670,59 @@ static void tri_index_cases(void) {
                     s->id[i++] = d ? 'd' : '-';
                     s->pfp = (uint8_t)e;
                     s->packet = (uint8_t)p;
-                    s->offset = rg[r][0];
-                    s->count = rg[r][1];
+                    s->offset[0] = rg[r][0];
+                    s->count[0] = rg[r][1];
                     s->delay_us = d ? 2000u : 0u;
                     s->isize = 2;
                 }
     static const struct {
         const char* id;
         uint8_t isize;
-        uint32_t offset, count, offset2, count2;
-    } k_more[7] = {{"I_RP", 2, 26622, 6144, 0, 0},        {"I_P16_8000", 2, 16384, 16384, 0, 0},
-                   {"I_P16_8800", 2, 17408, 12288, 0, 0}, {"I_P16_8FFE", 2, 18431, 12288, 0, 0},
-                   {"I_P32_4000", 4, 4096, 8192, 0, 0},   {"I_P32_3FFC", 4, 4095, 8192, 0, 0},
-                   {"I_2DRAW", 2, 0, 1024, 16384, 12288}};
-    for (int m = 0; m < 7; m++, n++) {
+        uint32_t offset[TRI_DRAWS], count[TRI_DRAWS];
+    } k_more[] = {
+        {"I_RP", 2, {26622}, {6144}},
+        {"I_P16_8000", 2, {16384}, {16384}},
+        {"I_P16_8800", 2, {17408}, {12288}},
+        {"I_P16_8FFE", 2, {18431}, {12288}},
+        {"I_P32_4000", 4, {4096}, {8192}},
+        {"I_P32_3FFC", 4, {4095}, {8192}},
+        {"I_2DRAW", 2, {0, 16384}, {1024, 12288}},
+        {"I_A16_8002", 2, {16385}, {12288}},
+        {"I_A16_8402", 2, {16897}, {12288}},
+        {"I_A32_8004", 4, {8193}, {6144}},
+        {"I_2DRAW_U", 2, {1, 16384}, {1023, 12288}},
+        {"I_3DRAW", 2, {0, 4096, 16384}, {1024, 1024, 12288}},
+    };
+    for (unsigned m = 0; m < sizeof(k_more) / sizeof(k_more[0]); m++, n++) {
         struct TriIndexCase* s = &g_tri_ic[n];
         my_memset(s, 0, sizeof(*s));
         const char* a = k_more[m].id;
         for (int i = 0; *a; i++)
             s->id[i] = *a++;
         s->isize = k_more[m].isize;
-        s->offset = k_more[m].offset;
-        s->count = k_more[m].count;
-        s->offset2 = k_more[m].offset2;
-        s->count2 = k_more[m].count2;
+        for (int d = 0; d < TRI_DRAWS; d++) {
+            s->offset[d] = k_more[m].offset[d];
+            s->count[d] = k_more[m].count[d];
+        }
         s->only_last = m == 0;
     }
 }
-/* Page model (doc at the top): how many of count indices from index offset are old. */
-static uint32_t tri_page_model(const struct TriIndexCase* s, uint32_t offset, uint32_t count) {
-    if (s->pfp)
-        return 0;
-    uint32_t start = offset * s->isize;
-    uint32_t end = (start & ~0xFFFu) + 0x4000u;
-    uint32_t n = (end - start) / s->isize;
-    return n < count ? n : count;
+/* Budget model (doc at the top) with the start rounded up to align bytes: how many indices of each
+   draw are old. */
+static void tri_budget_model(const struct TriIndexCase* s, uint32_t align,
+                             uint32_t old[TRI_DRAWS]) {
+    uint32_t left = TRI_INDEX_BUDGET;
+    for (int d = 0; d < TRI_DRAWS; d++) {
+        old[d] = 0;
+        if (s->count[d] == 0 || s->pfp)
+            continue;
+        uint32_t start = s->offset[d] * s->isize;
+        uint32_t end = start + s->count[d] * s->isize;
+        uint32_t up = (start + align - 1) & ~(align - 1);
+        uint32_t old_end = up + left < end ? up + left : end;
+        old[d] = (old_end - start + s->isize - 1) / s->isize;
+        left -= old_end > up ? old_end - up : 0;
+    }
 }
 static void tri_wait_reg_mem(struct PM4Builder* b, volatile uint32_t* addr, int pfp) {
     uint64_t a = (uint64_t)(uintptr_t)addr;
@@ -1480,9 +1741,11 @@ static void tri_index_base(struct PM4Builder* b, const void* p) {
     pm4_emit(b, (uint32_t)(a >> 32));
 }
 static uint32_t g_tri_gnm_ofs[9];
-/* Counts and logs one draw's indices; returns 1 when they match the page model. */
-static int tri_index_report(struct TriangleContext* c, const struct TriIndexCase* s,
-                            uint32_t offset, uint32_t count) {
+/* Counts and logs draw d's indices against the budget model with the start rounded up to 8 and
+   to 2048 bytes. */
+static void tri_index_report(struct TriangleContext* c, const struct TriIndexCase* s, int d,
+                             uint32_t left) {
+    const uint32_t offset = s->offset[d], count = s->count[d];
     uint32_t n_old = 0, n_new = 0, n_both = 0, n_none = 0;
     int first_new = -1, last_old = -1;
     tri_s("  runs");
@@ -1531,18 +1794,37 @@ static int tri_index_report(struct TriangleContext* c, const struct TriIndexCase
     tri_i(first_new);
     tri_s(" last_old ");
     tri_i(last_old);
-    uint32_t pm = tri_page_model(s, offset, count);
-    if (s->only_last)
-        pm = count;
-    tri_s("\n  page model old ");
-    tri_u(pm);
+    uint32_t m8[TRI_DRAWS], m2048[TRI_DRAWS];
+    tri_budget_model(s, 8, m8);
+    tri_budget_model(s, 2048, m2048);
+    const uint32_t start = offset * s->isize;
+    const uint32_t old_end = start + n_old * s->isize;
+    tri_s("\n  old up to byte ");
+    tri_x(old_end, 4);
+    if (!s->pfp && n_old != 0 && n_new != 0) {
+        tri_s(", start as read (old end - budget left ");
+        tri_x(left, 4);
+        tri_s(") ");
+        tri_x(old_end - left, 4);
+    }
+    tri_s("\n  budget model old: A 8 ");
+    tri_u(s->only_last ? count : m8[d]);
+    tri_s(", A 2048 ");
+    tri_u(s->only_last ? count : m2048[d]);
     tri_s("\n  summary ");
     tri_s(n_none ? "MISSING" : n_new == 0 ? "ALL OLD" : n_old == 0 ? "ALL NEW" : "SPLIT");
-    int model =
-        n_none == 0 && n_both == 0 && n_old == pm && n_new == (s->only_last ? 0 : count - pm);
-    tri_s(model ? " MODEL" : " DIFF");
+    int ok8 = 1, ok2048 = 1;
+    for (int k = 0; k < 2; k++) {
+        const uint32_t pm = s->only_last ? count : (k ? m2048[d] : m8[d]);
+        const int ok =
+            n_none == 0 && n_both == 0 && n_old == pm && n_new == (s->only_last ? 0 : count - pm);
+        if (k)
+            ok2048 = ok;
+        else
+            ok8 = ok;
+    }
+    tri_s(ok8 && ok2048 ? " MODEL" : ok8 ? " MODEL (A 8)" : ok2048 ? " MODEL (A 2048)" : " DIFF");
     tri_s("\n");
-    return model;
 }
 static int tri_index_case(struct TriangleContext* c, int k) {
     const struct TriIndexCase* s = &g_tri_ic[k];
@@ -1579,23 +1861,23 @@ static int tri_index_case(struct TriangleContext* c, int k) {
     if (s->packet == 0) {
         tri_index_base(&b, c->ib);
         if (pm4_have_space(&b, 9)) {
-            sceGnmDrawIndexOffset(b.buf + b.off, 9, s->offset, s->count, 0);
+            sceGnmDrawIndexOffset(b.buf + b.off, 9, s->offset[0], s->count[0], 0);
             for (int i = 0; i < 9; i++)
                 g_tri_gnm_ofs[i] = b.buf[b.off + i];
             b.off += 9;
         } else {
             b.overflow++;
         }
-        if (s->count2) {
+        for (int d = 1; d < TRI_DRAWS && s->count[d]; d++) {
             if (pm4_have_space(&b, 9)) {
-                sceGnmDrawIndexOffset(b.buf + b.off, 9, s->offset2, s->count2, 0);
+                sceGnmDrawIndexOffset(b.buf + b.off, 9, s->offset[d], s->count[d], 0);
                 b.off += 9;
             } else {
                 b.overflow++;
             }
         }
     } else {
-        pm4_draw_index_2(&b, s->count, (uint64_t)(uintptr_t)(c->ib + s->offset), s->count);
+        pm4_draw_index_2(&b, s->count[0], (uint64_t)(uintptr_t)(c->ib + s->offset[0]), s->count[0]);
     }
     tri_end(&b, c);
     int r = tri_kick(c, &b);
@@ -1615,14 +1897,14 @@ static int tri_index_case(struct TriangleContext* c, int k) {
     uint64_t t1 = sceKernelGetProcessTime();
     if (s->only_last) {
         c->ib[32765] = (uint16_t)(TRIANGLE_NEW + 32765);
-    } else if (s->isize == 4) {
-        for (uint32_t i = s->offset; i < s->offset + s->count; i++)
-            ib32[i] = TRIANGLE_NEW + i;
     } else {
-        for (uint32_t i = s->offset; i < s->offset + s->count; i++)
-            c->ib[i] = (uint16_t)(TRIANGLE_NEW + i);
-        for (uint32_t i = s->offset2; i < s->offset2 + s->count2; i++)
-            c->ib[i] = (uint16_t)(TRIANGLE_NEW + i);
+        for (int d = 0; d < TRI_DRAWS; d++)
+            for (uint32_t i = s->offset[d]; i < s->offset[d] + s->count[d]; i++) {
+                if (s->isize == 4)
+                    ib32[i] = TRIANGLE_NEW + i;
+                else
+                    c->ib[i] = (uint16_t)(TRIANGLE_NEW + i);
+            }
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     c->fence[16] = 1;
@@ -1635,12 +1917,6 @@ static int tri_index_case(struct TriangleContext* c, int k) {
     tri_s(s->pfp ? "PFP" : "ME");
     tri_s(s->packet ? " DRAW_INDEX_2" : " DRAW_INDEX_OFFSET_2");
     tri_s(s->isize == 4 ? " 32-bit" : " 16-bit");
-    tri_s(" offset ");
-    tri_u(s->offset);
-    tri_s(" (byte ");
-    tri_x(s->offset * s->isize, 4);
-    tri_s(") count ");
-    tri_u(s->count);
     tri_s(s->only_last ? " (last index changed)" : "");
     tri_s("\n  submit->wait reached ");
     tri_u(tr - t0);
@@ -1657,16 +1933,23 @@ static int tri_index_case(struct TriangleContext* c, int k) {
         }
         tri_s("\n");
     }
-    tri_index_report(c, s, s->offset, s->count);
-    if (s->count2) {
-        tri_s("  second draw offset ");
-        tri_u(s->offset2);
+    uint32_t left = TRI_INDEX_BUDGET;
+    for (int d = 0; d < TRI_DRAWS && s->count[d]; d++) {
+        tri_s("  draw ");
+        tri_u((unsigned)d);
+        tri_s(": offset ");
+        tri_u(s->offset[d]);
         tri_s(" (byte ");
-        tri_x(s->offset2 * s->isize, 4);
+        tri_x(s->offset[d] * s->isize, 4);
         tri_s(") count ");
-        tri_u(s->count2);
-        tri_s(" (page model: as if prefetched like the first)\n");
-        tri_index_report(c, s, s->offset2, s->count2);
+        tri_u(s->count[d]);
+        tri_s("\n");
+        tri_index_report(c, s, d, left);
+        uint32_t n_old = 0;
+        for (uint32_t j = 0; j < s->count[d]; j++)
+            n_old += c->flags[s->offset[d] + j] != 0;
+        const uint32_t start = s->offset[d] * s->isize, old_end = start + n_old * s->isize;
+        left = old_end - start < left ? left - (old_end - start) : 0;
     }
     tri_s("\n");
     return 0;

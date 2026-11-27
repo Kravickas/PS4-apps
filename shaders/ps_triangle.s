@@ -81,6 +81,34 @@ exp param0 v14, v14, v14, v14
 exp pos0 v13, v13, v14, v15 done
 s_nop 0
 s_endpgm
+; ---- tri_vs_raw2 (vs) ----
+.long 0xbeeb03ff
+.long 0x12
+s_load_dwordx4 s[8:11], s[0:1], 0x0
+s_load_dwordx4 s[12:15], s[0:1], 0x4
+s_load_dwordx4 s[16:19], s[0:1], 0x8
+s_mov_b32 s20, 3
+s_waitcnt lgkmcnt(0)
+v_mul_u32_u24 v1, 5, v0
+buffer_load_dword v4, v1, s[8:11], 0 offen offset:1
+buffer_load_dword v5, v1, s[8:11], s20 offen
+buffer_load_dword v6, v0, s[16:19], 0 idxen
+buffer_load_ushort v7, v1, s[8:11], 0 offen offset:1
+buffer_load_dwordx4 v[8:11], v1, s[8:11], 0 offen
+buffer_load_dwordx3 v[12:14], v1, s[8:11], 0 offen
+v_mov_b32 v15, 0
+s_waitcnt vmcnt(0)
+v_lshlrev_b32 v16, 6, v0
+buffer_store_dwordx4 v[4:7], v16, s[12:15], 0 offen
+buffer_store_dwordx4 v[8:11], v16, s[12:15], 0 offen offset:16
+buffer_store_dwordx4 v[12:15], v16, s[12:15], 0 offen offset:32
+s_waitcnt vmcnt(0) expcnt(0)
+v_mov_b32 v17, -2.0
+v_mov_b32 v18, 0
+v_mov_b32 v19, 1.0
+exp param0 v18, v18, v18, v18
+exp pos0 v17, v17, v18, v19 done
+s_endpgm
 ; ---- tri_ps_cov (ps) ----
 .long 0xbeeb03ff
 .long 0xa

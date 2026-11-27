@@ -16,6 +16,12 @@ tri_vs_raw    VS: raw loads of the data V# (table dword 0) at byte offset 5 * ve
               byte offset 6; stores dword, ushort, ubyte, s_buffer imm, dwordx2 (2), s_buffer
               sgpr, 0 - 32 bytes per vertex through the store V# at table dword 4. User data
               s[0:1] the table. Position outside the clip volume.
+tri_vs_raw2   VS: more raw loads of the data V# (table dword 0, stride 0) at byte offset
+              5 * vertex index: dword with instruction offset 1, dword with SGPR offset 3,
+              ushort with instruction offset 1, dwordx4, dwordx3; and dword through the V# at table
+              dword 8 (stride 5, idxen). Stores dword offset:1, dword soffset 3, dword idxen,
+              ushort offset:1, dwordx4 (4), dwordx3 (3), 0 - 64 bytes per vertex through the store
+              V# at table dword 4. User data s[0:1] the table. Position outside the clip volume.
 tri_ps_cov    PS: marks the pixel in the coverage map (V# at table dword 0; dword 4 the map
               pitch in pixels, dword 5 the value) and exports table dwords 6..9 as MRT0 (32_ABGR).
               Inputs: PERSP_CENTER, POS_X_FLOAT (v2), POS_Y_FLOAT (v3).
@@ -94,6 +100,32 @@ SHADERS = [
         "v_mov_b32 v15, 1.0",
         "exp param0 v14, v14, v14, v14",
         "exp pos0 v13, v13, v14, v15 done",
+    ]),
+    ("tri_vs_raw2", 0xA2A0D206, "vs", [
+        "s_load_dwordx4 s[8:11], s[0:1], 0x0",
+        "s_load_dwordx4 s[12:15], s[0:1], 0x4",
+        "s_load_dwordx4 s[16:19], s[0:1], 0x8",
+        "s_mov_b32 s20, 3",
+        "s_waitcnt lgkmcnt(0)",
+        "v_mul_u32_u24 v1, 5, v0",
+        "buffer_load_dword v4, v1, s[8:11], 0 offen offset:1",
+        "buffer_load_dword v5, v1, s[8:11], s20 offen",
+        "buffer_load_dword v6, v0, s[16:19], 0 idxen",
+        "buffer_load_ushort v7, v1, s[8:11], 0 offen offset:1",
+        "buffer_load_dwordx4 v[8:11], v1, s[8:11], 0 offen",
+        "buffer_load_dwordx3 v[12:14], v1, s[8:11], 0 offen",
+        "v_mov_b32 v15, 0",
+        "s_waitcnt vmcnt(0)",
+        "v_lshlrev_b32 v16, 6, v0",
+        "buffer_store_dwordx4 v[4:7], v16, s[12:15], 0 offen",
+        "buffer_store_dwordx4 v[8:11], v16, s[12:15], 0 offen offset:16",
+        "buffer_store_dwordx4 v[12:15], v16, s[12:15], 0 offen offset:32",
+        "s_waitcnt vmcnt(0) expcnt(0)",
+        "v_mov_b32 v17, -2.0",
+        "v_mov_b32 v18, 0",
+        "v_mov_b32 v19, 1.0",
+        "exp param0 v18, v18, v18, v18",
+        "exp pos0 v17, v17, v18, v19 done",
     ]),
     ("tri_ps_cov", 0xA2A0D204, "ps", [
         "s_load_dwordx4 s[4:7], s[0:1], 0x0",
