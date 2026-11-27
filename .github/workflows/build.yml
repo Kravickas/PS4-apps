@@ -6,7 +6,9 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned (2026-11): ubuntu-latest is moving to Ubuntu 26.04, and PkgTool.Core stopped with
+    # "Couldn't find a valid ICU package". The steps below are verified on 24.04 with ICU 74.2.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +27,19 @@ jobs:
           echo "libssl1.1 version: $ver"
           curl -sSL -o libssl1.1.deb "${base}libssl1.1_${ver}_amd64.deb"
           sudo dpkg -i libssl1.1.deb || sudo apt-get install -f -y
+
+      - name: Point PkgTool.Core at the installed ICU
+        # PkgTool.Core is .NET Core 3.1, which does not look for an ICU as new as the one installed
+        # and then stops. CLR_ICU_VERSION_OVERRIDE names the version to load. Running without ICU
+        # (DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1) also builds, but pkg_build then orders the
+        # files of a folder by byte value: sce_module/libSceFios2.prx before libc.prx, another
+        # file system image than every package built so far (with ICU: libc.prx first).
+        run: |
+          lib="$(ls /usr/lib/x86_64-linux-gnu/libicuuc.so.*.* | sort -V | tail -1)"
+          ver="${lib##*.so.}"
+          echo "ICU library: $lib -> CLR_ICU_VERSION_OVERRIDE=$ver"
+          test -n "$ver"
+          echo "CLR_ICU_VERSION_OVERRIDE=$ver" >> "$GITHUB_ENV"
 
       - name: Download OpenOrbis toolchain (v0.5.4, LLVM 18)
         run: |
@@ -58,7 +73,7 @@ jobs:
       - name: Upload package + eboot
         uses: actions/upload-artifact@v4
         with:
-          name: homebrew
+          name: Triangle
           path: |
             *.pkg
             eboot.bin
