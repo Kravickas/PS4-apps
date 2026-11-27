@@ -34,6 +34,15 @@ TRACE
   /user/data/ShadCube4/ShadCube4 trace.log (the folder is made when missing): startup, loading
   times per step ("load ms:"), time sources and zones ("tz", "tz_net", "tz_http"), and frame
   statistics every 60 frames.
+  TRIANGLE_TEST (src/main.c, on): red_prig's OpenOrbis Gnm Triangle app rebuilt with probes
+  (src/triangle_test.h has the steps and the models): its memory sequence at the start of main(),
+  vertex fetch with an unaligned V# base, components past the format, raw loads with an
+  unaligned V# base, scissors and window offset, index fetch against a CPU write after the
+  submit, and the app's own frame, which is then shown for 10 s. Log: ShadCube4 triangle.log in
+  the trace log's folder. After a GPU hang or a crash close the app and launch it again: the step
+  that was running is logged and skipped (state: triangle.state there).
+  Once finished it does not run again until triangle.state is deleted; the app's frame is still
+  shown on every launch.
 
 SOURCE MAP
   src/main.c           the renderer: setup, main loop, command buffers - "§" index at the top
@@ -48,5 +57,6 @@ SOURCE MAP
   src/ui.h, ui_atlas.h the panels: controls list, speeds, the time pill
   src/clock.h, clock_sdf.h, clock_light_norm.h   the glass clock (text, per-frame constants)
   src/logo_texture.h   the built-in logo texture (fallback when a texture is missing)
+  src/triangle_test.h  red_prig's Gnm Triangle app and its probes (TRIANGLE_TEST)
   shaders/             GCN shaders: *.s sources -> *.h binaries (shaders/README.txt)
   tools/               asset and code generators (tools/README.txt)
