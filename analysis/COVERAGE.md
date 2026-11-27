@@ -790,6 +790,65 @@ new. Everything batch 3b and 4 changed matches now.
   reservations.
 - VQ19: VQ18's written bytes and tail for a direct mapping, a reserved range, the stack and code.
 
+## Round 131 results (PS4 FW 12.02; shadPS4 fork without batch 5; the PR 5781 build)
+
+The fork's build did not have batch 5 yet (VQ18 still 0x41 bytes, FR9 "anon", TW1 as before), so
+batch 5 is not checked by this round. 951 to 960 of 999 lines the same per SDK.
+
+- VQ19 (every SDK): a direct mapping, a reserved range, the stack and code all get 0x48 bytes
+  written, zero after the name. The padding rule of batch 5 holds for every kind tried.
+- PX6, PX7 (SDK 12.00; the 5.50 run was not continued past E18): mmap returns OK and the mapping
+  is named "(NoName)eboot.bin". So the word at rbp+8 is read without a fault reaching the app, and
+  when it cannot be read the name is the one the PS4's own areas of a process have: K4, K6 show
+  "(NoName)" and the first 12 characters of the executable's file name ("(NoName)eboot_0x0170" for
+  eboot_0x01708001.bin, "(NoName)SceSysCore.e").
+- FR30, FR31 (every SDK): a void reservation with MAP_SHARED is named by its call site too.
+- FR21-FR33: the rule in the comment of FR21 holds at every SDK. As a model (analysis by
+  simulation: 30 probes x SDK 1.00, 5.05, 5.50, 12.00 = 120 lines, all reproduced, including
+  CO2, CO3, CO16 and the void probes FR9-FR12, FR30-FR33):
+  - a no-access page or void reservation without MAP_SHARED, made right after an existing one of
+    its kind (its left neighbour), belongs with it; any other stands alone;
+  - two that belong together merge whenever they have one name;
+  - two that stand alone merge when one is made next to the other under the same name (every
+    SDK), and by a rename only from SDK 5.50;
+  - one that stands alone never merges with one that belongs with another;
+  - a void reservation made at the end of its reserved range with no reservation of its kind on
+    its left is never merged into from the left (as before);
+  - a rename merges the first area of the range with the one before the range, then each with
+    the one before it: up to 5.50 only until the first pair that does not merge, at 12.00 all;
+    an area that is the whole range also merges with the one after it.
+  Not measured: SDKs between 5.50 and 12.00; FR34, FR35 (round 133).
+- PR 5781 build: still ends at SY1 at every SDK (160 lines). 37 to 39 differ: the lines of the
+  round 130 comparison at every SDK, and E15 (map of length 0: OK at SDK 1.00-2.00, the PS4
+  EINVAL). After DONE at 12.00: PE2 ends the app (PS4 OK), PB8 and BM5 EINVAL (PS4 EFAULT),
+  PX4, PX6, PX7 named "anon".
+
+## shadPS4 batch 6 (on batch 5)
+
+- The merge rule above: VirtualMemoryArea::merge_object, set when a mapping is made; CanMergeWith
+  compares it; NameVirtualRange walks the range as measured. SDKs between 5.50 and 12.00 are
+  taken as 5.50 (not measured).
+- Void reservations with MAP_SHARED are named by their call site (FR30, FR31).
+- POSIX mmap: an assembly entry passes the guest's rbp on; the name is "anon:" and the word at
+  rbp+8 when the guest can read it, else "(NoName)" and the first 12 characters of the
+  executable's file name (PX1, PX3, PX4, PX6, PX7).
+
+## Round 133: a build runs only what is needed
+
+- `== NEW`: FR34, FR35, at the start of every run, so a short and a full run give them the same
+  state.
+- `== LEGACY 131`: every section of round 131, in its order, code unchanged. Runs only in a full
+  run: a file `dmem_full` next to the results, or DMEM_FULL_DEFAULT 1 in a build.
+- PS4: short run. shadPS4: full run; its LEGACY part compares with `analysis/ps4_ref` (the PS4's
+  round 131 results, FW 12.02, 12 SDKs) by `compare_runs.py --ref`.
+- May-end-the-app cases: PX4, PX6, PX7 only (g_null_run). E18, RV8, CF2 end the app on the PS4
+  every time; the others are known and the same on both systems.
+- Each build from now: probes with no PS4 result go into run_new. Once the PS4 has run them,
+  that run is their reference; in later builds they become a part of their own after the newer
+  NEW probes, so the PS4 does not run them again. The legacy part and DMEM_LEGACY_ROUND change
+  only if a legacy probe has to change, and then the PS4 runs that one build full.
+  (Round 132, the same scheme on round 130's sections, was not run.)
+
 ## Null-pointer cases
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after

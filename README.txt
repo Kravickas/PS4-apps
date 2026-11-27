@@ -31,6 +31,26 @@ LINES (round 128)
   COUNT ...  how many result and layout lines the run wrote, just before DONE
   Compare two runs with analysis/compare_runs.py <PS4 folder> <other folder> [--layout].
 
+SHORT AND FULL RUNS (from round 133)
+  A build runs only what is needed. The PS4's results do not change between runs, so a probe
+  whose PS4 result is recorded is not run on the PS4 again without a reason.
+    == S       the checks every run starts with
+    == NEW     the probes whose PS4 result is not known yet: every run
+    == LEGACY n  every other section, unchanged since round n: only in a full run
+    MODE short | full  which of the two the run was
+  A run is full when a file named dmem_full lies next to the results (/data or /temp0), or when
+  the build asks for it (DMEM_FULL_DEFAULT in the source: set for a build whose legacy part the
+  PS4 has to run again).
+    PS4      no file: short run. Only the NEW probes, and only the may-end-the-app cases whose
+             result is not known.
+    shadPS4  put an empty file dmem_full into the folder the results are written to: full run.
+             shadPS4 changes with every batch of fixes, so its legacy part is checked each time.
+  Comparing:
+    analysis/compare_runs.py <PS4 folder> <shadPS4 folder>
+        the NEW part (the full run's LEGACY part is left out)
+    analysis/compare_runs.py --ref analysis/ps4_ref <shadPS4 folder>
+        the LEGACY part against the PS4's results of round n, kept in analysis/ps4_ref
+
 SECTIONS
   S  the probes themselves (query of an allocated / mapped page); nothing else runs if they fail
   A  return codes on unmapped memory: alignment, length 0, double release, partly free, out of range

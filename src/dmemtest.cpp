@@ -13227,6 +13227,91 @@ static void nx_px4() {
     l.end();
     HF(sceKernelMunmap(m, 0x4000));
 }
+// ---- what a build runs ----------------------------------------------------------------------
+// A build runs only what is needed. The PS4's results do not change between runs (same
+// firmware, same probe code), so a probe whose PS4 result is recorded is not run on the PS4 again
+// without a reason.
+//   run_new()  the probes whose PS4 result is not known yet. Always runs, first, so they see the
+//              same state in a short and in a full run.
+//   legacy     every other section, unchanged since the round DMEM_LEGACY_ROUND. Runs only in a
+//              full run. Its lines compare with the PS4's results of that round
+//              (analysis/ps4_ref): analysis/compare_runs.py --ref.
+// A run is full when DMEM_FULL_DEFAULT is 1 (set for a build whose legacy part the PS4 has to run
+// again) or when a file named dmem_full lies next to the results (/data or /temp0): put it there
+// for shadPS4, whose behaviour changes with every batch of fixes.
+// When a probe of the legacy part is changed, DMEM_LEGACY_ROUND becomes that round and the PS4
+// has to run that build full once.
+#define DMEM_FULL_DEFAULT 0
+#define DMEM_LEGACY_ROUND "131"
+static bool g_full = DMEM_FULL_DEFAULT != 0;
+
+// FR34, FR35 (round 133). The rule round 131 confirmed (FR1-FR4, FR9-FR33, CO2, CO3, CO16: 120
+// result lines at SDK 1.00, 5.05, 5.50 and 12.00 follow from it): a no-access page made right
+// after an existing one (its left neighbour) belongs with it, any other stands alone; pages that
+// belong together merge whenever they have one name; pages standing alone merge with each other
+// when one is made next to the other under the same name, and by a rename only from SDK 5.50; a
+// page standing alone never merges with one that belongs with another. A rename of a range
+// merges each page with the one before it, up to SDK 5.50 only until the first pair that does
+// not merge. Two cases that rule does not decide:
+//   FR34  M (site b), R (site c: belongs with M), then L made from site b too, so with M's name:
+//         does L merge with M when it is made? Areas after L is made, names; then all renamed.
+//   FR35  B, C (C belongs with B), A (alone), then C renamed, then A-B renamed: A and B do not
+//         merge; does B still merge with C, the area after the range? (Up to 5.50 the walk has
+//         stopped by then; at 12.00 it has not.)
+static void run_new() {
+    say("== NEW  probes whose PS4 result is not known yet");
+    {
+        Line l = head("FR34", "noacc: M, R, then L under M's name; then rename all");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 3 * PG, 0, 0) != 0) {
+            l.s("SKIP").end();
+        } else {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fr_b(b + PG, 0x0, 0x1012)));
+            l.c(ncode(fr_c(b + 2 * PG, 0x0, 0x1012)));
+            l.c(ncode(fr_b(b, 0x0, 0x1012)));
+            auto state = [&]() {
+                l.c(' ');
+                co_scan(l, (uint64_t)b, 3 * PG);
+                l.s(" n=");
+                for (int k = 0; k < 3; k++)
+                    fr_name(l, b + (size_t)k * PG);
+            };
+            state();
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 3 * PG, "Mapping")));
+            state();
+            HF(sceKernelMunmap(a, 3 * PG));
+            l.end();
+        }
+    }
+    {
+        Line l = head("FR35", "noacc: B, C, A; rename C, then A-B");
+        void* a = 0;
+        if (sceKernelReserveVirtualRange(&a, 3 * PG, 0, 0) != 0) {
+            l.s("SKIP").end();
+        } else {
+            uint8_t* b = (uint8_t*)a;
+            l.c(ncode(fr_b(b + PG, 0x0, 0x1012)));
+            l.c(ncode(fr_c(b + 2 * PG, 0x0, 0x1012)));
+            l.c(ncode(fr_a(b, 0x0, 0x1012)));
+            auto state = [&]() {
+                l.c(' ');
+                co_scan(l, (uint64_t)b, 3 * PG);
+                l.s(" n=");
+                for (int k = 0; k < 3; k++)
+                    fr_name(l, b + (size_t)k * PG);
+            };
+            state();
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b + 2 * PG, PG, "Mapping")));
+            state();
+            l.s(" | ").c(ncode(sceKernelSetVirtualRangeName(b, 2 * PG, "Mapping")));
+            state();
+            HF(sceKernelMunmap(a, 3 * PG));
+            l.end();
+        }
+    }
+}
+
 // PX6, PX7 (round 131). PX4 on the PS4 (round 130, SDK 5.50 and 12.00): the name of a POSIX mmap
 // is "anon:" and the word at rbp+8 when mmap is called (the made-up frame's 0x111111111110), so
 // libkernel reads it through the caller's frame pointer. Not known: what it does when rbp does not
@@ -13301,6 +13386,12 @@ static const int g_null_cases = 11;
 static const int g_null_done = g_null_cases + 1;
 static const char* const g_null_ids[g_null_cases] = {"E18", "RV8", "PE2", "PB8", "PB7",
                                                      "BM5", "QP2", "CF2", "PX4", "PX6", "PX7"};
+// Which of them this build runs. Known (PS4, rounds 130 and 131, SDK 12.00; E18 to PX4 also at
+// 5.50): E18, RV8, CF2 end the app; PE2 o d=1; PB8 F; PB7 o; BM5 F; QP2 o; PX4 the name is the
+// made-up frame's word; PX6, PX7 "(NoName)eboot.bin". This build: PX4, PX6, PX7, for shadPS4's
+// new POSIX mmap name and for PX6, PX7 at SDK 5.50 on the PS4. None of them ends the app there.
+static const bool g_null_run[g_null_cases] = {false, false, false, false, false, false,
+                                              false, false, true,  true,  true};
 static void run_null_last() {
     static void (*const cases[g_null_cases])() = {nx_e18, nx_rv8, nx_pe2, nx_pb4, nx_pb7,
                                                    nx_bm1, nx_qp2, nx_cf2, nx_px4, nx_px6, nx_px7};
@@ -13312,6 +13403,8 @@ static void run_null_last() {
         return;
     }
     for (; next < n; next++) {
+        if (!g_null_run[next])
+            continue;
         null_state_write(next + 1);
         Line l;
         l.s(ids[next]).s(" starting (null-pointer case; the app may end here)").end();
@@ -13411,7 +13504,18 @@ int main(void) {
     }
     say("===== DMEM RELEASE TEST =====");
     // The round of the test: two results files compare only when this line is the same.
-    say("ROUND 131");
+    say("ROUND 133");
+    {
+        // a full run: asked for by the build, or by a file named dmem_full next to the results
+        char full_path[64];
+        mf_named(full_path, "dmem_full");
+        const int fd = sceKernelOpen(full_path, 0x0000, 0);
+        if (fd >= 0) {
+            sceKernelClose(fd);
+            g_full = true;
+        }
+        say(g_full ? "MODE full" : "MODE short");
+    }
     {
         uint32_t sdk = 0;
         Line l;
@@ -13429,8 +13533,14 @@ int main(void) {
     }
     say("phys: A alloc F free | va: M ok m changed n no-read r backing freed . unmapped");
     say("== S  probes");
-    if (sanity()) {
+    const bool sanity_ok = sanity();
+    if (sanity_ok) {
         neighbours();
+        g_section = "new";
+        run_new();
+    }
+    if (g_full && sanity_ok) {
+        say("== LEGACY " DMEM_LEGACY_ROUND "  every section up to that round, unchanged since");
         g_section = "bp";
         run_bp();
         g_section = "start";
@@ -13570,14 +13680,14 @@ int main(void) {
         run_r128();
         g_section = "xr";
         run_xr();
-        // the cross-check scratch file, kept open until here (not part of UL1's list)
-        if (g_xc_fd >= 0) {
-            sceKernelClose(g_xc_fd);
-            g_xc_fd = -1;
-            char xc_path[64];
-            mf_named(xc_path, "dmem_xc.bin");
-            sceKernelUnlink(xc_path);
-        }
+    }
+    // the cross-check scratch file, kept open until here (not part of UL1's list)
+    if (g_xc_fd >= 0) {
+        sceKernelClose(g_xc_fd);
+        g_xc_fd = -1;
+        char xc_path[64];
+        mf_named(xc_path, "dmem_xc.bin");
+        sceKernelUnlink(xc_path);
     }
     {
         // counted before this line is written; the comparison script checks both numbers against

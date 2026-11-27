@@ -2,8 +2,18 @@
 """Compare DmemTest results of two systems (round 128 and later), line by line.
 
 usage: compare_runs.py <PS4 file or folder> <other file or folder> [--layout]
+       compare_runs.py --ref <PS4 reference file or folder> <full run> [--layout]
 
 A folder is compared file by file (dmem_results_<SDK>.txt in both).
+
+From round 132 a results file has parts:
+  == S ...       the checks every run starts with
+  == NEW ...     the probes whose PS4 result is not known yet (every run)
+  == LEGACY n    every other section, unchanged since round n; only in a full run (MODE full)
+The first form compares two runs of one round. When one is short and the other full, the full
+one's LEGACY part is left out. The second form compares the LEGACY part (and the S part) of a
+full run with the PS4's results of round n (analysis/ps4_ref); the NEW part, the ROUND and MODE
+lines and the cases after DONE are left out there, they belong to the first form.
 
 Kinds of line in a results file:
   result  starts with a probe ID. Behaviour only: it must be the same on both systems.
@@ -47,9 +57,25 @@ def is_result(l):
     return bool(l) and "A" <= l[0] <= "Z" and not l.startswith(OTHER)
 
 
+def parts(lines):
+    """The lines up to DONE as (S part, NEW part, LEGACY part); before round 132 all is S."""
+    out = ([], [], [])
+    cur = 0
+    for l in lines:
+        if l == "===== DONE =====" or l.startswith("COUNT result lines="):
+            break
+        if l.startswith("== NEW"):
+            cur = 1
+        elif l.startswith("== LEGACY "):
+            cur = 2
+        out[cur].append(l)
+    return out
+
+
 def parse(lines):
     """Lines up to DONE: results keyed by (ID, occurrence), layout notes by ID, checks."""
-    info = {"round": None, "done": False, "count": None, "n_result": 0, "n_layout": 0}
+    info = {"round": None, "done": False, "count": None, "n_result": 0, "n_layout": 0,
+            "mode": None, "legacy": None}
     results = collections.OrderedDict()
     layout = collections.defaultdict(list)
     seen = collections.Counter()
@@ -59,6 +85,11 @@ def parse(lines):
             break
         if l.startswith("ROUND "):
             info["round"] = l
+        if l.startswith("MODE "):
+            info["mode"] = l[5:]
+        m = re.match(r"== LEGACY (\d+)", l)
+        if m:
+            info["legacy"] = m.group(1)
         m = re.match(r"COUNT result lines=(\d+) layout lines=(\d+)$", l)
         if m:
             info["count"] = (int(m.group(1)), int(m.group(2)))
@@ -133,13 +164,48 @@ def counters_only(a, b):
     return bool(d) and all(pat.match(x) and pat.match(y) for x, y in d)
 
 
-def compare(pa, pb, show_layout):
+def compare(pa, pb, show_layout, ref=False):
     A, B = load(pa), load(pb)
     ia, ra, la = parse(A)
     ib, rb, lb = parse(B)
     problems = []
-    if ia["round"] != ib["round"] or ia["round"] is None:
-        problems.append(f"ROUND differs or is missing: {ia['round']!r} | {ib['round']!r}")
+    notes = []
+    skip_keys = set()
+    if ref:
+        # the reference's round must be the one the full run's LEGACY part is unchanged since
+        ref_round = ia["legacy"] or (ia["round"] or "").replace("ROUND ", "")
+        if ib["legacy"] is None:
+            print(f"== {os.path.basename(pa)}  |  {os.path.basename(pb)}")
+            print("  CHECK FAILED: the second file has no LEGACY part: it is not a full run")
+            print("\n  VERDICT: NOT the same")
+            return False, set(), set()
+        elif ib["legacy"] != ref_round:
+            problems.append(f"the second file's LEGACY part is of round {ib['legacy']}, the "
+                            f"reference is of round {ref_round}")
+        sa, _, ga = parts(A)
+        sb, _, gb = parts(B)
+        A_cmp, B_cmp = sa + ga, sb + gb
+        skip_keys = {"ROUND", "MODE"}
+        notes.append("reference comparison: S and LEGACY parts; NEW part, ROUND, MODE and the "
+                     "cases after DONE left out")
+    else:
+        if ia["round"] != ib["round"] or ia["round"] is None:
+            problems.append(f"ROUND differs or is missing: {ia['round']!r} | {ib['round']!r}")
+        A_cmp, B_cmp = A, B
+        if ia["mode"] != ib["mode"] and {ia["mode"], ib["mode"]} == {"short", "full"}:
+            sa, na_, _ = parts(A)
+            sb, nb_, _ = parts(B)
+            A_cmp, B_cmp = sa + na_, sb + nb_
+            skip_keys = {"MODE"}
+            notes.append("one run is short, the other full: the full run's LEGACY part is left "
+                         "out (compare it with --ref)")
+    if A_cmp is not A:
+        _, ra, la = parse(A_cmp)
+        _, rb, lb = parse(B_cmp)
+    for k in [k for k in ra if k[0] in skip_keys]:
+        del ra[k]
+    for k in [k for k in rb if k[0] in skip_keys]:
+        del rb[k]
     for name, i in (("first", ia), ("second", ib)):
         if not i["done"]:
             problems.append(f"{name} file has no DONE line: the run did not finish")
@@ -171,6 +237,8 @@ def compare(pa, pb, show_layout):
     print(f"== {os.path.basename(pa)}  |  {os.path.basename(pb)}")
     for p in problems:
         print(f"  CHECK FAILED: {p}")
+    for n in notes:
+        print(f"  note: {n}")
     print(f"  result lines: {same} same, {len(diffs)} differ, {len(cases)} ran a different case")
     for title, items in (("differ, in the order they ran", diffs),
                          ("different case (what was at the address differs)", cases)):
@@ -188,7 +256,7 @@ def compare(pa, pb, show_layout):
                     print(f"     LY 1: {l}")
                 for l in lb.get(k[0], []):
                     print(f"     LY 2: {l}")
-    na, nb = parse_after(A), parse_after(B)
+    na, nb = ({}, {}) if ref else (parse_after(A), parse_after(B))
     null_diffs = [k for k in list(na) + [k for k in nb if k not in na]
                   if na.get(k) != nb.get(k)]
     print(f"\n  -- cases that may end the app (after DONE): {len(na)} | {len(nb)}, "
@@ -197,8 +265,8 @@ def compare(pa, pb, show_layout):
         print(f"  {k}")
         print(f"    1: {na.get(k, '(not run)')}")
         print(f"    2: {nb.get(k, '(not run)')}")
-    hf_a = collections.Counter(l for l in A if l.startswith("HF "))
-    hf_b = collections.Counter(l for l in B if l.startswith("HF "))
+    hf_a = collections.Counter(l for l in A_cmp if l.startswith("HF "))
+    hf_b = collections.Counter(l for l in B_cmp if l.startswith("HF "))
     hf_differs = hf_a != hf_b
     print(f"\n  -- HF lines (failed calls the probes do not print): {sum(hf_a.values())} | "
           f"{sum(hf_b.values())}{'  DIFFERENT' if hf_differs else '  same'}")
@@ -207,8 +275,8 @@ def compare(pa, pb, show_layout):
     for l in (hf_b - hf_a):
         print(f"  2 only: {l}")
     for tag in ("SB ", "PS ", "TR "):
-        ca = collections.Counter(l for l in A if l.startswith(tag))
-        cb = collections.Counter(l for l in B if l.startswith(tag))
+        ca = collections.Counter(l for l in A_cmp if l.startswith(tag))
+        cb = collections.Counter(l for l in B_cmp if l.startswith(tag))
         oa, ob = ca - cb, cb - ca
         if oa or ob:
             print(f"\n  -- {tag.strip()} lines on one side only: {sum(oa.values())} | "
@@ -233,6 +301,7 @@ def compare(pa, pb, show_layout):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     show_layout = "--layout" in sys.argv
+    ref = "--ref" in sys.argv
     if len(args) != 2:
         sys.exit(__doc__)
     a, b = args
@@ -245,7 +314,7 @@ def main():
                 print(f"== {n}: missing in the second folder")
                 all_ok = False
                 continue
-            ok, d, c = compare(os.path.join(a, n), os.path.join(b, n), show_layout)
+            ok, d, c = compare(os.path.join(a, n), os.path.join(b, n), show_layout, ref)
             all_ok = all_ok and ok
             sdk = n[len("dmem_results_"):-4]
             for i in d:
@@ -258,7 +327,7 @@ def main():
             print(f"  {i:6s} {' '.join(table[i])}")
         print(f"\n== OVERALL: {'same behaviour at every SDK version' if all_ok else 'NOT the same'}")
     else:
-        compare(a, b, show_layout)
+        compare(a, b, show_layout, ref)
 
 
 if __name__ == "__main__":
