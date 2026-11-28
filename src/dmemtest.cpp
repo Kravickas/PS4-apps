@@ -472,7 +472,13 @@ static void log_init() {
     }
 }
 
+// Set while a resumed run goes again through what the run before it already wrote (see
+// section_begin).
+static bool g_mute = false;
+
 static void emit(const char* s, int n) {
+    if (g_mute)
+        return;
     sceKernelWrite(1, s, (unsigned long)n);
     const int fd = g_log_path[0] ? sceKernelOpen(g_log_path, 0x0209, 0777) : -1;
     if (fd >= 0) {
@@ -13449,6 +13455,94 @@ static void null_resume() {
     idle_forever();
 }
 
+// ---- going on after a section ends the app ------------------------------------------------------
+// On a build of the emulator under test a call can end the whole app (round 131: one build ended
+// at SY1 at every SDK, so 840 of its 999 lines were never written). The index of the section in
+// progress is saved before it starts. When the app is started again and the results file of this
+// SDK has no DONE line, the run goes on after that section: what was written stays, the start of
+// the run (header, S probes) is gone through again without writing, the sections up to the saved
+// one are not run again, and a line "== RESUMED ..." marks the place.
+// A resumed run is a new process: the pool is empty again and the direct memory is free, so
+// lines after the mark can differ from a run in one piece for that reason alone. It has no COUNT
+// line. A start that resumes does not use up one of the SDK's two attempts.
+struct SectionState {
+    uint32_t magic;
+    uint32_t sdk;
+    int32_t section; // in progress; -1 none yet; -2 the run finished
+    char name[36];
+};
+static const uint32_t g_section_magic = 0x43455344;
+static const char* const g_section_state_paths[] = {"/data/dmem_section.state",
+                                                    "/temp0/dmem_section.state"};
+static int g_section_idx = 0;
+static int g_resume_after = -1;
+static bool g_resumed = false;
+static char g_resume_name[36];
+
+static void section_state_read(SectionState* st) {
+    my_memset(st, 0, sizeof(*st));
+    for (const char* path : g_section_state_paths) {
+        const int fd = sceKernelOpen(path, 0x0000, 0);
+        if (fd < 0)
+            continue;
+        sceKernelRead(fd, st, sizeof(*st));
+        sceKernelClose(fd);
+        break;
+    }
+}
+
+static void section_state_write(int section, const char* name) {
+    SectionState st;
+    my_memset(&st, 0, sizeof(st));
+    st.magic = g_section_magic;
+    st.sdk = g_own_sdk;
+    st.section = section;
+    for (int k = 0; name[k] && k < (int)sizeof(st.name) - 1; k++)
+        st.name[k] = name[k];
+    for (const char* path : g_section_state_paths) {
+        const int fd = sceKernelOpen(path, 0x0601, 0777);
+        if (fd < 0)
+            continue;
+        sceKernelWrite(fd, &st, sizeof(st));
+        sceKernelFsync(fd);
+        sceKernelClose(fd);
+        return;
+    }
+}
+
+static void section_resume_mark() {
+    if (!g_mute)
+        return;
+    g_mute = false;
+    Line l;
+    l.s("== RESUMED: the app ended in section ").dec(g_resume_after).c(' ').s(g_resume_name);
+    l.s("; a new process goes on after it").end();
+}
+
+// True when the section is to run: it is not one a resumed run leaves out.
+static bool section_begin(const char* name) {
+    const int idx = g_section_idx++;
+    if (idx <= g_resume_after)
+        return false;
+    section_resume_mark();
+    section_state_write(idx, name);
+    return true;
+}
+
+#define SECTION(fn)                                                                                \
+    do {                                                                                           \
+        if (section_begin(#fn))                                                                    \
+            fn();                                                                                  \
+    } while (0)
+// with the pool checkpoint that goes before the section
+#define SECTION_CP(cp, fn)                                                                         \
+    do {                                                                                           \
+        if (section_begin(#fn)) {                                                                  \
+            pool_checkpoint(cp);                                                                   \
+            fn();                                                                                  \
+        }                                                                                          \
+    } while (0)
+
 int main(void) {
     g_screen.init();
     // Before log_init (which empties this run's results file): a launch of eboot.bin with a chain in
@@ -13486,7 +13580,27 @@ int main(void) {
             chain.attempts[0]++;
         chain_state_write(&chain);
     }
-    log_init();
+    {
+        // going on after a section that ended the app (see section_begin)
+        SectionState ss;
+        section_state_read(&ss);
+        if (ss.magic == g_section_magic && ss.sdk == own_sdk && ss.section >= 0 && own >= 0 &&
+            !chain_run_done(own) && log_init_append()) {
+            g_resume_after = ss.section;
+            for (int k = 0; k < (int)sizeof(g_resume_name) - 1; k++)
+                g_resume_name[k] = ss.name[k];
+            g_resumed = true;
+            g_mute = true;
+            // this start goes on from where the last one ended: it is not another attempt
+            chain_state_read(&chain);
+            if (chain.attempts[own] > 0)
+                chain.attempts[own]--;
+            chain_state_write(&chain);
+        } else {
+            log_init();
+            section_state_write(-1, "");
+        }
+    }
     // The first executable of a run starts over: the cases that may end the app run again at the
     // end of this run (round 130). Until round 129 a state file left by an earlier run said "all
     // run", and they were skipped unless the file had been deleted by hand.
@@ -13504,7 +13618,7 @@ int main(void) {
     }
     say("===== DMEM RELEASE TEST =====");
     // The round of the test: two results files compare only when this line is the same.
-    say("ROUND 133");
+    say("ROUND 134");
     {
         // a full run: asked for by the build, or by a file named dmem_full next to the results
         char full_path[64];
@@ -13537,150 +13651,120 @@ int main(void) {
     if (sanity_ok) {
         neighbours();
         g_section = "new";
-        run_new();
+        SECTION(run_new);
     }
     if (g_full && sanity_ok) {
+        // a run resumed in the NEW part writes again from here on
+        if (g_section_idx > g_resume_after)
+            section_resume_mark();
         say("== LEGACY " DMEM_LEGACY_ROUND "  every section up to that round, unchanged since");
         g_section = "bp";
-        run_bp();
+        SECTION(run_bp);
         g_section = "start";
-        run_a();
-        run_b();
-        run_d();
-        run_q();
-        run_v();
-        run_e();
-        run_f();
-        run_h();
-        run_cov2();
-        run_cov3();
-        run_cov5();
-        run_h7();
-        run_p();
-        pool_checkpoint("p2");
-        run_p2();
-        pool_checkpoint("p4");
-        run_p4();
-        pool_checkpoint("p7");
-        run_p7();
-        pool_checkpoint("p8");
-        run_p8();
-        pool_checkpoint("p9");
-        run_p9();
-        pool_checkpoint("t");
-        run_t();
-        pool_checkpoint("u");
-        run_u();
-        pool_checkpoint("w");
-        run_w();
-        pool_checkpoint("x");
-        run_x();
-        pool_checkpoint("y");
-        run_y();
-        pool_checkpoint("z");
-        run_z();
-        pool_checkpoint("j");
-        run_j();
-        pool_checkpoint("m");
-        run_m();
-        pool_checkpoint("n");
-        run_n();
-        pool_checkpoint("l");
-        run_l();
-        pool_checkpoint("hb");
-        run_hb();
-        pool_checkpoint("xc");
-        run_xc();
-        pool_checkpoint("cg");
-        run_cg();
-        pool_checkpoint("k");
-        run_k();
-        pool_checkpoint("p54");
-        run_p54();
-        pool_checkpoint("c");
-        run_c();
-        pool_checkpoint("g");
-        run_g();
-        pool_checkpoint("r");
-        run_r();
-        pool_checkpoint("mf2");
-        run_mf2();
-        pool_checkpoint("mf3");
-        run_mf3();
-        pool_checkpoint("mfg");
-        run_mfg();
-        pool_checkpoint("mf25");
-        run_mf25();
-        run_cov6();
-        pool_checkpoint("vq");
-        run_vq();
-        pool_checkpoint("u12");
-        run_u12();
-        pool_checkpoint("mf16");
-        run_mf16();
-        pool_checkpoint("mf21");
-        run_mf21();
-        pool_checkpoint("mf24");
-        run_mf24();
-        pool_checkpoint("mfw");
-        run_mfw();
-        pool_checkpoint("nu");
-        run_nu();
+        SECTION(run_a);
+        SECTION(run_b);
+        SECTION(run_d);
+        SECTION(run_q);
+        SECTION(run_v);
+        SECTION(run_e);
+        SECTION(run_f);
+        SECTION(run_h);
+        SECTION(run_cov2);
+        SECTION(run_cov3);
+        SECTION(run_cov5);
+        SECTION(run_h7);
+        SECTION(run_p);
+        SECTION_CP("p2", run_p2);
+        SECTION_CP("p4", run_p4);
+        SECTION_CP("p7", run_p7);
+        SECTION_CP("p8", run_p8);
+        SECTION_CP("p9", run_p9);
+        SECTION_CP("t", run_t);
+        SECTION_CP("u", run_u);
+        SECTION_CP("w", run_w);
+        SECTION_CP("x", run_x);
+        SECTION_CP("y", run_y);
+        SECTION_CP("z", run_z);
+        SECTION_CP("j", run_j);
+        SECTION_CP("m", run_m);
+        SECTION_CP("n", run_n);
+        SECTION_CP("l", run_l);
+        SECTION_CP("hb", run_hb);
+        SECTION_CP("xc", run_xc);
+        SECTION_CP("cg", run_cg);
+        SECTION_CP("k", run_k);
+        SECTION_CP("p54", run_p54);
+        SECTION_CP("c", run_c);
+        SECTION_CP("g", run_g);
+        SECTION_CP("r", run_r);
+        SECTION_CP("mf2", run_mf2);
+        SECTION_CP("mf3", run_mf3);
+        SECTION_CP("mfg", run_mfg);
+        SECTION_CP("mf25", run_mf25);
+        SECTION(run_cov6);
+        SECTION_CP("vq", run_vq);
+        SECTION_CP("u12", run_u12);
+        SECTION_CP("mf16", run_mf16);
+        SECTION_CP("mf21", run_mf21);
+        SECTION_CP("mf24", run_mf24);
+        SECTION_CP("mfw", run_mfw);
+        SECTION_CP("nu", run_nu);
         g_section = "rv";
-        run_rv();
+        SECTION(run_rv);
         g_section = "nm";
-        run_nm();
+        SECTION(run_nm);
         g_section = "fl";
-        run_fl();
+        SECTION(run_fl);
         g_section = "bm";
-        run_bm();
+        SECTION(run_bm);
         g_section = "pb";
-        run_pb();
-        run_cov4();
+        SECTION(run_pb);
+        SECTION(run_cov4);
         g_section = "px";
-        run_px();
+        SECTION(run_px);
         g_section = "ms";
-        run_ms();
+        SECTION(run_ms);
         g_section = "followups";
-        run_followups();
+        SECTION(run_followups);
         g_section = "rg";
-        run_rg();
+        SECTION(run_rg);
         g_section = "sf";
-        run_sf();
+        SECTION(run_sf);
         g_section = "av";
-        run_av_al();
+        SECTION(run_av_al);
         g_section = "fm";
-        run_fm_fx();
+        SECTION(run_fm_fx);
         g_section = "dt";
-        run_dt();
+        SECTION(run_dt);
         g_section = "co";
-        run_co();
+        SECTION(run_co);
         g_section = "pt";
-        run_pt_tp();
+        SECTION(run_pt_tp);
         g_section = "fw";
-        run_fw_tl_tf();
+        SECTION(run_fw_tl_tf);
         g_section = "bt";
-        run_bt();
-        remove_scratch_files();
+        SECTION(run_bt);
+        SECTION(remove_scratch_files);
         g_section = "ex";
-        run_ex();
+        SECTION(run_ex);
         g_section = "df";
-        run_df();
+        SECTION(run_df);
         g_section = "cv";
-        run_carve();
+        SECTION(run_carve);
         g_section = "xv";
-        run_xv();
+        SECTION(run_xv);
         g_section = "sf8";
-        run_sf8();
+        SECTION(run_sf8);
         g_section = "last";
-        run_last();
+        SECTION(run_last);
         g_section = "pt3";
-        run_pt3();
+        SECTION(run_pt3);
         g_section = "r128";
-        run_r128();
+        SECTION(run_r128);
         g_section = "xr";
-        run_xr();
+        SECTION(run_xr);
     }
+    section_resume_mark();
     // the cross-check scratch file, kept open until here (not part of UL1's list)
     if (g_xc_fd >= 0) {
         sceKernelClose(g_xc_fd);
@@ -13694,9 +13778,13 @@ int main(void) {
         // the file
         Line l;
         const int nr = g_n_result, nl = g_n_layout;
-        l.s("COUNT result lines=").dec(nr).s(" layout lines=").dec(nl).end();
+        if (g_resumed)
+            l.s("== no COUNT line: the run was resumed after a section ended the app").end();
+        else
+            l.s("COUNT result lines=").dec(nr).s(" layout lines=").dec(nl).end();
     }
     say("===== DONE =====");
+    section_state_write(-2, "");
     if (own >= 0) {
         chain_state_read(&chain);
         const int pick = chain_pick(&chain);

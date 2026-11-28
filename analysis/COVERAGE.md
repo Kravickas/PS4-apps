@@ -849,7 +849,15 @@ batch 5 is not checked by this round. 951 to 960 of 999 lines the same per SDK.
   only if a legacy probe has to change, and then the PS4 runs that one build full.
   (Round 132, the same scheme on round 130's sections, was not run.)
 
-## Null-pointer cases
+## Round 134: going on after a section ends the app
+
+Round 133 with one addition (same probes, same NEW and LEGACY parts): every section's index is
+saved before it starts; when the app is started again and the SDK's results file has no DONE
+line, the run goes on after the section that ended the app, with a "== RESUMED ..." line. Made
+for the PR 5781 build, which ended at SY1 at every SDK in round 131, so that it gets through the
+whole test with `dmem_full` set. compare_runs.py leaves out the COUNT check for such a file,
+lists the probes that did not run in one line, and marks the lines after a RESUMED line.
+
 
 From round 117 every case that passes a null pointer the function writes through (or reads) runs after
 DONE, at the last SDK of the chain, one at a time (dmem_null.state keeps the next one, saved before the

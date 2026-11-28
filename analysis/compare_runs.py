@@ -29,6 +29,11 @@ The cases that may end the app run after DONE, one at a time ("<ID> starting (nu
 ...). Their outcome is compared too: the result line, or "the app ended" when the next start of
 the app wrote that instead.
 
+A run that went on after a section ended the app has "== RESUMED ..." lines and no COUNT line
+(README: going on after a section ends the app). For such a file the COUNT check is left out, and
+the probes it never ran are listed in one line instead of one failed check each. Lines after a
+RESUMED mark come from a new process, with an empty pool and free direct memory.
+
 Nothing is interpreted: for every result line that is not identical, both lines are printed and
 the blank-separated fields that differ are marked. "@f", "@u", "@s" in a line is what the probe
 saw at its address before it ran (free, used, in the system library area); when those differ the
@@ -75,7 +80,7 @@ def parts(lines):
 def parse(lines):
     """Lines up to DONE: results keyed by (ID, occurrence), layout notes by ID, checks."""
     info = {"round": None, "done": False, "count": None, "n_result": 0, "n_layout": 0,
-            "mode": None, "legacy": None}
+            "mode": None, "legacy": None, "resumed": [], "after_resume": set()}
     results = collections.OrderedDict()
     layout = collections.defaultdict(list)
     seen = collections.Counter()
@@ -85,6 +90,8 @@ def parse(lines):
             break
         if l.startswith("ROUND "):
             info["round"] = l
+        if l.startswith("== RESUMED"):
+            info["resumed"].append(l)
         if l.startswith("MODE "):
             info["mode"] = l[5:]
         m = re.match(r"== LEGACY (\d+)", l)
@@ -106,6 +113,8 @@ def parse(lines):
         # "PX1 starting" and the like: markers, counted but not compared as results
         seen[key] += 1
         results[(key, seen[key])] = l
+        if info["resumed"]:
+            info["after_resume"].add((key, seen[key]))
     return info, results, layout
 
 
@@ -206,9 +215,16 @@ def compare(pa, pb, show_layout, ref=False):
         del ra[k]
     for k in [k for k in rb if k[0] in skip_keys]:
         del rb[k]
+    # a run that ended early, or went on after a section ended the app: not every probe ran
+    broken = {"first": bool(ia["resumed"]) or not ia["done"],
+              "second": bool(ib["resumed"]) or not ib["done"]}
     for name, i in (("first", ia), ("second", ib)):
         if not i["done"]:
             problems.append(f"{name} file has no DONE line: the run did not finish")
+        for r in i["resumed"]:
+            notes.append(f"{name} file: {r[3:]}")
+        if i["resumed"]:
+            continue
         if i["count"] is None:
             problems.append(f"{name} file has no COUNT line")
         elif i["count"] != (i["n_result"], i["n_layout"]):
@@ -216,10 +232,13 @@ def compare(pa, pb, show_layout, ref=False):
                             f"{(i['n_result'], i['n_layout'])}: lines are missing or were added")
     only_a = [k for k in ra if k not in rb]
     only_b = [k for k in rb if k not in ra]
-    for k in only_a:
-        problems.append(f"only in the first file: {ra[k]}")
-    for k in only_b:
-        problems.append(f"only in the second file: {rb[k]}")
+    for only, here, there, res in ((only_a, "first", "second", ra), (only_b, "second", "first", rb)):
+        if only and broken[there]:
+            problems.append(f"{len(only)} probes only in the {here} file (the {there} run did "
+                            f"not get to them): " + " ".join(k[0] for k in only))
+        else:
+            for k in only:
+                problems.append(f"only in the {here} file: {res[k]}")
 
     same = 0
     diffs, cases = [], []
@@ -245,6 +264,8 @@ def compare(pa, pb, show_layout, ref=False):
         if items:
             print(f"\n  -- {title}")
         for k, a, b in items:
+            if k in ia["after_resume"] or k in ib["after_resume"]:
+                print("  (after a RESUMED mark: a new process, empty pool, free direct memory)")
             print(f"  1: {a}")
             print(f"  2: {b}")
             print(f"     {mark(a, b)}")

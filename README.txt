@@ -45,11 +45,25 @@ SHORT AND FULL RUNS (from round 133)
              result is not known.
     shadPS4  put an empty file dmem_full into the folder the results are written to: full run.
              shadPS4 changes with every batch of fixes, so its legacy part is checked each time.
+  The file works the same on every emulator build (the fork, a pull request's build): without it
+  any build runs only the few NEW probes.
   Comparing:
     analysis/compare_runs.py <PS4 folder> <shadPS4 folder>
         the NEW part (the full run's LEGACY part is left out)
     analysis/compare_runs.py --ref analysis/ps4_ref <shadPS4 folder>
         the LEGACY part against the PS4's results of round n, kept in analysis/ps4_ref
+
+GOING ON AFTER A SECTION ENDS THE APP (from round 134)
+  When a call ends the whole app (an emulator build that stops on something the PS4 survives),
+  start the app again: the run of that SDK goes on with the section after the one that ended it.
+  The results file keeps what was written and gets a line "== RESUMED: the app ended in section
+  ..." at that place. Every such stop costs one start of the app; with the 12 SDK versions of the
+  chain a build that stops once per SDK needs 12. The single-SDK package (12.00) needs one per
+  stop.
+  What comes after a RESUMED line ran in a new process (pool empty, direct memory free), so it
+  can differ from a run in one piece for that reason; compare_runs.py marks those lines. The
+  probes left in the section that ended are not run; the script lists them.
+  To run an SDK from the start again, delete its dmem_results_<SDK>.txt.
 
 SECTIONS
   S  the probes themselves (query of an allocated / mapped page); nothing else runs if they fail
